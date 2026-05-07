@@ -1,0 +1,277 @@
+{
+  "manifest_version": 3,
+  "name": "Search-Hit-Hider",
+  "version": "1.0.17",
+  "description": "Hide unwanted domains from search results with one click. Supports Google, DuckDuckGo, Bing, Yandex, Baidu, and Brave Search.",
+  "author": "Istiaq-Edu",
+  "homepage_url": "https://github.com/Istiaq-Edu/Search-Hit-Hider",
+
+  "icons": {
+    "16": "assets/icons/icon-16.png",
+    "32": "assets/icons/icon-32.png",
+    "48": "assets/icons/icon-48.png",
+    "96": "assets/icons/icon-96.png",
+    "128": "assets/icons/icon-128.png"
+  },
+
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_icon": {
+      "16": "assets/icons/icon-16.png",
+      "32": "assets/icons/icon-32.png",
+      "48": "assets/icons/icon-48.png",
+      "128": "assets/icons/icon-128.png"
+    },
+    "default_title": "Search-Hit-Hider"
+  },
+
+  "background": {
+    "scripts": ["background/service-worker.js"],
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.google.com/*",
+        "*://*.google.co.uk/*",
+        "*://*.google.ca/*",
+        "*://*.google.com.au/*",
+        "*://*.google.de/*",
+        "*://*.google.fr/*",
+        "*://*.google.co.jp/*",
+        "*://*.google.co.in/*",
+        "*://*.google.com.br/*",
+        "*://*.google.ru/*",
+        "*://*.google.it/*",
+        "*://*.google.es/*",
+        "*://*.google.nl/*",
+        "*://*.google.pl/*",
+        "*://*.google.com.mx/*",
+        "*://*.google.com.tw/*",
+        "*://*.google.com.hk/*",
+        "*://*.google.be/*",
+        "*://*.google.ch/*",
+        "*://*.google.at/*",
+        "*://*.google.se/*",
+        "*://*.google.no/*",
+        "*://*.google.dk/*",
+        "*://*.google.fi/*",
+        "*://*.google.com.ar/*",
+        "*://*.google.com.tr/*",
+        "*://*.google.gr/*",
+        "*://*.google.pt/*",
+        "*://*.google.ro/*",
+        "*://*.google.hu/*",
+        "*://*.google.cz/*",
+        "*://*.google.co.nz/*",
+        "*://*.google.co.za/*",
+        "*://*.google.ie/*",
+        "*://*.google.com.sg/*",
+        "*://*.google.co.id/*",
+        "*://*.google.com.ua/*",
+        "*://*.google.com.ph/*",
+        "*://*.google.com.vn/*",
+        "*://*.google.com.sa/*",
+        "*://*.google.ae/*",
+        "*://duckduckgo.com/*",
+        "*://noai.duckduckgo.com/*",
+        "*://start.duckduckgo.com/*",
+        "*://safe.duckduckgo.com/*",
+        "*://www.bing.com/*",
+        "*://yandex.com/*",
+        "*://yandex.ru/*",
+        "*://yandex.by/*",
+        "*://yandex.kz/*",
+        "*://yandex.ua/*",
+        "*://yandex.tr/*",
+        "*://yandex.fr/*",
+        "*://yandex.de/*",
+        "*://ya.ru/*",
+        "*://www.baidu.com/*",
+        "*://search.brave.com/*",
+        "*://search.brave4u7jddbv7cyvyptnt5corw0tamlzo53lwd5s7vm223nr3ro2ryd.onion/*"
+      ],
+      "css": ["content/preload.css"],
+      "js": ["content/preload.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "*://*.google.com/*",
+        "*://*.google.co.uk/*",
+        "*://*.google.ca/*",
+        "*://*.google.com.au/*",
+        "*://*.google.de/*",
+        "*://*.google.fr/*",
+        "*://*.google.co.jp/*",
+        "*://*.google.co.in/*",
+        "*://*.google.com.br/*",
+        "*://*.google.ru/*",
+        "*://*.google.it/*",
+        "*://*.google.es/*",
+        "*://*.google.nl/*",
+        "*://*.google.pl/*",
+        "*://*.google.com.mx/*",
+        "*://*.google.com.tw/*",
+        "*://*.google.com.hk/*",
+        "*://*.google.be/*",
+        "*://*.google.ch/*",
+        "*://*.google.at/*",
+        "*://*.google.se/*",
+        "*://*.google.no/*",
+        "*://*.google.dk/*",
+        "*://*.google.fi/*",
+        "*://*.google.com.ar/*",
+        "*://*.google.com.tr/*",
+        "*://*.google.gr/*",
+        "*://*.google.pt/*",
+        "*://*.google.ro/*",
+        "*://*.google.hu/*",
+        "*://*.google.cz/*",
+        "*://*.google.co.nz/*",
+        "*://*.google.co.za/*",
+        "*://*.google.ie/*",
+        "*://*.google.com.sg/*",
+        "*://*.google.co.id/*",
+        "*://*.google.com.ua/*",
+        "*://*.google.com.ph/*",
+        "*://*.google.com.vn/*",
+        "*://*.google.com.sa/*",
+        "*://*.google.ae/*"
+      ],
+      "js": ["content/index.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "*://duckduckgo.com/*",
+        "*://noai.duckduckgo.com/*",
+        "*://start.duckduckgo.com/*",
+        "*://safe.duckduckgo.com/*"
+      ],
+      "js": ["content/index.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "*://www.bing.com/*"
+      ],
+      "js": ["content/index.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "*://yandex.com/*",
+        "*://yandex.ru/*",
+        "*://yandex.by/*",
+        "*://yandex.kz/*",
+        "*://yandex.ua/*",
+        "*://yandex.tr/*",
+        "*://yandex.fr/*",
+        "*://yandex.de/*",
+        "*://ya.ru/*"
+      ],
+      "js": ["content/index.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "*://www.baidu.com/*"
+      ],
+      "js": ["content/index.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "*://search.brave.com/*",
+        "*://search.brave4u7jddbv7cyvyptnt5corw0tamlzo53lwd5s7vm223nr3ro2ryd.onion/*"
+      ],
+      "js": ["content/index.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+
+  "permissions": [
+    "storage"
+  ],
+
+  "host_permissions": [
+    "*://*.google.com/*",
+    "*://*.google.co.uk/*",
+    "*://*.google.ca/*",
+    "*://*.google.com.au/*",
+    "*://*.google.de/*",
+    "*://*.google.fr/*",
+    "*://*.google.co.jp/*",
+    "*://*.google.co.in/*",
+    "*://*.google.com.br/*",
+    "*://*.google.ru/*",
+    "*://*.google.it/*",
+    "*://*.google.es/*",
+    "*://*.google.nl/*",
+    "*://*.google.pl/*",
+    "*://*.google.com.mx/*",
+    "*://*.google.com.tw/*",
+    "*://*.google.com.hk/*",
+    "*://*.google.be/*",
+    "*://*.google.ch/*",
+    "*://*.google.at/*",
+    "*://*.google.se/*",
+    "*://*.google.no/*",
+    "*://*.google.dk/*",
+    "*://*.google.fi/*",
+    "*://*.google.com.ar/*",
+    "*://*.google.com.tr/*",
+    "*://*.google.gr/*",
+    "*://*.google.pt/*",
+    "*://*.google.ro/*",
+    "*://*.google.hu/*",
+    "*://*.google.cz/*",
+    "*://*.google.co.nz/*",
+    "*://*.google.co.za/*",
+    "*://*.google.ie/*",
+    "*://*.google.com.sg/*",
+    "*://*.google.co.id/*",
+    "*://*.google.com.ua/*",
+    "*://*.google.com.ph/*",
+    "*://*.google.com.vn/*",
+    "*://*.google.com.sa/*",
+    "*://*.google.ae/*",
+    "*://duckduckgo.com/*",
+    "*://noai.duckduckgo.com/*",
+    "*://start.duckduckgo.com/*",
+    "*://safe.duckduckgo.com/*",
+    "*://www.bing.com/*",
+    "*://yandex.com/*",
+    "*://yandex.ru/*",
+    "*://yandex.by/*",
+    "*://yandex.kz/*",
+    "*://yandex.ua/*",
+    "*://yandex.tr/*",
+    "*://yandex.fr/*",
+    "*://yandex.de/*",
+    "*://ya.ru/*",
+    "*://www.baidu.com/*",
+    "*://search.brave.com/*",
+    "*://search.brave4u7jddbv7cyvyptnt5corw0tamlzo53lwd5s7vm223nr3ro2ryd.onion/*"
+  ],
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "{b7e3a1d2-4f8c-4a9e-b5d6-2c0f1e3a7b9d}",
+      "strict_min_version": "112.0",
+      "data_collection_permissions": {
+        "required": ["none"],
+        "optional": []
+      }
+    }
+  }
+}

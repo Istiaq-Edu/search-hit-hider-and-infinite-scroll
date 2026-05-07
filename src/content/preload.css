@@ -1,0 +1,65 @@
+/*
+ * preload.css — injected by the browser engine before any DOM is parsed.
+ *
+ * WHY A STATIC CSS FILE (not adoptedStyleSheets in JS):
+ *   CSS files registered under "css" in manifest.json are applied by the
+ *   browser at the stylesheet cascade level — earlier than document_start
+ *   JavaScript and, critically, they are RE-APPLIED automatically on
+ *   bfcache (back/forward cache) restoration without any JS needing to run.
+ *
+ *   adoptedStyleSheets injected by the preload JS are part of the JS
+ *   execution context, which is frozen/discarded during bfcache.  When the
+ *   page is restored from bfcache, those sheets are gone — blocked results
+ *   become briefly visible until the content script re-hides them (flicker).
+ *   A static CSS file is immune to this: the browser always re-applies it.
+ *
+ * RULES IN THIS FILE:
+ *   Rule 1 — [data-shh-preloaded] display:none
+ *     Keeps results the preload JS marked as blocked permanently hidden.
+ *     After bfcache the attribute survives in the DOM; this CSS rule
+ *     re-instates display:none before any JS runs or paints occur.
+ *
+ *   Rule 2 — html[data-shh-active] Google result cover
+ *     Hides ALL result containers the instant they appear in the DOM, until
+ *     the preload JS confirms each one is safe (data-shh-ok) or blocked
+ *     (data-shh-preloaded).  Prevents the two-step hydration flicker where
+ *     Google inserts an empty shell (visible) then populates it with links.
+ *     The html[data-shh-active] guard ensures this only runs when the user
+ *     has a non-empty block list.  data-shh-active is set synchronously by
+ *     the preload JS (at document_start, before any body elements are parsed)
+ *     and survives bfcache, so the cover is active on restoration too.
+ *
+ *     Targets BOTH classic (div.g) and 2025 (div.tF2Cxc) result cards:
+ *       div.g       — pre-2025 Google SERP result container
+ *       div.tF2Cxc  — 2025 Google per-result card (replaced div.g)
+ *
+ *   WHY opacity:0 NOT visibility:hidden:
+ *     visibility:hidden can be defeated by children that have an explicit
+ *     visibility:visible rule — which Google's own stylesheets set on many
+ *     inner elements (h3, cite rows, etc.), making those children visible
+ *     despite the parent being visibility:hidden.
+ *     opacity:0 on a parent makes the ENTIRE subtree invisible with no
+ *     exceptions: children cannot override the parent stacking context's
+ *     opacity.  It also preserves layout (no reflow), the same benefit
+ *     visibility:hidden was originally chosen for.
+ */
+
+/* ── Rule 1: Keep preload-blocked results hidden ──────────────────────── */
+[data-shh-preloaded="true"] {
+  display: none !important;
+}
+
+/* ── Rule 2: Google cover — hide all result shells until evaluated ──────
+   Selector breakdown:
+     html[data-shh-active]        — only when block list is non-empty
+     div.g / div.tF2Cxc           — top-level organic result cards only
+       div.g:not(.g .g)           — classic (pre-2025), no nested .g children
+       div.tF2Cxc:not(.tF2Cxc .tF2Cxc) — 2025 layout, no nested tF2Cxc
+     :not([data-shh-ok])          — not yet confirmed as safe
+     :not([data-shh-preloaded])   — not already hidden by Rule 1
+*/
+html[data-shh-active] div.g:not(.g .g):not([data-shh-ok]):not([data-shh-preloaded]),
+html[data-shh-active] div.tF2Cxc:not(.tF2Cxc .tF2Cxc):not([data-shh-ok]):not([data-shh-preloaded]) {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}

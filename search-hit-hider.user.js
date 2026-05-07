@@ -85,6 +85,11 @@ function injectBaseCSS() {
       ".shhinfo{font-size:12px;line-height:9px;position:absolute;top:0;right:0;z-index:1001;border:4px solid transparent;border-radius:4px;border-bottom-left-radius:8px;border-top-left-radius:8px;margin-top:1px;padding-left:1px} " +
       ".shhdel{text-decoration:line-through;color:#333;} .shhpb{text-decoration:none;color:#f00;} " +
       ".shhblk{text-decoration:none;color:#333;} .shhd{position:relative;line-height:1.2em;cursor:pointer;} " +
+      ".shhchk{display:block;position:absolute;left:2px;top:3px;z-index:1002;} .shhchk input{width:14px;height:14px;cursor:pointer;} " +
+      ".shhblk::before,.shhpb::before{content:;display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;} .shhblk::before{background:#f90;} .shhpb::before{background:#f00;} " +
+      "#shhbulkbar{display:none;background:#eee;border:1px solid #ccc;border-radius:3px;padding:6px;margin-bottom:6px;text-align:center;} #shhbulkbar button{font-size:12px;padding:3px 8px;margin:0 4px;cursor:pointer;} " +
+      "#shhdelsel{background:#f66;color:#fff;border:1px solid #c00;} #shhchgpb{background:#f90;color:#fff;border:1px solid #c80;} #shhchgblk{background:#9f6;color:#fff;border:1px solid #0a0;} " +
+      "#shhtoast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:10px 20px;border-radius:4px;z-index:10000;display:none;font-size:13px;} #shhtoast button{background:#9f6;border:none;padding:4px 12px;margin-left:10px;cursor:pointer;border-radius:3px;} " +
       ".shhindent{position:absolute;left:350px;top:-3px;} #btnedit p{margin:2px 4px 4px 4px;} #shhblockform input[type='radio'], #shhmngform input[type='radio']{vertical-align:baseline !important;margin-top:5px;margin-bottom:1px} " +
       "#shhblockform label, #shhmngform label{display:inline;font-weight:normal;font-size:unset;} .shhtbl{border:1px solid black;border-collapse:collapse} .shhtbl td, .shhtbl th{border:1px solid black;padding:2px 4px;} " +
       "#shhtsdiv{margin:0 -1.5em;padding:0 3px 0 8px;border-bottom:1px solid #ccc;} #shhtstrip{padding-bottom:0;} " +
@@ -2668,10 +2673,12 @@ function addManageForm() {
     '">Greasy Fork</a>.</p></div></div>' +
     '<div id="shhmt2" style="display:none"><p>Regular blocked URLs <span class="shhlistmeta" id="shhblockcount">(0)</span></p>' +
     '<p class="shhlistmeta">These collapse to a one-line notice when hit notices are shown. Click a URL to mark it for unblock or move to Perma-ban, then save.</p>' +
+    '<div id="shhbulkbar"><label><input type="checkbox" id="shhselall"> Select All</label> <button type="button" id="shhdelsel">Delete Selected</button> <button type="button" id="shhchgpb">Change to Perma-ban</button></div>' +
     '<div class="shhtab"><p class="shhlistempty" id="shhblockempty">No regular blocked URLs yet.</p><ul id="shhsitelist"></ul></div></div>\n' +
     '<div id="shhmt3" style="display:none"><p>Perma-ban URLs <span class="shhlistmeta" id="shhpbancount">(0)</span></p>' +
     '<p class="shhlistmeta">These disappear completely from results. Click a URL to mark it for unblock or move back to regular Block, then save.</p>' +
-    '<div class="shhtab"><p class="shhlistempty" id="shhpbanempty">No Perma-ban URLs yet.</p><ul id="shhpbanlist"></ul></div></div>' +
+    '<div id="shhbulkbar"><label><input type="checkbox" id="shhselall"> Select All</label> <button type="button" id="shhdelsel">Delete Selected</button> <button type="button" id="shhchgblk">Change to Blocked</button></div>' +
+    '<div class="shhtab"><p class="shhlistempty" id="shhpbanempty">No perma-ban URLs yet.</p><ul id="shhpbanlist"></ul></div></div>' +
     '<div id="shhmt4" style="display:none"><p>Manage script options:</p>' +
     '<div class="shhtab" id="btnedit">' +
     '<p id="addradios">Add newly blocked domains:<br>' +
@@ -2752,6 +2759,10 @@ function addManageForm() {
     txts.unwwwbtn[0] +
     "</button></p></form>";
   document.body.appendChild(mfd);
+  var shhtoast = document.createElement("div");
+  shhtoast.id = "shhtoast";
+  shhtoast.innerHTML = '<span id="shhtoastmsg"></span><button type="button" id="shhtoastundo">Undo</button>';
+  document.body.appendChild(shhtoast);
   fixShowHideBtn();
   fixuistyle();
   fixaddpos();
@@ -2822,6 +2833,13 @@ function addManageForm() {
   document.getElementById("shhmf7").addEventListener("click", importlist, true);
   document.getElementById("shhmf8").addEventListener("click", addAllNow, true);
   document.getElementById("shhmf9").addEventListener("click", unwww, true);
+  document.querySelectorAll("#shhbulkbar").forEach(function(bar) {
+    bar.querySelector("input[type=checkbox]").addEventListener("change", toggleSelectAll, true);
+    bar.querySelector("#shhdelsel").addEventListener("click", bulkDelete, true);
+    var chgbtn = bar.querySelector("#shhchgpb, #shhchgblk");
+    if (chgbtn) chgbtn.addEventListener("click", bulkToggleStatus, true);
+  });
+  document.getElementById("shhtoastundo").addEventListener("click", undoDelete, true);
 }
 function togglelist(e) {
   // Change tabs
@@ -2891,7 +2909,16 @@ function togglesite(e) {
   // Designate list items for unblock, pban or block
   var t, l, s, pid;
   t = e.target;
+  if (t.tagName === "INPUT" && t.type === "checkbox") return;
+  if (t.className && t.className.indexOf("shhchk") >= 0) {
+    var hostSpan = t.querySelector(".shhhost");
+    if (hostSpan) t = hostSpan;
+  }
   if (t.className == "shhinfo") t = t.nextElementSibling;
+  if (t.tagName === "LABEL") {
+    var hostSpan = t.querySelector(".shhhost");
+    if (hostSpan) t = hostSpan;
+  }
   l = t.parentNode;
   pid = l.parentNode.id;
   switch (t.className) {
@@ -2955,7 +2982,9 @@ async function saveedits(e) {
   ptemp = "";
   for (i = 0; i < slist.children.length; i++) {
     if (slist.children[i].nodeName == "LI") {
-      sp = slist.children[i].children[1];
+      var label = slist.children[i].children[0];
+      var sp = label.querySelector(".shhhost");
+      if (!sp) continue;
       switch (sp.className) {
         case "shhhost shhblk":
           ttemp += sp.textContent + ":t|";
@@ -2971,8 +3000,10 @@ async function saveedits(e) {
   slist = document.getElementById("shhpbanlist");
   for (i = 0; i < slist.children.length; i++) {
     if (slist.children[i].nodeName == "LI") {
-      sp = slist.children[i].children[1];
-      switch (sp.className) {
+      var label2 = slist.children[i].children[0];
+      var sp2 = label2.querySelector(".shhhost");
+      if (!sp2) continue;
+      switch (sp2.className) {
         case "shhhost shhblk":
           ttemp += sp.textContent + ":t|";
           break;
@@ -3009,16 +3040,20 @@ function refreshSiteList() {
   if (blist.substr(0, 1) != "|") blist = "|" + blist;
   sarray = blist.substr(1).split("|");
   for (i = 0; i < sarray.length - 1; i++) {
+    var urlPart = sarray[i].split(":")[0];
+    var displayUrl = urlPart.length > 50 ? urlPart.substring(0, 47) + "..." : urlPart;
     if (sarray[i].indexOf(":p") < 0) {
       slist +=
-        '<li><span class="shhinfo"></span><span class="shhhost shhblk">' +
-        sarray[i].split(":")[0] +
+        '<li><label class="shhchk"><input type="checkbox" name="shhurl" value="' + urlPart + '">' +
+        '<span class="shhinfo"></span><span class="shhhost shhblk" title="' + urlPart + '">' +
+        displayUrl +
         "</span></li>";
       bcount++;
     } else {
       pblist +=
-        '<li><span class="shhinfo"></span><span class="shhhost shhpb">' +
-        sarray[i].split(":")[0] +
+        '<li><label class="shhchk"><input type="checkbox" name="shhurl" value="' + urlPart + '">' +
+        '<span class="shhinfo"></span><span class="shhhost shhpb" title="' + urlPart + '">' +
+        displayUrl +
         "</span></li>";
       pcount++;
     }
@@ -3046,6 +3081,100 @@ function refreshSiteList() {
     document.getElementById("shhpbanempty").style.display =
       pcount === 0 ? "block" : "none";
   needupdate = false;
+}
+var shhDeletedItems = [];
+var shhDeletedUrls = [];
+function toggleSelectAll(e) {
+  var checked = e.target.checked;
+  var list = e.target.closest("#shhbulkbar").nextElementSibling.querySelector("ul");
+  list.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = checked; });
+}
+function bulkDelete(e) {
+  var bar = e.target.closest("#shhbulkbar");
+  var list = bar.nextElementSibling.querySelector("ul");
+  var isPbanTab = bar.closest("#shhmt3").length > 0;
+  var checkboxes = list.querySelectorAll("input[type=checkbox]:checked");
+  if (checkboxes.length === 0) return;
+  var urls = [];
+  var li, url;
+  checkboxes.forEach(function(cb) {
+    url = cb.value;
+    li = cb.closest("li");
+    urls.push(url);
+    shhDeletedUrls.push(url + (isPbanTab ? ":p" : ":t"));
+    li.style.display = "none";
+  });
+  showToast("Deleted " + urls.length + " URL(s)", function() {
+    urls.forEach(function(url) {
+      removeUrlFromList(url);
+    });
+    saveList();
+    refreshSiteList();
+  });
+}
+function bulkToggleStatus(e) {
+  var bar = e.target.closest("#shhbulkbar");
+  var list = bar.nextElementSibling.querySelector("ul");
+  var checkboxes = list.querySelectorAll("input[type=checkbox]:checked");
+  if (checkboxes.length === 0) return;
+  var isToPban = !!document.getElementById("shhchgpb");
+  var suffix = isToPban ? ":p" : ":t";
+  checkboxes.forEach(function(cb) {
+    var li = cb.closest("li");
+    var span = li.querySelector(".shhhost");
+    var currentUrl = cb.value;
+    removeUrlFromList(currentUrl);
+    addUrlToList(currentUrl, isToPban);
+  });
+  saveList();
+  refreshSiteList();
+  showToast(checkboxes.length + " URL(s) changed to " + (isToPban ? "Perma-ban" : "Blocked"));
+}
+function removeUrlFromList(url) {
+  if (blist.indexOf(url) < 0) return;
+  var parts = blist.split("|");
+  var newParts = [];
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] && parts[i].split(":")[0] !== url) newParts.push(parts[i]);
+  }
+  blist = "|" + newParts.join("|") + "|";
+}
+function addUrlToList(url, isPban) {
+  var suffix = isPban ? ":p" : ":t";
+  removeUrlFromList(url);
+  blist += url + suffix + "|";
+}
+async function saveList() {
+  if (!GM4) {
+    GM_setValue("hideyhosts", blist);
+    blist = GM_getValue("hideyhosts");
+  } else {
+    await GM.setValue("hideyhosts", blist);
+    blist = await GM.getValue("hideyhosts");
+  }
+  hidehits(null, true);
+}
+function showToast(msg, undoFn) {
+  var toast = document.getElementById("shhtoast");
+  var toastmsg = document.getElementById("shhtoastmsg");
+  var undobtn = document.getElementById("shhtoastundo");
+  toastmsg.textContent = msg;
+  toast.style.display = "block";
+  if (undoFn) {
+    undobtn.style.display = "inline-block";
+    undobtn.onclick = function() {
+      if (undoFn) undoFn();
+      toast.style.display = "none";
+    };
+    setTimeout(function() { toast.style.display = "none"; }, 5000);
+  } else {
+    undobtn.style.display = "none";
+    setTimeout(function() { toast.style.display = "none"; }, 3000);
+  }
+}
+function undoDelete(e) {
+  var toast = document.getElementById("shhtoast");
+  toast.style.display = "none";
 }
 async function updtaddpos(e) {
   // Implement change for radio buttons re where to add to list

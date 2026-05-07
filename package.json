@@ -1,0 +1,31 @@
+{
+  "name": "search-hit-hider",
+  "version": "1.0.17",
+  "description": "Firefox extension to hide unwanted domains from search results",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "watch": "node build.js --watch",
+    "lint:ts": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "webext:lint": "web-ext lint --source-dir=dist",
+    "webext:build": "web-ext build --source-dir=dist --artifacts-dir=releases",
+    "package": "node build.js && web-ext build --source-dir=dist --artifacts-dir=releases"
+  },
+  "dependencies": {
+    "preact": "^10.22.0",
+    "tldts": "^6.1.32"
+  },
+  "devDependencies": {
+    "@types/firefox-webext-browser": "^120.0.4",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "esbuild": "^0.21.5",
+    "sharp": "^0.34.5",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0",
+    "web-ext": "^8.3.0"
+  }
+}

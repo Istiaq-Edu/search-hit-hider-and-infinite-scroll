@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Search-Hit-Hider</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #ffffff;
+      --bg-2: #f5f5f5;
+      --bg-3: #ebebeb;
+      --text: #1a1a1a;
+      --text-2: #555555;
+      --text-3: #888888;
+      --border: #d0d0d0;
+      --accent: #4a90e2;
+      --accent-hover: #3579cc;
+      --danger: #d9534f;
+      --success: #5cb85c;
+      --warn: #e5a000;
+      --radius: 6px;
+      --radius-sm: 4px;
+      --shadow: 0 1px 4px rgba(0,0,0,0.10);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1e1e1e;
+        --bg-2: #2a2a2a;
+        --bg-3: #333333;
+        --text: #e8e8e8;
+        --text-2: #aaaaaa;
+        --text-3: #777777;
+        --border: #444444;
+        --shadow: 0 1px 4px rgba(0,0,0,0.40);
+      }
+    }
+
+    [data-theme="light"] {
+      --bg: #ffffff; --bg-2: #f5f5f5; --bg-3: #ebebeb;
+      --text: #1a1a1a; --text-2: #555555; --text-3: #888888; --border: #d0d0d0;
+    }
+    [data-theme="dark"] {
+      --bg: #1e1e1e; --bg-2: #2a2a2a; --bg-3: #333333;
+      --text: #e8e8e8; --text-2: #aaaaaa; --text-3: #777777; --border: #444444;
+    }
+
+    html, body {
+      width: 440px;
+      height: 600px;       /* fixed popup height — Firefox clamps at ~600px */
+      overflow: hidden;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 13px;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;        /* fill the fixed body height exactly */
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg-2); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="index.js"></script>
+</body>
+</html>
