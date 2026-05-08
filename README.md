@@ -7,6 +7,8 @@
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-green)](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json)
 [![Version](https://img.shields.io/badge/version-1.0.17-informational)](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
 
+[![Get it on Firefox Add-ons](https://img.shields.io/badge/Get%20it%20on-Firefox%20Add--ons-FF7139?style=for-the-badge&logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/en-US/firefox/addon/search-hit-hider/)
+
 ---
 
 ## What it does
@@ -14,6 +16,18 @@
 When you search on Google, DuckDuckGo, Bing, Yandex, Baidu, or Brave Search, a small **block** button appears next to each result. Click it to hide that domain from all future searches. Blocked results are replaced with a quiet placeholder that lets you show or unblock them any time.
 
 No accounts. No servers. No tracking. Everything lives in your browser.
+
+---
+
+## Showcase
+
+### Block list management
+
+![Search-Hit-Hider popup showing blocked domain management](showcase/demo-1.png)
+
+### Collapsed and temporarily shown results
+
+![Search results with hidden placeholders, Show, Unblock, and Perma actions](showcase/demo-2.PNG)
 
 ---
 
@@ -70,7 +84,7 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 ## Installation
 
 ### From Firefox Add-ons (AMO)
-*Coming soon — AMO review in progress.*
+Install Search-Hit-Hider from [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/search-hit-hider/).
 
 ### Manual (from a release zip)
 1. Download the latest `search-hit-hider-vX.X.X.zip` from [Releases](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
