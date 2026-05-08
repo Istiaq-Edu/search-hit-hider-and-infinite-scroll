@@ -88,9 +88,19 @@ jobs:
             --exclude '*.zip'
           zip -r "artifacts/search-hit-hider-source-${{ inputs.version }}.zip" source-review
 
-      - name: Upload review zips
+      - name: List generated zips
+        run: ls -lh artifacts
+
+      - name: Upload extension submission zip
         uses: actions/upload-artifact@v4
         with:
-          name: search-hit-hider-${{ inputs.version }}-review-zips
-          path: artifacts/*.zip
+          name: search-hit-hider-${{ inputs.version }}-extension-submission
+          path: artifacts/search-hit-hider-${{ inputs.version }}.zip
+          if-no-files-found: error
+
+      - name: Upload source review zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-hit-hider-${{ inputs.version }}-source-review
+          path: artifacts/search-hit-hider-source-${{ inputs.version }}.zip
           if-no-files-found: error
