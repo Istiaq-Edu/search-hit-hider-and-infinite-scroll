@@ -1,0 +1,96 @@
+name: Manual Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 1.0.18"
+        required: true
+        type: string
+
+jobs:
+  package:
+    name: Build review zips
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate version
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$'; then
+            echo "Invalid version: $VERSION"
+            echo "Use a WebExtension-compatible version like 1.0.18."
+            exit 1
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Apply manual version
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.VERSION;
+
+          for (const file of ['package.json', 'manifest.json']) {
+            const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+            json.version = version;
+            fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+          }
+
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          lock.version = version;
+          if (lock.packages && lock.packages['']) {
+            lock.packages[''].version = version;
+          }
+          fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
+          NODE
+        env:
+          VERSION: ${{ inputs.version }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run lint:ts
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint extension package
+        run: npm run webext:lint
+
+      - name: Create extension submission zip
+        run: |
+          mkdir -p artifacts
+          (cd dist && zip -r "../artifacts/search-hit-hider-${{ inputs.version }}.zip" .)
+
+      - name: Create source review zip
+        run: |
+          mkdir -p artifacts source-review
+          rsync -a ./ source-review/ \
+            --exclude .git/ \
+            --exclude .github/ \
+            --exclude artifacts/ \
+            --exclude dist/ \
+            --exclude node_modules/ \
+            --exclude releases/ \
+            --exclude source-review/ \
+            --exclude '*.zip'
+          zip -r "artifacts/search-hit-hider-source-${{ inputs.version }}.zip" source-review
+
+      - name: Upload review zips
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-hit-hider-${{ inputs.version }}-review-zips
+          path: artifacts/*.zip
+          if-no-files-found: error

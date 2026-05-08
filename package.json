@@ -2,6 +2,7 @@
   "name": "search-hit-hider",
   "version": "1.0.17",
   "description": "Firefox extension to hide unwanted domains from search results",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {

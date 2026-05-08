@@ -32,7 +32,8 @@ export function hideResult(
   url: string,
   showNotices: boolean,
   onShowOnce: (node: Element) => void,
-  onUnblock: (domain: string) => void
+  onUnblock: (domain: string) => void,
+  onPermaban: (domain: string, node: Element) => void
 ): void {
   if (node.getAttribute(ATTR_SHH_RESULT)) return; // already processed
 
@@ -57,10 +58,22 @@ export function hideResult(
     const placeholder = buildPlaceholder(
       result.domain,
       () => onShowOnce(node),
-      () => onUnblock(result.domain)
+      () => onUnblock(result.domain),
+      () => onPermaban(result.domain, node)
     );
     node.parentElement?.insertBefore(placeholder, node);
   }
+}
+
+export function convertHiddenToPermaban(node: Element): void {
+  const placeholder = findPlaceholder(node);
+  if (placeholder) placeholder.remove();
+
+  node.setAttribute(ATTR_SHH_RESULT, "pban");
+  node.removeAttribute(ATTR_SHH_MODE);
+  (node as HTMLElement).style.setProperty("display", "none", "important");
+  node.classList.remove(CLASS_HIDDEN, CLASS_SHOWN_RESULT);
+  node.classList.add(CLASS_PBAN);
 }
 
 /**
@@ -114,7 +127,8 @@ export function rehideResult(
   url: string,
   showNotices: boolean,
   onShowOnce: (node: Element) => void,
-  onUnblock: (domain: string) => void
+  onUnblock: (domain: string) => void,
+  onPermaban: (domain: string, node: Element) => void
 ): void {
   node.querySelector("." + CLASS_SHOWN_NOTICE)?.remove();
   node.classList.remove(CLASS_SHOWN_RESULT);
@@ -129,7 +143,7 @@ export function rehideResult(
   node.removeAttribute(ATTR_SHH_MODE);
   node.classList.remove(CLASS_HIDDEN);
 
-  hideResult(node, result, url, showNotices, onShowOnce, onUnblock);
+  hideResult(node, result, url, showNotices, onShowOnce, onUnblock, onPermaban);
 }
 
 /**
@@ -193,7 +207,8 @@ export function restoreByDomain(domain: string): Element[] {
 function buildPlaceholder(
   domain: string,
   onShowOnce: () => void,
-  onUnblock: () => void
+  onUnblock: () => void,
+  onPermaban: () => void
 ): HTMLElement {
   const div = document.createElement("div");
   div.className = CLASS_PLACEHOLDER;
@@ -231,7 +246,17 @@ function buildPlaceholder(
     onUnblock();
   });
 
-  div.append(domainSpan, sep, label, showBtn, unblockBtn);
+  const permaBtn = document.createElement("button");
+  permaBtn.type = "button";
+  permaBtn.className = "shh-btn shh-btn-perma";
+  permaBtn.textContent = "Perma";
+  permaBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    div.remove();
+    onPermaban();
+  });
+
+  div.append(domainSpan, sep, label, showBtn, unblockBtn, permaBtn);
   return div;
 }
 

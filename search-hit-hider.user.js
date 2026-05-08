@@ -4,7 +4,7 @@
 // @namespace   https://github.com/Istiaq-Edu/Search-Hit-Hider
 // @version     2.3.9.1
 // @copyright   Copyright 2026 Istiaq-Edu
-// @license     BSD-3-Clause
+// @license     MIT
 // @description Block unwanted sites from targeted search result pages including Google, DuckDuckGo, Startpage.com, Bing, Yahoo and Yandex. Search-Hit-Hider v2.3.9.1
 // @include     http*://www.google.*/*
 // @exclude http*://www.google.com/recaptcha/*

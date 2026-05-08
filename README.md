@@ -2,7 +2,7 @@
 
 > A Firefox extension that hides unwanted domains from search results — one click to block, one click to undo.
 
-[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firefox](https://img.shields.io/badge/Firefox-112%2B-orange)](https://www.mozilla.org/firefox/)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-green)](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json)
 [![Version](https://img.shields.io/badge/version-1.0.17-informational)](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
@@ -182,8 +182,8 @@ Bug reports and pull requests are welcome. Please open an issue first for any si
 
 ## Credits & License
 
-**BSD-3-Clause © 2026 Istiaq-Edu**
+**MIT © 2026 Istiaq-Edu**
 
-Built upon [Google Hit Hider by Domain](https://greasyfork.org/en/scripts/1682-google-hit-hider-by-domain-search-filter-block-sites) by Jefferson Scher, published on Greasy Fork. Upstream copyright notice is retained in accordance with the BSD-3-Clause license requirements.
+Built upon [Google Hit Hider by Domain](https://greasyfork.org/en/scripts/1682-google-hit-hider-by-domain-search-filter-block-sites) by Jefferson Scher, published on Greasy Fork. Upstream copyright notice retained as attribution.
 
-See [LICENSE](LICENSE) for the full license text.
+See [LICENSE](LICENSE) for the full MIT license text.

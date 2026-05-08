@@ -91,7 +91,7 @@ export function About() {
           License & Credits
         </div>
         <div style={{ fontSize: "11px", color: "var(--text-2)", lineHeight: "1.6" }}>
-          <strong>BSD-3-Clause</strong> © 2026 Istiaq-Edu<br /><br />
+          <strong>MIT</strong> © 2026 Istiaq-Edu<br /><br />
           Built upon <em>Google Hit Hider by Domain</em> by Jefferson Scher,
           published on{" "}
           <a
@@ -102,7 +102,7 @@ export function About() {
           >
             Greasy Fork
           </a>
-          . Upstream copyright notice retained per BSD-3-Clause requirements.
+          . Upstream copyright notice retained as attribution.
         </div>
       </div>
     </div>

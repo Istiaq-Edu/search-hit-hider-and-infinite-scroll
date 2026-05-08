@@ -92,7 +92,7 @@ function getBaseCSS(colors: {
 }
 
 /* ── Placeholder (balanced — noticeable but not distracting) ─── */
-/* "example.com · hidden  [show] [unblock]"
+/* "example.com · hidden  [show] [unblock] [perma]"
    Light background strip with a faint navy left accent.
    Readable but calm — sits between invisible and eye-catching. */
 .shh-placeholder {
@@ -153,6 +153,13 @@ function getBaseCSS(colors: {
 }
 .shh-btn-unblock:hover {
   color: ${colors.isDark ? "#77bb77" : "#226622"};
+}
+/* "Perma" — muted red to signal the stronger hide mode */
+.shh-btn-perma {
+  color: ${colors.isDark ? "#8a5a5a" : "#9a4a4a"};
+}
+.shh-btn-perma:hover {
+  color: ${colors.isDark ? "#c87878" : "#7a2222"};
 }
 /* "Hide Again" — neutral */
 .shh-btn-rehide {

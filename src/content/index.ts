@@ -1,13 +1,13 @@
 import type { BlockEntry, Prefs } from "../shared/types";
 import { detectEngine } from "./engines/registry";
 import { DomainMatcher } from "./blocking/matcher";
-import { hideResult, showOnce, rehideResult, restoreByDomain, getHiddenNodes } from "./blocking/hider";
+import { hideResult, showOnce, rehideResult, restoreByDomain, getHiddenNodes, convertHiddenToPermaban, restoreResult } from "./blocking/hider";
 import { ResultObserver } from "./blocking/observer";
 import { injectBaseStyles } from "./ui/styles";
 import { injectBlockButton } from "./ui/block-button";
 import { showBlockDialog } from "./ui/block-dialog";
 import { showToast } from "./ui/toast";
-import { getList, getPrefs, addEntry, removeEntry, undoLast } from "./messaging";
+import { getList, getPrefs, addEntry, removeEntry, updateEntry, undoLast } from "./messaging";
 
 // ============================================================
 // Content script entry point
@@ -207,8 +207,38 @@ function processResults(nodes: Element[]): void {
         showOnce(n, domain, () => doRehide(n), doUnblock);
       };
 
+      const doPermaban = async (d: string, n: Element) => {
+        entries = entries.map((entry) =>
+          entry.domain === d ? { ...entry, mode: "pban", enabled: true } : entry
+        );
+        refreshMatcher();
+        updateCache();
+        updateHasRules();
+        convertHiddenToPermaban(n);
+        await updateEntry(d, { mode: "pban", enabled: true });
+        showToast(`Perma-banned ${d}`, async () => {
+          entries = entries.map((entry) =>
+            entry.domain === d ? { ...entry, mode: "block", enabled: true } : entry
+          );
+          refreshMatcher();
+          updateCache();
+          updateHasRules();
+          restoreResult(n);
+          hideResult(
+            n,
+            { matched: true, domain: d, mode: "block" },
+            url,
+            prefs!.showNotices,
+            doShowOnce,
+            doUnblock,
+            doPermaban
+          );
+          await updateEntry(d, { mode: "block", enabled: true });
+        });
+      };
+
       const doRehide = (n: Element) => {
-        rehideResult(n, matchResult, url, prefs!.showNotices, doShowOnce, doUnblock);
+        rehideResult(n, matchResult, url, prefs!.showNotices, doShowOnce, doUnblock, doPermaban);
       };
 
       // Always call hideResult — regardless of showNotices or mode.
@@ -218,7 +248,7 @@ function processResults(nodes: Element[]): void {
       // blocked results to never receive data-shh-result when showNotices
       // was false, so they were only hidden by the preload's localStorage
       // cache and would flash visible if that cache was stale.
-      hideResult(node, matchResult, url, prefs.showNotices, doShowOnce, doUnblock);
+      hideResult(node, matchResult, url, prefs.showNotices, doShowOnce, doUnblock, doPermaban);
     } else {
       // If the preload hid this node based on a stale cache (domain was since
       // unblocked), clear ALL hiding layers before injecting the button.
