@@ -40,4 +40,25 @@ export interface EngineAdapter {
    * Useful for engine-specific CSS injection or deferred scans.
    */
   onInit?(doc: Document): void;
+
+  // ── Infinite scroll (optional) ────────────────────────────────────────
+
+  /** Return the URL for the next page of results (e.g. the "Next" button href), or null. */
+  getNextPageUrl?(doc: Document): string | null;
+
+  /** CSS selectors for pagination elements to hide when infinite scroll is active. */
+  getPaginationSelectors?(): string[];
+
+  /**
+   * Return a unique identifier string for a result node (used for deduplication).
+   * Return null to fall back to URL-hash dedup.
+   */
+  getResultId?(node: Element): string | null;
+
+  /**
+   * Return the container element that holds all search results.
+   * New pages from infinite scroll are appended into this container.
+   * If not provided, the parent of the first result node is used (less reliable).
+   */
+  getResultsContainer?(doc?: Document): Element | null;
 }

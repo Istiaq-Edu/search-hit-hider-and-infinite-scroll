@@ -1,6 +1,6 @@
 {
   "name": "search-hit-hider",
-  "version": "1.0.17",
+  "version": "1.1.0",
   "description": "Firefox extension to hide unwanted domains from search results",
   "license": "MIT",
   "private": true,
@@ -24,6 +24,8 @@
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
     "esbuild": "^0.21.5",
+    "happy-dom": "^20.9.0",
+    "jsdom": "^29.1.1",
     "sharp": "^0.34.5",
     "typescript": "^5.4.5",
     "vitest": "^1.6.0",

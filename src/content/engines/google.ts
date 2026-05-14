@@ -251,4 +251,37 @@ export class GoogleAdapter implements EngineAdapter {
   observerOptions(): MutationObserverInit {
     return { childList: true, subtree: true };
   }
+
+  // ── Infinite scroll ──────────────────────────────────────────────────
+
+  getNextPageUrl(doc: Document): string | null {
+    const selectors = [
+      '#pnnext',
+      'a[aria-label^="Next"]',
+      'a[aria-label^="Next page"]',
+      'a[href*="/search?"][href*="start="]:last-of-type',
+    ];
+    for (const sel of selectors) {
+      const btn = doc.querySelector<HTMLAnchorElement>(sel);
+      if (btn?.href) return btn.href;
+    }
+    return null;
+  }
+
+  getPaginationSelectors(): string[] {
+    return ['#foot', '#navcnt', '#xjs > div:last-child', 'nav[role="navigation"]'];
+  }
+
+  getResultId(node: Element): string | null {
+    return node.getAttribute('data-ved') ?? null;
+  }
+
+  getResultsContainer(doc?: Document): Element | null {
+    const d = doc ?? document;
+    for (const sel of ['#rso', '#center_col', '#res']) {
+      const el = d.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
+  }
 }

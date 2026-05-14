@@ -8,6 +8,7 @@ import { injectBlockButton } from "./ui/block-button";
 import { showBlockDialog } from "./ui/block-dialog";
 import { showToast } from "./ui/toast";
 import { getList, getPrefs, addEntry, removeEntry, updateEntry, undoLast } from "./messaging";
+import { InfiniteScrollManager } from "./infinite-scroll/manager";
 
 // ============================================================
 // Content script entry point
@@ -17,6 +18,7 @@ let entries: BlockEntry[] = [];
 let prefs: Prefs | null = null;
 let matcher: DomainMatcher | null = null;
 let observer: ResultObserver | null = null;
+let infiniteScrollManager: InfiniteScrollManager | null = null;
 
 const currentUrl = new URL(location.href);
 const engine = detectEngine(currentUrl);
@@ -91,6 +93,31 @@ async function init(): Promise<void> {
   // Sync :has() rules with the confirmed list (removes any stale preload rules
   // for domains that have since been unblocked, adds any new ones).
   updateHasRules();
+
+  // ── Infinite scroll ─────────────────────────────────────────────────
+  // Must be initialized BEFORE processResults() so getResultNodes() still
+  // returns unstamped nodes (processResults stamps with data-shh-result).
+  // The sentinel is placed after the container, which is fine since results
+  // are already in the DOM at this point.
+  if (prefs.infiniteScroll && engine.getNextPageUrl) {
+    const container = findInfiniteScrollContainer();
+    if (container) {
+      infiniteScrollManager = new InfiniteScrollManager(
+        engine,
+        container,
+        (nodes) => processResults(nodes),
+        {
+          threshold: prefs.infiniteScrollThreshold,
+          maxPages: prefs.infiniteScrollMaxPages,
+          persist: prefs.infiniteScrollPersist,
+          freshnessMinutes: 30,
+          fetchDelay: 1500,
+          debugMode: prefs.debugMode,
+        }
+      );
+      infiniteScrollManager.init();
+    }
+  }
 
   // Process existing results.
   processResults(engine.getResultNodes(document));
@@ -384,11 +411,39 @@ async function handleBlock(
 }
 
 async function refreshPrefs(): Promise<void> {
+  const prevInfiniteScroll = prefs?.infiniteScroll ?? true;
   prefs = await getPrefs();
+
   if (prefs.showOnHover) {
     document.documentElement.classList.add("shh-hover-mode");
   } else {
     document.documentElement.classList.remove("shh-hover-mode");
+  }
+
+  // Toggle infinite scroll without requiring page reload
+  if (prevInfiniteScroll !== prefs.infiniteScroll) {
+    if (!prefs.infiniteScroll && infiniteScrollManager) {
+      infiniteScrollManager.destroy();
+      infiniteScrollManager = null;
+    } else if (prefs.infiniteScroll && !infiniteScrollManager && engine?.getNextPageUrl) {
+      const container = findInfiniteScrollContainer();
+      if (container) {
+        infiniteScrollManager = new InfiniteScrollManager(
+          engine,
+          container,
+          (nodes) => processResults(nodes),
+          {
+            threshold: prefs.infiniteScrollThreshold,
+            maxPages: prefs.infiniteScrollMaxPages,
+            persist: prefs.infiniteScrollPersist,
+            freshnessMinutes: 30,
+            fetchDelay: 1500,
+            debugMode: prefs.debugMode,
+          }
+        );
+        infiniteScrollManager.init();
+      }
+    }
   }
 }
 
@@ -521,6 +576,24 @@ function earlyHideFromCache(): void {
       } catch { /* skip invalid URL */ }
     }
   } catch { /* localStorage unavailable or JSON corrupt — safe to ignore */ }
+}
+
+// ── Infinite scroll container ──────────────────────────────────────────────
+// Find a suitable container to append new results into.  Uses unstamped nodes
+// when available (before processResults), and falls back to known CSS selectors
+// when all nodes are already stamped (mid-session toggle).
+function findInfiniteScrollContainer(): Element | null {
+  if (engine?.getResultsContainer) {
+    const c = engine.getResultsContainer(document);
+    if (c) return c;
+  }
+  if (engine) {
+    const results = engine.getResultNodes(document);
+    if (results.length > 0) return results[0]?.parentElement ?? null;
+  }
+  const stamped = document.querySelector('[data-shh-result]');
+  if (stamped?.parentElement) return stamped.parentElement;
+  return null;
 }
 
 // Write the current block list to localStorage so the preload script can

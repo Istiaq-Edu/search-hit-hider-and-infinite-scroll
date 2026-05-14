@@ -4,6 +4,7 @@ import { EngineSettings } from "./EngineSettings";
 import { BlockingSettings } from "./BlockingSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { AdvancedSettings } from "./AdvancedSettings";
+import { InfiniteScrollSettings } from "./InfiniteScrollSettings";
 
 interface Props {
   prefs: Prefs;
@@ -39,6 +40,9 @@ export function SettingsTab({ prefs, onUpdatePrefs }: Props) {
       </Section>
       <Section title="Search Engines">
         <EngineSettings prefs={prefs} onUpdatePrefs={onUpdatePrefs} />
+      </Section>
+      <Section title="Infinite Scroll">
+        <InfiniteScrollSettings prefs={prefs} onUpdatePrefs={onUpdatePrefs} />
       </Section>
       <Section title="Appearance">
         <AppearanceSettings prefs={prefs} onUpdatePrefs={onUpdatePrefs} />

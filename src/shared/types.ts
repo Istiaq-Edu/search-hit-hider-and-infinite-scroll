@@ -38,6 +38,12 @@ export interface Prefs {
   pausedEngines: EngineId[];
   subdomainWildcard: boolean;
   theme: "system" | "light" | "dark";
+
+  // ── Infinite scroll ──
+  infiniteScroll: boolean;
+  infiniteScrollThreshold: number;
+  infiniteScrollMaxPages: number;
+  infiniteScrollPersist: boolean;
 }
 
 export const ALL_ENGINE_IDS: EngineId[] = [
@@ -68,6 +74,10 @@ export const DEFAULT_PREFS: Prefs = {
   pausedEngines: [],
   subdomainWildcard: true,
   theme: "system",
+  infiniteScroll: true,
+  infiniteScrollThreshold: 800,
+  infiniteScrollMaxPages: 20,
+  infiniteScrollPersist: true,
 };
 
 // ============================================================

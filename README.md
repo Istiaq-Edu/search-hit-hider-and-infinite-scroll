@@ -66,6 +66,13 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 - **Firefox Sync** — preferences sync across devices; block lists stay local
 - **No telemetry** — zero external requests, zero data collection
 
+### Infinite Scroll
+- **Auto-load more results** — scroll to the bottom and the next page loads automatically
+- **Configurable** — adjust scroll threshold, max pages, and scroll persistence in settings
+- **Linked to blocking** — works together with hit-hider; when most results are blocked, infinite scroll keeps feeding new pages
+- **Engine adapters** — Google (v1), with Bing, DuckDuckGo, Yandex, Baidu, Brave coming in later phases
+- **Dedup** — prevents duplicate results across pages (attribute-based + URL hash fallback)
+
 ---
 
 ## Supported Search Engines
@@ -138,9 +145,10 @@ zip.writeZip(path.join(__dirname, '..', \`search-hit-hider-v\${pkg.version}.zip\
 ├── src/
 │   ├── background/        # Service worker (storage, messaging)
 │   ├── content/           # Content script injected into search pages
-│   │   ├── blocking/      # Domain matching, result hiding, observer
-│   │   ├── engines/       # Per-engine adapters (Google, DDG, Bing, …)
-│   │   └── ui/            # Block button, dialog, toast, styles
+│   │   ├── blocking/       # Domain matching, result hiding, observer
+│   │   ├── engines/        # Per-engine adapters (Google, DDG, Bing, …)
+│   │   ├── infinite-scroll/ # Infinite scroll (manager, fetcher, deduper, sentinel, persist)
+│   │   └── ui/             # Block button, dialog, toast, styles
 │   ├── popup/             # Preact popup UI
 │   │   └── components/    # Tab components, lists, settings, import/export
 │   └── shared/            # Types, storage, domain utils, migration
