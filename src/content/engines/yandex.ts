@@ -147,4 +147,33 @@ export class YandexAdapter implements EngineAdapter {
       node.querySelector("h3 a")
     );
   }
+
+  // ── Infinite scroll ──────────────────────────────────────────────────
+
+  getNextPageUrl(doc: Document): string | null {
+    const selectors = [
+      'a.Pager-Item_type_next',
+      'a[aria-label="Next page"]',
+      'a[aria-label="Next"]',
+      'a.pager__next',
+    ];
+    for (const sel of selectors) {
+      const btn = doc.querySelector<HTMLAnchorElement>(sel);
+      if (btn?.href) return btn.href;
+    }
+    return null;
+  }
+
+  getPaginationSelectors(): string[] {
+    return ['.Pager', '.pager', 'nav[role="navigation"]'];
+  }
+
+  getResultId(_node: Element): string | null {
+    return null;
+  }
+
+  getResultsContainer(doc?: Document): Element | null {
+    const d = doc ?? document;
+    return d.querySelector('#search-results, ol.serp-list, .serp-list, [class*="serp"]');
+  }
 }

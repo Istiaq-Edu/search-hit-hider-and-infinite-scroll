@@ -646,14 +646,16 @@ npm test                  # vitest — all unit tests pass
 | Manual test on Bing | ✅ Done | User confirmed working |
 | Manual test on DuckDuckGo | ✅ Done | User confirmed working |
 
-### Phase 3 — Yandex + Baidu + Brave
+### Phase 3 — Yandex + Baidu + Brave  ✅
 
 | Task | Status | Notes |
 |------|--------|-------|
-| `engines/yandex.ts` — implement methods | ⬜ Pending | |
-| `engines/baidu.ts` — implement methods | ⬜ Pending | |
-| `engines/brave.ts` — implement methods | ⬜ Pending | |
-| Integration tests | ⬜ Pending | |
+| `engines/yandex.ts` — implement methods | ✅ Done | `getNextPageUrl` (Pager-Item_type_next), `getResultsContainer` (serp-list) |
+| `engines/baidu.ts` — implement methods | ✅ Done | `getNextPageUrl` (#page a.n), `getResultsContainer` (#content_left) |
+| `engines/brave.ts` — implement methods | ✅ Done | `getNextPageUrl` (offset param), `getResultsContainer` (#results) |
+| Manual test on Yandex | ⬜ Pending | User needs to test |
+| Manual test on Baidu | ⬜ Pending | User needs to test |
+| Manual test on Brave | ⬜ Pending | User needs to test |
 
 ### Phase 4 — Polish
 

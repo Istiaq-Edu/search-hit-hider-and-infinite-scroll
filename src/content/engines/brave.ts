@@ -95,7 +95,38 @@ export class BraveAdapter implements EngineAdapter {
   }
 
   observerOptions(): MutationObserverInit {
-    // Brave Search is a Svelte SPA — results are injected dynamically
     return { childList: true, subtree: true };
+  }
+
+  // ── Infinite scroll ──────────────────────────────────────────────────
+  // Brave is a Svelte SPA with URL-based pagination via offset param.
+
+  getNextPageUrl(doc: Document): string | null {
+    // Direct "Next" link
+    const link = doc.querySelector<HTMLAnchorElement>(
+      'a[href*="offset="]:not([disabled]), a.pagination__next, [aria-label="Next"] a'
+    );
+    if (link?.href) return link.href;
+
+    // Construct manually: find current offset from URL
+    const cur = new URL(doc.URL !== 'about:blank' ? doc.URL : window.location.href);
+    const offset = parseInt(cur.searchParams.get('offset') ?? '0', 10);
+    const next = new URL(cur.origin + cur.pathname);
+    next.searchParams.set('q', cur.searchParams.get('q') ?? '');
+    next.searchParams.set('offset', String(isNaN(offset) ? 10 : offset + 10));
+    return next.toString();
+  }
+
+  getPaginationSelectors(): string[] {
+    return ['#pagination-snippet', 'nav.pagination', '[aria-label="Pagination"]'];
+  }
+
+  getResultId(_node: Element): string | null {
+    return null;
+  }
+
+  getResultsContainer(doc?: Document): Element | null {
+    const d = doc ?? document;
+    return d.querySelector('#results, #search-results, main');
   }
 }
