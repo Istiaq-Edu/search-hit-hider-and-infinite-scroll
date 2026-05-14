@@ -42,6 +42,7 @@ export class InfiniteScrollManager {
 
   private scrollSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+  private isTriggerEngine = false;
 
   constructor(
     engine: EngineAdapter,
@@ -59,8 +60,16 @@ export class InfiniteScrollManager {
 
   init(): void {
     this.destroyed = false;
-    this.nextUrl = this.engine.getNextPageUrl?.(document) ?? null;
-    this.hasMore = !!this.nextUrl;
+    this.isTriggerEngine = typeof this.engine.triggerNextPage === "function";
+
+    if (this.isTriggerEngine) {
+      // Trigger-based engines don't need a next URL upfront
+      this.nextUrl = "trigger://page";
+      this.hasMore = true;
+    } else {
+      this.nextUrl = this.engine.getNextPageUrl?.(document) ?? null;
+      this.hasMore = !!this.nextUrl;
+    }
     this.currentPage = 1;
 
     if (!this.hasMore) {
@@ -152,7 +161,8 @@ export class InfiniteScrollManager {
   }
 
   private async fetchNextPage(): Promise<void> {
-    if (this.isLoading || !this.hasMore || !this.nextUrl) return;
+    if (this.isLoading || !this.hasMore) return;
+    if (!this.isTriggerEngine && !this.nextUrl) return;
     if (this.currentPage >= this.config.maxPages) {
       this.hasMore = false;
       this.sentinel?.setState("done");
@@ -162,11 +172,47 @@ export class InfiniteScrollManager {
     this.isLoading = true;
     this.sentinel?.setState("loading");
 
+    // ── Trigger-based (click button, wait for DOM changes) ──────────
+    if (this.isTriggerEngine) {
+      try {
+        const beforeCount = this.engine.getResultNodes(document).length;
+        await this.engine.triggerNextPage!(document);
+        if (this.destroyed) return;
+
+        const allNodes = this.engine.getResultNodes(document);
+        const newNodes = allNodes.slice(beforeCount);
+        const deduped = newNodes.filter((n) => !this.deduper.isDuplicate(n, this.engine));
+
+        if (deduped.length > 0) {
+          this.onNewNodes(deduped);
+        }
+
+        this.currentPage++;
+        const btn = document.querySelector('button[data-testid="more-results"], button.result--more__btn, .results--more button, a.result--more__link');
+        this.hasMore = !!btn && this.currentPage < this.config.maxPages;
+        this.sentinel?.setState(this.hasMore ? "idle" : "done");
+        this.log(`Trigger appended ${deduped.length} items (page ${this.currentPage})`);
+      } catch (err) {
+        if (this.destroyed) return;
+        // Button not found = no more pages, not an error
+        if ((err as Error)?.message?.includes("No")) {
+          this.hasMore = false;
+          this.sentinel?.setState("done");
+        } else {
+          this.sentinel?.setState("error", () => this.retryFetch());
+        }
+      } finally {
+        this.isLoading = false;
+      }
+      return;
+    }
+
+    // ── Fetch-based (standard URL pagination) ───────────────────────
     this.abortController?.abort();
     this.abortController = new AbortController();
 
     try {
-      const result = await fetchPage(this.nextUrl, this.abortController.signal, this.config.fetchDelay);
+      const result = await fetchPage(this.nextUrl!, this.abortController.signal, this.config.fetchDelay);
       if (this.destroyed) return;
 
       if (!result) {

@@ -20,22 +20,20 @@ export class DuckDuckGoAdapter implements EngineAdapter {
   }
 
   getResultNodes(doc: Document): Element[] {
-    // React results (modern DDG)
-    const reactResults = Array.from(
-      doc.querySelectorAll("ol.react-results--main > li[data-layout='organic']")
-    );
-    if (reactResults.length > 0) return reactResults;
-
-    // Legacy results
-    const legacy = Array.from(
-      doc.querySelectorAll(
-        "div#links div.results_links_deep div.links_main, div#links div.nrn-react-div"
-      )
-    );
-    if (legacy.length > 0) return legacy;
-
-    // Fallback
-    return Array.from(doc.querySelectorAll("div#links > div.result"));
+    // Prioritize broad organic-result selectors (React DDG 2025+)
+    const candidates = [
+      'ol.react-results--main > li[data-layout="organic"]',
+      'li[data-layout="organic"]',
+      'article[data-testid="result"]',
+      'div#links div.results_links_deep div.links_main',
+      'div#links div.nrn-react-div',
+      'div#links > div.result',
+    ];
+    for (const sel of candidates) {
+      const nodes = Array.from(doc.querySelectorAll(sel)) as Element[];
+      if (nodes.length > 0) return nodes;
+    }
+    return [];
   }
 
   getResultUrl(node: Element): string | null {
@@ -61,43 +59,69 @@ export class DuckDuckGoAdapter implements EngineAdapter {
     return { childList: true, subtree: true };
   }
 
-  // ── Infinite scroll ──────────────────────────────────────────────────
-
-  getNextPageUrl(doc: Document): string | null {
-    // Try direct "More results" link first
-    const moreLink = doc.querySelector<HTMLAnchorElement>(
-      'a.result--more__link, a[data-testid="result--more"], .result--more a'
-    );
-    if (moreLink?.href) return moreLink.href;
-
-    // Try extracting from the "More results" form
-    const form = doc.querySelector<HTMLFormElement>(
-      'form[action*="html"], form.tile--more__form'
-    );
-    if (form) {
-      const baseUrl = new URL(window.location.origin + (form.getAttribute('action') ?? '/'));
-      const formData = new FormData(form);
-      for (const [key, val] of formData) {
-        baseUrl.searchParams.set(key, val.toString());
+  onInit(): void {
+    // Enable DDG's native infinite scroll via localStorage
+    try {
+      const raw = localStorage.getItem('duckduckgo_settings');
+      const s = raw ? JSON.parse(raw) : {};
+      if (s.kav !== '1') {
+        s.kav = '1';
+        localStorage.setItem('duckduckgo_settings', JSON.stringify(s));
       }
-      return baseUrl.toString();
+    } catch { /* ignore */ }
+  }
+
+  // ── Infinite scroll ──────────────────────────────────────────────────
+  // DDG has built-in infinite scroll (kav setting in localStorage).
+  // When enabled, it auto-loads results on scroll — our MutationObserver
+  // catches those.  getNextPageUrl returns null (no fetch needed).
+
+  /**
+   * Extract the DDG vqd (session verification) token from a document.
+   * Searches hidden inputs, meta tags, script content, data attributes,
+   * and falls back to a regex scan of the entire HTML body text.
+   */
+  private extractVqd(doc: Document): string | null {
+    // 1. Hidden input (most common in legacy HTML)
+    const input = doc.querySelector<HTMLInputElement>('input[name="vqd"]');
+    if (input?.value) return input.value;
+
+    // 2. Meta tag
+    const meta = doc.querySelector<HTMLMetaElement>('meta[name="vqd"]');
+    if (meta?.content) return meta.content;
+
+    // 3. data-vqd attribute on any element
+    const dataAttr = doc.querySelector('[data-vqd]');
+    if (dataAttr) return dataAttr.getAttribute('data-vqd');
+
+    // 4. URL search params (fetched pages already have vqd in URL)
+    try {
+      const urlVqd = new URL(doc.URL).searchParams.get('vqd');
+      if (urlVqd) return urlVqd;
+    } catch { /* ignore */ }
+
+    // 5. Search inline scripts for vqd patterns
+    const scripts = doc.querySelectorAll('script:not([src])');
+    for (const s of scripts) {
+      const text = s.textContent ?? '';
+      const m = text.match(/["']vqd["']\s*:\s*["']([^"']+)["']/);
+      if (m?.[1]) return m[1];
+      const m2 = text.match(/vqd['"]?\s*[:=]\s*['"]([a-zA-Z0-9_-]+)['"]/);
+      if (m2?.[1]) return m2[1];
     }
 
-    // Fallback: manually increment s/dc params from current URL
-    const cur = new URL(window.location.href);
-    const s = parseInt(cur.searchParams.get('s') ?? '0', 10);
-    if (!isNaN(s)) {
-      const next = new URL(window.location.href);
-      next.searchParams.set('s', String(s + 30));
-      next.searchParams.set('dc', String(s + 31));
-      return next.toString();
-    }
+    // 6. Last resort: regex over the full HTML body text
+    const html = doc.documentElement?.outerHTML ?? '';
+    const m = html.match(/vqd=([a-zA-Z0-9_-]+)/);
+    if (m?.[1]) return m[1];
+    const m2 = html.match(/vqd['"]?\s*[:=]\s*['"]([a-zA-Z0-9_-]+)['"]/);
+    if (m2?.[1]) return m2[1];
 
     return null;
   }
 
   getPaginationSelectors(): string[] {
-    return ['.results--footer', 'div.result--more', '#footer'];
+    return ['.results--footer', 'div.result--more', '#footer', 'form.results--more'];
   }
 
   getResultId(node: Element): string | null {
@@ -106,6 +130,19 @@ export class DuckDuckGoAdapter implements EngineAdapter {
 
   getResultsContainer(doc?: Document): Element | null {
     const d = doc ?? document;
-    return d.querySelector('#links, ol.react-results--main');
+    // Broad set of possible DDG result containers (ordered by likelihood)
+    const sels = [
+      'ol.react-results--main',
+      'section.results',
+      'div#links',
+      'div.results',
+      '.serp__results',
+      '[data-testid="results"]',
+    ];
+    for (const sel of sels) {
+      const el = d.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
   }
 }

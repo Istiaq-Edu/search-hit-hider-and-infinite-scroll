@@ -61,4 +61,12 @@ export interface EngineAdapter {
    * If not provided, the parent of the first result node is used (less reliable).
    */
   getResultsContainer?(doc?: Document): Element | null;
+
+  /**
+   * Optional: triggers loading of the next page by interacting with the page
+   * (e.g., clicking a "Load More" button in a SPA).  When present, the
+   * manager calls this instead of fetch() + getNextPageUrl().
+   * The returned promise must resolve when new result nodes appear in the DOM.
+   */
+  triggerNextPage?(doc: Document): Promise<void>;
 }

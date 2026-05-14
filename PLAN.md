@@ -642,9 +642,9 @@ npm test                  # vitest — all unit tests pass
 | Task | Status | Notes |
 |------|--------|-------|
 | `engines/bing.ts` — implement methods | ✅ Done | `getNextPageUrl`, `getPaginationSelectors`, `getResultId`, `getResultsContainer` |
-| `engines/duckduckgo.ts` — implement methods | ✅ Done | Same methods; handles form-based pagination with `s`/`dc` params, React DDG |
-| Manual test on Bing | ⬜ Pending | User needs to test |
-| Manual test on DuckDuckGo | ⬜ Pending | User needs to test |
+| `engines/duckduckgo.ts` — implement methods | ✅ Done | Uses `onInit()` to enable DDG's native infinite scroll via localStorage `kav=1` |
+| Manual test on Bing | ✅ Done | User confirmed working |
+| Manual test on DuckDuckGo | ✅ Done | User confirmed working |
 
 ### Phase 3 — Yandex + Baidu + Brave
 
