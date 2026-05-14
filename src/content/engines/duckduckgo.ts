@@ -60,4 +60,52 @@ export class DuckDuckGoAdapter implements EngineAdapter {
   observerOptions(): MutationObserverInit {
     return { childList: true, subtree: true };
   }
+
+  // ── Infinite scroll ──────────────────────────────────────────────────
+
+  getNextPageUrl(doc: Document): string | null {
+    // Try direct "More results" link first
+    const moreLink = doc.querySelector<HTMLAnchorElement>(
+      'a.result--more__link, a[data-testid="result--more"], .result--more a'
+    );
+    if (moreLink?.href) return moreLink.href;
+
+    // Try extracting from the "More results" form
+    const form = doc.querySelector<HTMLFormElement>(
+      'form[action*="html"], form.tile--more__form'
+    );
+    if (form) {
+      const baseUrl = new URL(window.location.origin + (form.getAttribute('action') ?? '/'));
+      const formData = new FormData(form);
+      for (const [key, val] of formData) {
+        baseUrl.searchParams.set(key, val.toString());
+      }
+      return baseUrl.toString();
+    }
+
+    // Fallback: manually increment s/dc params from current URL
+    const cur = new URL(window.location.href);
+    const s = parseInt(cur.searchParams.get('s') ?? '0', 10);
+    if (!isNaN(s)) {
+      const next = new URL(window.location.href);
+      next.searchParams.set('s', String(s + 30));
+      next.searchParams.set('dc', String(s + 31));
+      return next.toString();
+    }
+
+    return null;
+  }
+
+  getPaginationSelectors(): string[] {
+    return ['.results--footer', 'div.result--more', '#footer'];
+  }
+
+  getResultId(node: Element): string | null {
+    return node.getAttribute('data-id') ?? null;
+  }
+
+  getResultsContainer(doc?: Document): Element | null {
+    const d = doc ?? document;
+    return d.querySelector('#links, ol.react-results--main');
+  }
 }

@@ -35,4 +35,33 @@ export class BingAdapter implements EngineAdapter {
   getButtonTarget(node: Element): Element | null {
     return node.querySelector("h2 > a") ?? node.querySelector("h2");
   }
+
+  // ── Infinite scroll ──────────────────────────────────────────────────
+
+  getNextPageUrl(doc: Document): string | null {
+    const selectors = [
+      'a.sb_pagN',
+      'a[title="Next page"]',
+      'a[title="Next"]',
+      'a.sb_pagN_bp',
+    ];
+    for (const sel of selectors) {
+      const btn = doc.querySelector<HTMLAnchorElement>(sel);
+      if (btn?.href) return btn.href;
+    }
+    return null;
+  }
+
+  getPaginationSelectors(): string[] {
+    return ['li.b_pag', 'nav[role="navigation"]', '#b_results li.b_pag'];
+  }
+
+  getResultId(_node: Element): string | null {
+    return null;
+  }
+
+  getResultsContainer(doc?: Document): Element | null {
+    const d = doc ?? document;
+    return d.querySelector('#b_content, #b_results');
+  }
 }

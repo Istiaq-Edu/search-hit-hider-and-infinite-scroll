@@ -637,13 +637,14 @@ npm test                  # vitest — all unit tests pass
 | Manual test on Google | ⬜ Pending | Requires user to load extension and test |
 | `npm run build && npm run lint:ts` | ✅ Done | Build passes, TypeScript type check passes, all 280 tests pass |
 
-### Phase 2 — Bing + DuckDuckGo
+### Phase 2 — Bing + DuckDuckGo  ✅
 
 | Task | Status | Notes |
 |------|--------|-------|
-| `engines/bing.ts` — implement methods | ⬜ Pending | |
-| `engines/duckduckgo.ts` — implement methods (+ vqd) | ⬜ Pending | |
-| Integration tests | ⬜ Pending | |
+| `engines/bing.ts` — implement methods | ✅ Done | `getNextPageUrl`, `getPaginationSelectors`, `getResultId`, `getResultsContainer` |
+| `engines/duckduckgo.ts` — implement methods | ✅ Done | Same methods; handles form-based pagination with `s`/`dc` params, React DDG |
+| Manual test on Bing | ⬜ Pending | User needs to test |
+| Manual test on DuckDuckGo | ⬜ Pending | User needs to test |
 
 ### Phase 3 — Yandex + Baidu + Brave
 
