@@ -43,6 +43,7 @@ export class InfiniteScrollManager {
   private scrollSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private isTriggerEngine = false;
+  private consecutiveErrors = 0;
 
   constructor(
     engine: EngineAdapter,
@@ -216,9 +217,17 @@ export class InfiniteScrollManager {
       if (this.destroyed) return;
 
       if (!result) {
-        this.sentinel?.setState("error", () => this.retryFetch());
+        this.consecutiveErrors++;
+        if (this.consecutiveErrors >= 3) {
+          this.log("Too many consecutive errors, stopping");
+          this.hasMore = false;
+          this.sentinel?.setState("done");
+        } else {
+          this.sentinel?.setState("error", () => this.retryFetch());
+        }
         return;
       }
+      this.consecutiveErrors = 0;
 
       const newNodes = this.extractNewNodes(result.doc);
       const deduped = newNodes.filter((n) => !this.deduper.isDuplicate(n, this.engine));
@@ -268,12 +277,29 @@ export class InfiniteScrollManager {
 
     for (const node of nodes) {
       const clone = node.cloneNode(true) as Element;
+      clone.setAttribute("data-inf-page", String(this.currentPage));
       fragment.appendChild(clone);
       appended.push(clone);
     }
 
     this.container.appendChild(fragment);
     this.onNewNodes(appended);
+    this.discardOldPages();
+  }
+
+  /** Remove pages above the viewport to keep the DOM lean (keep ~5 pages). */
+  private discardOldPages(): void {
+    if (this.currentPage <= 6) return;
+    const cutoffPage = this.currentPage - 6;
+    const nodes = this.container.querySelectorAll<HTMLElement>('[data-inf-page]');
+    for (const node of nodes) {
+      const page = parseInt(node.getAttribute('data-inf-page') ?? '0', 10);
+      if (page > cutoffPage) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom < -100) {
+        node.remove();
+      }
+    }
   }
 
   private bindScrollSave(): void {

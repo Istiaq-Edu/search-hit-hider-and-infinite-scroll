@@ -650,20 +650,21 @@ npm test                  # vitest — all unit tests pass
 
 | Task | Status | Notes |
 |------|--------|-------|
-| `engines/yandex.ts` — implement methods | ✅ Done | `getNextPageUrl` (Pager-Item_type_next), `getResultsContainer` (serp-list) |
-| `engines/baidu.ts` — implement methods | ✅ Done | `getNextPageUrl` (#page a.n), `getResultsContainer` (#content_left) |
-| `engines/brave.ts` — implement methods | ✅ Done | `getNextPageUrl` (offset param), `getResultsContainer` (#results) |
-| Manual test on Yandex | ⬜ Pending | User needs to test |
-| Manual test on Baidu | ⬜ Pending | User needs to test |
-| Manual test on Brave | ⬜ Pending | User needs to test |
+| `engines/yandex.ts` — implement methods | ✅ Done | `getNextPageUrl` (Pager-Item_type_next), `getResultsContainer` (serp-list), pagination kept visible |
+| `engines/baidu.ts` — infinite scroll removed | ✅ Done | Baidu's pagination doesn't support incremental loading; native pagination kept |
+| `engines/brave.ts` — infinite scroll removed | ✅ Done | Brave is a SvelteKit SPA; client-side navigation replaces page, incompatible with incremental loading |
+| Manual test on Yandex | ✅ Done | User confirmed working (pagination visible as fallback) |
+| Manual test on Baidu | ✅ Done | Native pagination |
+| Manual test on Brave | ✅ Done | Native pagination |
 
-### Phase 4 — Polish
+### Phase 4 — Polish  ✅
 
 | Task | Status | Notes |
 |------|--------|-------|
-| DOM page discarding | ⬜ Pending | Post-v1 |
-| Fetch delay randomization | ⬜ Pending | |
-| Performance profiling | ⬜ Pending | |
+| DOM page discarding | ✅ Done | Discards pages > 6 above viewport, keeps ~5 pages in DOM |
+| Fetch delay randomization | ✅ Done | ±50% jitter around configured delay |
+| Error rate monitoring | ✅ Done | Stops after 3 consecutive failures |
+| Performance profiling | ⬜ Pending | Deferred |
 
 ---
 

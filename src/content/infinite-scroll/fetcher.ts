@@ -13,7 +13,9 @@ export async function fetchPage(
   delayMs: number
 ): Promise<FetchResult | null> {
   if (delayMs > 0) {
-    await sleep(delayMs);
+    // Add ±50% jitter to avoid detection patterns
+    const jitter = delayMs * (0.5 + Math.random());
+    await sleep(jitter);
   }
 
   try {

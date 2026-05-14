@@ -48,36 +48,4 @@ export class BaiduAdapter implements EngineAdapter {
     );
   }
 
-  // ── Infinite scroll ──────────────────────────────────────────────────
-
-  getNextPageUrl(doc: Document): string | null {
-    const selectors = [
-      '#page a.n',
-      'a.n',
-      'a[class*="next"]',
-      'a[href*="pn="]',
-    ];
-    for (const sel of selectors) {
-      const btn = doc.querySelector<HTMLAnchorElement>(sel);
-      if (btn?.href) {
-        // Verify it's a "next" link, not a page number
-        const text = btn.textContent?.trim().toLowerCase() ?? '';
-        if (!text || text === '下一页' || text === 'next' || text.includes('>')) return btn.href;
-      }
-    }
-    return null;
-  }
-
-  getPaginationSelectors(): string[] {
-    return ['#page', '#page-wrap'];
-  }
-
-  getResultId(_node: Element): string | null {
-    return null;
-  }
-
-  getResultsContainer(doc?: Document): Element | null {
-    const d = doc ?? document;
-    return d.querySelector('#content_left');
-  }
 }
