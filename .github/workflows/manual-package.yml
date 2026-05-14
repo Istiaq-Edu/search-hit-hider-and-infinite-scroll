@@ -88,6 +88,17 @@ jobs:
             --exclude '*.zip'
           zip -r "artifacts/search-hit-hider-source-${{ inputs.version }}.zip" source-review
 
+      - name: Verify extension zip
+        run: |
+          echo "=== Extension zip contents ==="
+          unzip -l artifacts/search-hit-hider-${{ inputs.version }}.zip | head -20
+          if unzip -l artifacts/search-hit-hider-${{ inputs.version }}.zip | grep -q 'manifest.json'; then
+            echo "✅ manifest.json found in extension zip"
+          else
+            echo "❌ manifest.json NOT found in extension zip"
+            exit 1
+          fi
+
       - name: List generated zips
         run: ls -lh artifacts
 
