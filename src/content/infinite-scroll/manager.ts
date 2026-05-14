@@ -79,6 +79,8 @@ export class InfiniteScrollManager {
     }
 
     this.hidePagination();
+    this.markInitialPage();
+    this.interceptPagination();
     this.createSentinel();
     this.startObserver();
     this.startUrlPolling();
@@ -132,6 +134,33 @@ export class InfiniteScrollManager {
       for (const el of els) {
         (el as HTMLElement).style.display = "none";
       }
+    }
+  }
+
+  /**
+   * Intercept clicks on visible pagination page-number links so that
+   * if the page was already fetched by infinite scroll, we scroll to
+   * that content instead of navigating away (full page reload).
+   */
+  private interceptPagination(): void {
+    const links = document.querySelectorAll<HTMLAnchorElement>(
+      'a[href]:not([data-inf-intercept])'
+    );
+    for (const link of links) {
+      const text = link.textContent?.trim() ?? '';
+      const pageNum = parseInt(text, 10);
+      if (isNaN(pageNum) || pageNum < 2) continue;
+      if (!this.container.querySelector(`[data-inf-page="${pageNum}"]`)) continue;
+      link.setAttribute('data-inf-intercept', '1');
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const target = this.container.querySelector<HTMLElement>(
+          `[data-inf-page="${pageNum}"]`
+        );
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
     }
   }
 
@@ -253,6 +282,19 @@ export class InfiniteScrollManager {
     }
   }
 
+  /** Insert a page marker so interceptPagination can find page boundaries. */
+  private markInitialPage(): void {
+    const marker = document.createElement('div');
+    marker.setAttribute('data-inf-page', '1');
+    marker.style.cssText = 'height:1px;width:100%;pointer-events:none';
+    const first = this.engine.getResultNodes(document)[0];
+    if (first?.parentElement) {
+      first.parentElement.insertBefore(marker, first);
+    } else {
+      this.container.prepend(marker);
+    }
+  }
+
   private retryFetch(): void {
     this.isLoading = false;
     void this.fetchNextPage();
@@ -272,18 +314,24 @@ export class InfiniteScrollManager {
   }
 
   private appendNodes(nodes: Element[]): void {
+    // Insert a dedicated page-marker before this page's results
+    const marker = document.createElement('div');
+    marker.setAttribute('data-inf-page', String(this.currentPage));
+    marker.style.cssText = 'height:1px;width:100%;pointer-events:none';
+    this.container.appendChild(marker);
+
     const fragment = document.createDocumentFragment();
     const appended: Element[] = [];
 
     for (const node of nodes) {
       const clone = node.cloneNode(true) as Element;
-      clone.setAttribute("data-inf-page", String(this.currentPage));
       fragment.appendChild(clone);
       appended.push(clone);
     }
 
     this.container.appendChild(fragment);
     this.onNewNodes(appended);
+    this.interceptPagination();
     this.discardOldPages();
   }
 

@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firefox](https://img.shields.io/badge/Firefox-112%2B-orange)](https://www.mozilla.org/firefox/)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-green)](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json)
-[![Version](https://img.shields.io/badge/version-1.0.17-informational)](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
+[![Version](https://img.shields.io/badge/version-1.5.0-informational)](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
 
 [![Get it on Firefox Add-ons](https://img.shields.io/badge/Get%20it%20on-Firefox%20Add--ons-FF7139?style=for-the-badge&logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/en-US/firefox/addon/search-hit-hider/)
 
@@ -70,8 +70,11 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 - **Auto-load more results** — scroll to the bottom and the next page loads automatically
 - **Configurable** — adjust scroll threshold, max pages, and scroll persistence in settings
 - **Linked to blocking** — works together with hit-hider; when most results are blocked, infinite scroll keeps feeding new pages
-- **Engine adapters** — Google (v1), with Bing, DuckDuckGo, Yandex, Baidu, Brave coming in later phases
+- **Supported engines** — Google, Bing, DuckDuckGo (native), Yandex (pagination fallback kept visible)
 - **Dedup** — prevents duplicate results across pages (attribute-based + URL hash fallback)
+- **Smart pagination** — clicking a page number scrolls to already-fetched content instead of reloading
+- **Fetch jitter** — randomized delays to avoid detection patterns
+- **DOM management** — automatically discards old pages above the viewport to keep memory lean
 
 ---
 
@@ -121,22 +124,7 @@ The build script compiles TypeScript via `esbuild`, copies assets, and writes ev
 
 ### Package for submission
 
-```bash
-# Creates search-hit-hider-vX.X.X.zip in the project root
-node -e "
-const AdmZip = require('adm-zip');
-const fs = require('fs'), path = require('path');
-const zip = new AdmZip();
-const dist = path.join(__dirname, 'dist');
-(function add(dir, base) {
-  for (const e of fs.readdirSync(dir, { withFileTypes: true }))
-    e.isDirectory() ? add(path.join(dir, e.name), base + e.name + '/')
-                    : zip.addFile(base + e.name, fs.readFileSync(path.join(dir, e.name)));
-})(dist, '');
-const pkg = require('./package.json');
-zip.writeZip(path.join(__dirname, '..', \`search-hit-hider-v\${pkg.version}.zip\`));
-"
-```
+Uses the GitHub workflow (`.github/workflows/manual-package.yml`) to create extension and source zips. Trigger it from the Actions tab with the desired version number.
 
 ### Project structure
 
@@ -181,6 +169,10 @@ npm run webext:lint   # AMO linter (addons-linter)
 | Aggressive domain mode | Advanced | Strip subdomains on block |
 | Debug mode | Advanced | Log engine-detection diagnostics to DevTools |
 | Pause globally | Blocking | Temporarily suspend all blocking |
+| Infinite scroll | Infinite Scroll | Enable/disable auto-loading next page on scroll |
+| Scroll threshold | Infinite Scroll | How close to the bottom before loading (px) |
+| Max pages | Infinite Scroll | Maximum pages to auto-load |
+| Persist scroll | Infinite Scroll | Restore scroll position after reload |
 
 ---
 

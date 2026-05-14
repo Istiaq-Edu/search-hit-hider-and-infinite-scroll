@@ -165,7 +165,9 @@ export class YandexAdapter implements EngineAdapter {
   }
 
   getPaginationSelectors(): string[] {
-    return ['.Pager', '.pager', 'nav[role="navigation"]'];
+    // Keep pagination visible as fallback — Yandex's bot detection makes
+    // automatic fetching unreliable, so users need manual page links.
+    return [];
   }
 
   getResultId(_node: Element): string | null {
@@ -174,6 +176,6 @@ export class YandexAdapter implements EngineAdapter {
 
   getResultsContainer(doc?: Document): Element | null {
     const d = doc ?? document;
-    return d.querySelector('#search-results, ol.serp-list, .serp-list, [class*="serp"]');
+    return d.querySelector('#search-results, ol.serp-list, ul.serp-list');
   }
 }
