@@ -72,7 +72,7 @@ jobs:
       - name: Create extension submission zip
         run: |
           mkdir -p artifacts
-          (cd dist && zip -r "../artifacts/search-hit-hider-${{ inputs.version }}.zip" .)
+          (cd dist && zip -r "../artifacts/search-hit-hider-and-infinite-scroll-${{ inputs.version }}.zip" .)
 
       - name: Create source review zip
         run: |
@@ -86,13 +86,13 @@ jobs:
             --exclude releases/ \
             --exclude source-review/ \
             --exclude '*.zip'
-          zip -r "artifacts/search-hit-hider-source-${{ inputs.version }}.zip" source-review
+          zip -r "artifacts/search-hit-hider-and-infinite-scroll-source-${{ inputs.version }}.zip" source-review
 
       - name: Verify extension zip
         run: |
           echo "=== Extension zip contents ==="
-          unzip -l artifacts/search-hit-hider-${{ inputs.version }}.zip | head -20
-          if unzip -l artifacts/search-hit-hider-${{ inputs.version }}.zip | grep -q 'manifest.json'; then
+          unzip -l artifacts/search-hit-hider-and-infinite-scroll-${{ inputs.version }}.zip | head -20
+          if unzip -l artifacts/search-hit-hider-and-infinite-scroll-${{ inputs.version }}.zip | grep -q 'manifest.json'; then
             echo "✅ manifest.json found in extension zip"
           else
             echo "❌ manifest.json NOT found in extension zip"
@@ -105,13 +105,13 @@ jobs:
       - name: Upload extension submission zip
         uses: actions/upload-artifact@v4
         with:
-          name: search-hit-hider-${{ inputs.version }}-extension-submission
-          path: artifacts/search-hit-hider-${{ inputs.version }}.zip
+          name: search-hit-hider-and-infinite-scroll-${{ inputs.version }}-extension-submission
+          path: artifacts/search-hit-hider-and-infinite-scroll-${{ inputs.version }}.zip
           if-no-files-found: error
 
       - name: Upload source review zip
         uses: actions/upload-artifact@v4
         with:
-          name: search-hit-hider-${{ inputs.version }}-source-review
-          path: artifacts/search-hit-hider-source-${{ inputs.version }}.zip
+          name: search-hit-hider-and-infinite-scroll-${{ inputs.version }}-source-review
+          path: artifacts/search-hit-hider-and-infinite-scroll-source-${{ inputs.version }}.zip
           if-no-files-found: error
