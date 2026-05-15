@@ -59,6 +59,10 @@ function getBaseCSS(colors: {
 .shh-block-btn {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  width: fit-content;
+  max-width: fit-content;
   font-size: 0.75em;
   font-family: Arial, sans-serif;
   color: #fff !important;

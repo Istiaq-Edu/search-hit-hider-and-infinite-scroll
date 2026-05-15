@@ -299,129 +299,17 @@ function injectButtonForResult(node: Element, url: string): void {
 
   // Brave: a.l1 is a full-width flex row. Appending the button inside it
   // causes the flex layout to push the button to the far right. Instead,
-  // wrap the anchor in a tight flex row and append the button to the wrapper
-  // (outside the anchor) so they stay together at the start.
+  // wrap the anchor in a tight flex row and prepend the button to the wrapper
+  // (before the anchor) so it sits to the left of the favicon.
   let insertPosition: "after" | "append" | "before" = "after";
   if (engine.id === "brave" && target.tagName.toLowerCase() === "a") {
     const wrapper = document.createElement("span");
     wrapper.style.cssText =
-      "display:inline-flex;align-items:center;gap:6px;";
+      "display:inline-flex;align-items:center;gap:6px;width:fit-content;max-width:100%;";
     target.replaceWith(wrapper);
     wrapper.appendChild(target);
     target = wrapper;
-    insertPosition = "append";
-  }
-
-  // Append inside headings (h2/h3/h4) rather than inserting after cite.
-  // The cite row on Google is a flex container that also holds the three-dot
-  // feedback button — adding our button there as a flex item makes it overlap.
-  // Appending inside the heading keeps it in the title area and outside the
-  // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
-  // behaviour (lines 1480-1487).
-  const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
-
-  if (useAppend && engine.id !== "brave") {
-    // Let the button overflow the heading without clipping
-    (target as HTMLElement).style.overflow = "visible";
-  }
-
-  // Append inside headings (h2/h3/h4) rather than inserting after cite.
-  // The cite row on Google is a flex container that also holds the three-dot
-  // feedback button — adding our button there as a flex item makes it overlap.
-  // Appending inside the heading keeps it in the title area and outside the
-  // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
-  // behaviour (lines 1480-1487).
-  const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
-
-  if (useAppend && engine.id !== "brave") {
-    // Let the button overflow the heading without clipping
-    (target as HTMLElement).style.overflow = "visible";
-  }
-
-  // Append inside headings (h2/h3/h4) rather than inserting after cite.
-  // The cite row on Google is a flex container that also holds the three-dot
-  // feedback button — adding our button there as a flex item makes it overlap.
-  // Appending inside the heading keeps it in the title area and outside the
-  // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
-  // behaviour (lines 1480-1487).
-  const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
-
-  if (useAppend && engine.id !== "brave") {
-    // Let the button overflow the heading without clipping
-    (target as HTMLElement).style.overflow = "visible";
-  }
-
-  // Append inside headings (h2/h3/h4) rather than inserting after cite.
-  // The cite row on Google is a flex container that also holds the three-dot
-  // feedback button — adding our button there as a flex item makes it overlap.
-  // Appending inside the heading keeps it in the title area and outside the
-  // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
-  // behaviour (lines 1480-1487).
-  const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
-
-  if (useAppend && engine.id !== "brave") {
-    // Let the button overflow the heading without clipping
-    (target as HTMLElement).style.overflow = "visible";
-  }
-
-  // Append inside headings (h2/h3/h4) rather than inserting after cite.
-  // The cite row on Google is a flex container that also holds the three-dot
-  // feedback button — adding our button there as a flex item makes it overlap.
-  // Appending inside the heading keeps it in the title area and outside the
-  // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
-  // behaviour (lines 1480-1487).
-  const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
-
-  if (useAppend && engine.id !== "brave") {
-    // Let the button overflow the heading without clipping
-    (target as HTMLElement).style.overflow = "visible";
-  }
-
-  // Append inside headings (h2/h3/h4) rather than inserting after cite.
-  // The cite row on Google is a flex container that also holds the three-dot
-  // feedback button — adding our button there as a flex item makes it overlap.
-  // Appending inside the heading keeps it in the title area and outside the
-  // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
-  // behaviour (lines 1480-1487).
-  const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
-
-  if (useAppend && engine.id !== "brave") {
-    // Let the button overflow the heading without clipping
-    (target as HTMLElement).style.overflow = "visible";
-  }
-
-  // Append inside headings (h2/h3/h4) rather than inserting after cite.
-  // The cite row on Google is a flex container that also holds the three-dot
-  // feedback button — adding our button there as a flex item makes it overlap.
-  // Appending inside the heading keeps it in the title area and outside the
-  // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
-  // behaviour (lines 1480-1487).
-  const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
-
-  if (useAppend && engine.id !== "brave") {
-    // Let the button overflow the heading without clipping
-    (target as HTMLElement).style.overflow = "visible";
-  }
-
-  // Append inside headings (h2/h3/h4) rather than inserting after cite.
-  // The cite row on Google is a flex container that also holds the three-dot
-  // feedback button — adding our button there as a flex item makes it overlap.
-  // Appending inside the heading keeps it in the title area and outside the
-  // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
-  // behaviour (lines 1480-1487).
-  const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
-
-  if (useAppend && engine.id !== "brave") {
-    // Let the button overflow the heading without clipping
-    (target as HTMLElement).style.overflow = "visible";
+    insertPosition = "before";
   }
 
   // Append inside headings (h2/h3/h4) rather than inserting after cite.
