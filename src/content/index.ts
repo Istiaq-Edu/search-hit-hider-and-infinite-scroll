@@ -297,12 +297,14 @@ function injectButtonForResult(node: Element, url: string): void {
   let target = engine.getButtonTarget(node);
   if (!target) return;
 
-  // Brave: wrap the title anchor in a flex row container so the button
-  // sits inline with the title instead of below it or at the card corner.
+  // Brave: the title row is a flex container that pushes items apart.
+  // Wrap the title anchor + button in a tight row that overrides the parent's
+  // justify-content, keeping them together at the start of the line.
   let insertPosition: "after" | "append" | "before" = "after";
   if (engine.id === "brave" && target.tagName.toLowerCase() === "a") {
     const wrapper = document.createElement("span");
-    wrapper.style.cssText = "display:inline-flex;align-items:center;gap:6px;";
+    wrapper.style.cssText =
+      "display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;justify-content:flex-start;margin-right:auto;";
     target.replaceWith(wrapper);
     wrapper.appendChild(target);
     target = wrapper;
