@@ -340,10 +340,9 @@ function injectButtonForResult(node: Element, url: string): void {
   //   is a flex row. top:4.25em clears the title + source rows and lands in
   //   the cite/feedback row area — matching the userscript reference.
   //
-  // Brave: button is inserted after a.l1 inside div.result-content.
-  //   div.result-content starts at the site-name/URL row, then the title row.
-  //   top:1.5em ≈ height of one line (site-name row) so the button aligns
-  //   with the blue title line — same visual style as Google.
+  // Brave: button is inserted after a.l1 (title anchor) inside div.result-content.
+  //   Positioned absolutely at top:0 so it sits right next to the title text,
+  //   right-aligned to match the title line height.
   if (btn?.parentElement) {
     if (engine.id === "google") {
       const pStyle = window.getComputedStyle(btn.parentElement);
@@ -356,7 +355,7 @@ function injectButtonForResult(node: Element, url: string): void {
       (btn.parentElement as HTMLElement).style.position = "relative";
       (btn.parentElement as HTMLElement).style.overflow = "visible";
       btn.style.cssText =
-        btn.style.cssText + ";position:absolute;right:0;top:1.5em;margin:0;";
+        btn.style.cssText + ";position:absolute;right:0;top:0;margin:0;";
     }
   }
 }
