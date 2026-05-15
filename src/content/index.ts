@@ -301,7 +301,7 @@ function injectButtonForResult(node: Element, url: string): void {
   // causes the flex layout to push the button to the far right. Instead,
   // wrap the anchor in a tight flex row and prepend the button to the wrapper
   // (before the anchor) so it sits to the left of the favicon.
-  let insertPosition: "after" | "append" | "before" = "after";
+  let insertPosition: "after" | "before" = "after";
   if (engine.id === "brave" && target.tagName.toLowerCase() === "a") {
     const wrapper = document.createElement("span");
     wrapper.style.cssText =
@@ -319,7 +319,7 @@ function injectButtonForResult(node: Element, url: string): void {
   // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
   // behaviour (lines 1480-1487).
   const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
+  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4";
 
   if (useAppend && engine.id !== "brave") {
     // Let the button overflow the heading without clipping
@@ -329,7 +329,7 @@ function injectButtonForResult(node: Element, url: string): void {
   const btn = injectBlockButton(
     node,
     target,
-    useAppend ? "append" : "after",
+    useAppend ? "append" : insertPosition,
     prefs.buttonStyle,
     (e) => {
       const clickedBtn = e.currentTarget as HTMLElement;
