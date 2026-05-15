@@ -340,9 +340,9 @@ function injectButtonForResult(node: Element, url: string): void {
   //   is a flex row. top:4.25em clears the title + source rows and lands in
   //   the cite/feedback row area — matching the userscript reference.
   //
-  // Brave: button is inserted after a.l1 (title anchor) inside div.result-content.
-  //   Positioned absolutely at top:0 so it sits right next to the title text,
-  //   right-aligned to match the title line height.
+  // Brave: button is inserted after a.l1 (title anchor). Brave's result-content
+  //   is a flex column, so the button naturally flows below the title. We wrap
+  //   the title + button in a row container so they sit side-by-side.
   if (btn?.parentElement) {
     if (engine.id === "google") {
       const pStyle = window.getComputedStyle(btn.parentElement);
@@ -352,10 +352,16 @@ function injectButtonForResult(node: Element, url: string): void {
           btn.style.cssText + ";position:absolute;right:0;top:4.25em;margin:0;";
       }
     } else if (engine.id === "brave") {
-      (btn.parentElement as HTMLElement).style.position = "relative";
-      (btn.parentElement as HTMLElement).style.overflow = "visible";
-      btn.style.cssText =
-        btn.style.cssText + ";position:absolute;right:0;top:0;margin:0;";
+      // Brave's a.l1 is inside a flex column. Create a wrapper row around
+      // the title anchor and button so they sit side-by-side on the same line.
+      const titleAnchor = btn.previousElementSibling;
+      if (titleAnchor) {
+        const wrapper = document.createElement("span");
+        wrapper.style.cssText = "display:inline-flex;align-items:center;gap:8px;";
+        titleAnchor.replaceWith(wrapper);
+        wrapper.appendChild(titleAnchor);
+        wrapper.appendChild(btn);
+      }
     }
   }
 }
