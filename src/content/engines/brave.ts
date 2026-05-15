@@ -98,4 +98,43 @@ export class BraveAdapter implements EngineAdapter {
   observerOptions(): MutationObserverInit {
     return { childList: true, subtree: true };
   }
+
+  // ── Infinite scroll ──────────────────────────────────────────────────
+
+  getNextPageUrl(doc: Document): string | null {
+    // Strategy 1: Find Next button href in the DOM
+    const selectors = [
+      'a[href*="offset="]:not([disabled])',
+      'a[aria-label="Next"]',
+      '.ml-15 a[href]',
+    ];
+    for (const sel of selectors) {
+      const btn = doc.querySelector<HTMLAnchorElement>(sel);
+      if (btn?.href) return btn.href;
+    }
+
+    // Strategy 2: Construct URL from offset parameter
+    try {
+      const url = new URL(doc.URL);
+      const currentOffset = parseInt(url.searchParams.get("offset") ?? "0", 10);
+      if (currentOffset >= 9) return null; // Brave caps offset at 9
+      url.searchParams.set("offset", String(currentOffset + 1));
+      return url.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  getPaginationSelectors(): string[] {
+    return []; // Keep pagination visible per user requirement
+  }
+
+  getResultId(_node: Element): string | null {
+    return null; // Fall back to URL-hash deduplication
+  }
+
+  getResultsContainer(doc?: Document): Element | null {
+    const d = doc ?? document;
+    return d.querySelector("#results");
+  }
 }

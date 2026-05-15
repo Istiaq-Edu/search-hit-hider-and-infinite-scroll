@@ -1,11 +1,11 @@
-# Search-Hit-Hider
+# Search Hit Hider and Infinite Scroll
 
-> A Firefox extension that hides unwanted domains from search results — one click to block, one click to undo.
+> A Firefox extension that hides unwanted domains from search results — one click to block, one click to undo — with automatic infinite scroll to load more results as you scroll.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Firefox](https://img.shields.io/badge/Firefox-112%2B-orange)](https://www.mozilla.org/firefox/)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-green)](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json)
-[![Version](https://img.shields.io/badge/version-1.5.0-informational)](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
+[![Version](https://img.shields.io/badge/version-1.6.1-informational)](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
 
 [![Get it on Firefox Add-ons](https://img.shields.io/badge/Get%20it%20on-Firefox%20Add--ons-FF7139?style=for-the-badge&logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/en-US/firefox/addon/search-hit-hider/)
 
@@ -13,7 +13,7 @@
 
 ## What it does
 
-When you search on Google, DuckDuckGo, Bing, Yandex, Baidu, or Brave Search, a small **block** button appears next to each result. Click it to hide that domain from all future searches. Blocked results are replaced with a quiet placeholder that lets you show or unblock them any time.
+When you search on Google, DuckDuckGo, Bing, Yandex, Baidu, or Brave Search, a small **block** button appears next to each result. Click it to hide that domain from all future searches. Blocked results are replaced with a quiet placeholder that lets you show or unblock them any time. Scroll to the bottom and more results load automatically — no pagination clicks needed.
 
 No accounts. No servers. No tracking. Everything lives in your browser.
 
@@ -70,11 +70,12 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 - **Auto-load more results** — scroll to the bottom and the next page loads automatically
 - **Configurable** — adjust scroll threshold, max pages, and scroll persistence in settings
 - **Linked to blocking** — works together with hit-hider; when most results are blocked, infinite scroll keeps feeding new pages
-- **Supported engines** — Google, Bing, DuckDuckGo (native), Yandex (pagination fallback kept visible)
+- **Supported engines** — Google (fetch), Bing (fetch), DuckDuckGo (native), Yandex (fetch, pagination kept visible), Brave Search (fetch with container wrapping)
 - **Dedup** — prevents duplicate results across pages (attribute-based + URL hash fallback)
 - **Smart pagination** — clicking a page number scrolls to already-fetched content instead of reloading
 - **Fetch jitter** — randomized delays to avoid detection patterns
 - **DOM management** — automatically discards old pages above the viewport to keep memory lean
+- **Container wrapping** — each fetched page wrapped in a styled container for consistent rendering with the original results
 
 ---
 
@@ -94,7 +95,7 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 ## Installation
 
 ### From Firefox Add-ons (AMO)
-Install Search-Hit-Hider from [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/search-hit-hider/).
+Install Search Hit Hider and Infinite Scroll from [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/search-hit-hider/).
 
 ### Manual (from a release zip)
 1. Download the latest `search-hit-hider-vX.X.X.zip` from [Releases](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Search-Hit-Hider",
-  "version": "1.5.1",
-  "description": "Hide unwanted domains from search results with one click. Supports Google, DuckDuckGo, Bing, Yandex, Baidu, and Brave Search.",
+  "name": "Search Hit Hider and Infinite Scroll",
+  "version": "1.6.1",
+  "description": "Hide unwanted domains from search results with one click. Auto-load more results as you scroll. Supports Google, DuckDuckGo, Bing, Yandex, Baidu, and Brave Search.",
   "author": "Istiaq-Edu",
   "homepage_url": "https://github.com/Istiaq-Edu/Search-Hit-Hider",
 
@@ -22,7 +22,7 @@
       "48": "assets/icons/icon-48.png",
       "128": "assets/icons/icon-128.png"
     },
-    "default_title": "Search-Hit-Hider"
+    "default_title": "Search Hit Hider and Infinite Scroll"
   },
 
   "background": {

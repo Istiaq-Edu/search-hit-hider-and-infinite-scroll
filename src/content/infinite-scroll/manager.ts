@@ -4,6 +4,14 @@ import { Deduper } from "./deduper";
 import { fetchPage } from "./fetcher";
 import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type ScrollState } from "./persist";
 
+// Inline CSS properties that truncate text in server-rendered HTML from SPAs.
+// Stripped from fetched nodes before appending to the live DOM.
+const TRUNCATION_PROPS = [
+  '-webkit-line-clamp', 'line-clamp',
+  'text-overflow',
+  'overflow', 'overflow-x', 'overflow-y',
+];
+
 export interface InfiniteScrollPrefs {
   threshold: number;
   maxPages: number;
@@ -74,7 +82,6 @@ export class InfiniteScrollManager {
     this.currentPage = 1;
 
     if (!this.hasMore) {
-      this.log("No next page URL found — infinite scroll not available");
       return;
     }
 
@@ -112,7 +119,6 @@ export class InfiniteScrollManager {
   }
 
   handleNavigation(): void {
-    this.log("Navigation detected, resetting");
     this.saveScrollStateInternal();
     this.deduper.reset();
     this.destroy();
@@ -227,7 +233,7 @@ export class InfiniteScrollManager {
         const btn = document.querySelector('button[data-testid="more-results"], button.result--more__btn, .results--more button, a.result--more__link');
         this.hasMore = !!btn && this.currentPage < this.config.maxPages;
         this.sentinel?.setState(this.hasMore ? "idle" : "done");
-        this.log(`Trigger appended ${deduped.length} items (page ${this.currentPage})`);
+        this.sentinel?.setState(this.hasMore ? "idle" : "done");
       } catch (err) {
         if (this.destroyed) return;
         // Button not found = no more pages, not an error
@@ -277,7 +283,6 @@ export class InfiniteScrollManager {
       this.currentPage++;
 
       this.sentinel?.setState(this.hasMore ? "idle" : "done");
-      this.log(`Appended ${deduped.length} items (page ${this.currentPage})`);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (this.destroyed) return;
@@ -320,29 +325,53 @@ export class InfiniteScrollManager {
   }
 
   private appendNodes(nodes: Element[]): void {
-    // Insert a dedicated page-marker before this page's results
-    const marker = document.createElement('div');
-    marker.setAttribute('data-inf-page', String(this.currentPage));
-    marker.style.cssText = 'height:1px;width:100%;pointer-events:none;clear:both;';
-    this.container.appendChild(marker);
+    // Wrap the page's results in a container (mirrors the userscript pattern
+    // that works reliably for Brave).  This provides proper spacing and keeps
+    // fetched nodes grouped together.
+    const pageContainer = document.createElement('div');
+    pageContainer.id = `shh-inf-page-${this.currentPage}`;
+    pageContainer.setAttribute('data-inf-page', String(this.currentPage));
+    pageContainer.style.marginTop = '20px';
 
-    const fragment = document.createDocumentFragment();
-    const appended: Element[] = [];
+    // Brave's server-rendered HTML carries inline styles on inner elements
+    // that truncate text (-webkit-line-clamp, overflow:hidden, etc.).  The
+    // live page's Svelte hydration normally manages these, but our fetched
+    // nodes never get hydrated.  Strip these properties so the full text
+    // renders.
 
-    for (const node of nodes) {
-      // Use importNode to adopt the node into the current document
-      const clone = document.importNode(node, true) as Element;
-      // Clear display/float so cards don't merge into each other
-      if (clone instanceof HTMLElement) {
-        clone.style.display = '';
-        clone.style.float = 'none';
-        clone.style.clear = 'both';
+    function stripTruncationStyles(el: HTMLElement): void {
+      for (const prop of TRUNCATION_PROPS) {
+        if (el.style.getPropertyValue(prop)) {
+          el.style.removeProperty(prop);
+        }
       }
-      fragment.appendChild(clone);
-      appended.push(clone);
     }
 
-    this.container.appendChild(fragment);
+    for (const node of nodes) {
+      const clone = document.importNode(node, true) as Element;
+      // Strip truncation styles from the root node
+      if (clone instanceof HTMLElement) {
+        stripTruncationStyles(clone);
+      }
+      // Strip from ALL descendants — description <p> elements carry
+      // -webkit-line-clamp: 3 with overflow: hidden.
+      const descendants = clone.querySelectorAll<HTMLElement>('*');
+      for (const desc of descendants) {
+        stripTruncationStyles(desc);
+      }
+      pageContainer.appendChild(clone);
+    }
+
+    // Insert before the pagination element if it exists, otherwise append
+    // to the end of the results container.
+    const pagination = this.container.querySelector('#pagination-snippet, nav[role="pagination"], .pagination');
+    if (pagination) {
+      this.container.insertBefore(pageContainer, pagination);
+    } else {
+      this.container.appendChild(pageContainer);
+    }
+
+    const appended = Array.from(pageContainer.children) as Element[];
     this.onNewNodes(appended);
     this.interceptPagination();
     this.discardOldPages();

@@ -99,7 +99,7 @@ async function init(): Promise<void> {
   // returns unstamped nodes (processResults stamps with data-shh-result).
   // The sentinel is placed after the container, which is fine since results
   // are already in the DOM at this point.
-  if (prefs.infiniteScroll && engine.getNextPageUrl) {
+  if (prefs.infiniteScroll && (engine.getNextPageUrl || engine.triggerNextPage)) {
     const container = findInfiniteScrollContainer();
     if (container) {
       infiniteScrollManager = new InfiniteScrollManager(
@@ -425,7 +425,7 @@ async function refreshPrefs(): Promise<void> {
     if (!prefs.infiniteScroll && infiniteScrollManager) {
       infiniteScrollManager.destroy();
       infiniteScrollManager = null;
-    } else if (prefs.infiniteScroll && !infiniteScrollManager && engine?.getNextPageUrl) {
+    } else if (prefs.infiniteScroll && !infiniteScrollManager && (engine?.getNextPageUrl || engine?.triggerNextPage)) {
       const container = findInfiniteScrollContainer();
       if (container) {
         infiniteScrollManager = new InfiniteScrollManager(
