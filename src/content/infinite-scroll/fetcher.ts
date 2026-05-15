@@ -34,6 +34,15 @@ export async function fetchPage(
     const html = await response.text();
     const doc = new DOMParser().parseFromString(html, "text/html");
 
+    // Inject a <base> tag so relative URLs resolve against the fetched URL.
+    // Without this, links like "/search?p=2" resolve to "about:blank/search?p=2"
+    // and pagination detection fails on subsequent fetches.
+    const base = doc.createElement("base");
+    base.href = url;
+    if (doc.head) {
+      doc.head.prepend(base);
+    }
+
     return { doc, nextUrl: null };
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;

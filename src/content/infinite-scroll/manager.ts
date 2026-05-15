@@ -178,7 +178,13 @@ export class InfiniteScrollManager {
       { rootMargin: `${this.config.threshold}px` }
     );
     if (this.sentinel) {
-      this.observer.observe(this.sentinel.element);
+      // Defer by 2s so the sentinel doesn't fire immediately on short
+      // first pages where it's already within the threshold.
+      setTimeout(() => {
+        if (this.observer && this.sentinel) {
+          this.observer.observe(this.sentinel.element);
+        }
+      }, 2000);
     }
   }
 
@@ -317,14 +323,21 @@ export class InfiniteScrollManager {
     // Insert a dedicated page-marker before this page's results
     const marker = document.createElement('div');
     marker.setAttribute('data-inf-page', String(this.currentPage));
-    marker.style.cssText = 'height:1px;width:100%;pointer-events:none';
+    marker.style.cssText = 'height:1px;width:100%;pointer-events:none;clear:both;';
     this.container.appendChild(marker);
 
     const fragment = document.createDocumentFragment();
     const appended: Element[] = [];
 
     for (const node of nodes) {
-      const clone = node.cloneNode(true) as Element;
+      // Use importNode to adopt the node into the current document
+      const clone = document.importNode(node, true) as Element;
+      // Clear display/float so cards don't merge into each other
+      if (clone instanceof HTMLElement) {
+        clone.style.display = '';
+        clone.style.float = 'none';
+        clone.style.clear = 'both';
+      }
       fragment.appendChild(clone);
       appended.push(clone);
     }
@@ -380,6 +393,9 @@ export class InfiniteScrollManager {
       return;
     }
     if (saved.url !== window.location.href) return;
+    // Only restore scroll if extra pages were loaded — avoids auto-scrolling
+    // to the bottom on a fresh first-page visit.
+    if (saved.loadedPages <= 1) return;
 
     // Defer scroll restoration after DOM is stable
     requestAnimationFrame(() => {

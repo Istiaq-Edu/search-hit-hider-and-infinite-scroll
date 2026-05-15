@@ -44,7 +44,7 @@ export interface EngineAdapter {
   // ── Infinite scroll (optional) ────────────────────────────────────────
 
   /** Return the URL for the next page of results (e.g. the "Next" button href), or null. */
-  getNextPageUrl?(doc: Document): string | null;
+  getNextPageUrl?(doc: Document, currentUrl?: string): string | null;
 
   /** CSS selectors for pagination elements to hide when infinite scroll is active. */
   getPaginationSelectors?(): string[];

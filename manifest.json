@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Search-Hit-Hider",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Hide unwanted domains from search results with one click. Supports Google, DuckDuckGo, Bing, Yandex, Baidu, and Brave Search.",
   "author": "Istiaq-Edu",
   "homepage_url": "https://github.com/Istiaq-Edu/Search-Hit-Hider",
