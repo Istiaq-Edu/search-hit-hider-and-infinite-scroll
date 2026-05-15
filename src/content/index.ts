@@ -294,8 +294,20 @@ function processResults(nodes: Element[]): void {
 function injectButtonForResult(node: Element, url: string): void {
   if (!prefs || !engine) return;
 
-  const target = engine.getButtonTarget(node);
+  let target = engine.getButtonTarget(node);
   if (!target) return;
+
+  // Brave: wrap the title anchor in a flex row container so the button
+  // sits inline with the title instead of below it or at the card corner.
+  let insertPosition: "after" | "append" | "before" = "after";
+  if (engine.id === "brave" && target.tagName.toLowerCase() === "a") {
+    const wrapper = document.createElement("span");
+    wrapper.style.cssText = "display:inline-flex;align-items:center;gap:6px;";
+    target.replaceWith(wrapper);
+    wrapper.appendChild(target);
+    target = wrapper;
+    insertPosition = "append";
+  }
 
   // Append inside headings (h2/h3/h4) rather than inserting after cite.
   // The cite row on Google is a flex container that also holds the three-dot
@@ -304,9 +316,9 @@ function injectButtonForResult(node: Element, url: string): void {
   // cite-row flex flow entirely. This mirrors the Jefferson Scher userscript
   // behaviour (lines 1480-1487).
   const tagName = target.tagName.toLowerCase();
-  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4";
+  const useAppend = tagName === "h3" || tagName === "h2" || tagName === "h4" || insertPosition === "append";
 
-  if (useAppend) {
+  if (useAppend && engine.id !== "brave") {
     // Let the button overflow the heading without clipping
     (target as HTMLElement).style.overflow = "visible";
   }
@@ -340,9 +352,9 @@ function injectButtonForResult(node: Element, url: string): void {
   //   is a flex row. top:4.25em clears the title + source rows and lands in
   //   the cite/feedback row area — matching the userscript reference.
   //
-  // Brave: button is inserted after a.l1 (title anchor). Brave's result-content
-  //   is a flex column, so the button naturally flows below the title. We wrap
-  //   the title + button in a row container so they sit side-by-side.
+  // Brave: no special positioning — let the button flow naturally after
+  //   the title anchor (a.l1). Brave's result-content is a flex column,
+  //   so the button appears on its own line below the title.
   if (btn?.parentElement) {
     if (engine.id === "google") {
       const pStyle = window.getComputedStyle(btn.parentElement);
@@ -350,17 +362,6 @@ function injectButtonForResult(node: Element, url: string): void {
         (btn.parentElement as HTMLElement).style.position = "relative";
         btn.style.cssText =
           btn.style.cssText + ";position:absolute;right:0;top:4.25em;margin:0;";
-      }
-    } else if (engine.id === "brave") {
-      // Brave's a.l1 is inside a flex column. Create a wrapper row around
-      // the title anchor and button so they sit side-by-side on the same line.
-      const titleAnchor = btn.previousElementSibling;
-      if (titleAnchor) {
-        const wrapper = document.createElement("span");
-        wrapper.style.cssText = "display:inline-flex;align-items:center;gap:8px;";
-        titleAnchor.replaceWith(wrapper);
-        wrapper.appendChild(titleAnchor);
-        wrapper.appendChild(btn);
       }
     }
   }
