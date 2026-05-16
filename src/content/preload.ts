@@ -341,35 +341,52 @@
   function buildHasRules(curLc: string[], curWild: boolean): void {
     try {
       const isNew = !hasSheet;
-      const sheet = isNew ? new CSSStyleSheet() : hasSheet!;
-      // Clear any stale rules from a previous call.
-      while (sheet.cssRules.length > 0) sheet.deleteRule(0);
-      let idx = 0;
-      for (const d of curLc) {
-        // *= "contains" selectors match the raw href attribute value.
-        // "://${d}/" appears in both direct and Google redirect URLs.
-        // Also include "://${d}?" and "://${d}&" for bare-domain redirects
-        // like /url?q=https://example.com&sa=U (no trailing slash).
-        const hrefs = [
-          `a[href*="://${d}/"]`,
-          `a[href*="://${d}?"]`,
-          `a[href*="://${d}&"]`,
-          `a[href*="://www.${d}/"]`,
-          `a[href*="://www.${d}?"]`,
-          `a[href*="://www.${d}&"]`,
-        ];
-        // Wildcard: ".${d}/" matches any subdomain — also a substring of
-        // redirect links like /url?q=https://sub.d/….
-        if (curWild) hrefs.push(`a[href*=".${d}/"]`, `a[href*=".${d}?"]`, `a[href*=".${d}&"]`);
-        try {
-          sheet.insertRule(
-            `:is(${SELS}):has(${hrefs.join(",")}){display:none!important}`,
-            idx++
+      // Build all rules as a single string for batch replacement
+      const rules: string[] = [];
+      const BATCH_SIZE = 50; // domains per :is() group to avoid selector length limits
+
+      for (let i = 0; i < curLc.length; i += BATCH_SIZE) {
+        const batch = curLc.slice(i, i + BATCH_SIZE);
+        const hrefs: string[] = [];
+        for (const d of batch) {
+          hrefs.push(
+            `a[href*="://${d}/"]`,
+            `a[href*="://${d}?"]`,
+            `a[href*="://${d}&"]`,
+            `a[href*="://www.${d}/"]`,
+            `a[href*="://www.${d}?"]`,
+            `a[href*="://www.${d}&"]`
           );
-        } catch { /* selector invalid in this browser — skip */ }
+          if (curWild) {
+            hrefs.push(
+              `a[href*=".${d}/"]`,
+              `a[href*=".${d}?"]`,
+              `a[href*=".${d}&"]`
+            );
+          }
+        }
+        try {
+          rules.push(`:is(${SELS}):has(:is(${hrefs.join(",") })){display:none!important}`);
+        } catch { /* selector invalid in this browser — skip batch */ }
       }
-      // Attach the sheet the first time we have at least one valid rule.
-      if (isNew && idx > 0) {
+
+      if (rules.length === 0 && !isNew) return;
+
+      const sheet = isNew ? new CSSStyleSheet() : hasSheet!;
+      // Use replaceSync for batch replacement (Firefox 115+)
+      try {
+        sheet.replaceSync(rules.join("\n"));
+      } catch {
+        // Fallback: clear and insert individually
+        while (sheet.cssRules.length > 0) sheet.deleteRule(0);
+        for (const rule of rules) {
+          try {
+            sheet.insertRule(rule, sheet.cssRules.length);
+          } catch { /* skip invalid */ }
+        }
+      }
+
+      if (isNew && rules.length > 0) {
         document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
         hasSheet = sheet;
       }
@@ -414,36 +431,31 @@
     if (el.getAttribute("data-shh-ok")) return;
 
     // *** CONTAINER GUARD ***
-    // If this element contains other elements that also match our selectors,
-    // it is a parent/container wrapping multiple results — not a result itself.
-    // Hiding it would hide every result inside.  Skip it unconditionally.
-    try {
-      if (el.querySelector(SELS)) return;
-    } catch { /* ignore selector errors */ }
-
-    // Collect external links (skip anchors and javascript: URIs).
-    let hasExternalLink = false;
-    const links = el.querySelectorAll<HTMLAnchorElement>("a[href]");
-    for (const a of links) {
-      const href = a.getAttribute("href") ?? "";
-      if (!href || href.startsWith("#") || href.startsWith("javascript")) continue;
-      hasExternalLink = true;
-      const host = resolveHost(a);
-      if (host && hostMatches(host)) {
-        // Blocked — hide with display:none and mark.
-        (el as HTMLElement).style.setProperty("display", "none", "important");
-        el.setAttribute("data-shh-preloaded", "true");
-        return;
-      }
+    // Skip expensive querySelector for elements that are clearly not containers
+    // (result containers are always div, li, or section elements).
+    const tag = el.tagName;
+    if (tag === "DIV" || tag === "LI" || tag === "SECTION") {
+      try {
+        if (el.querySelector(SELS)) return;
+      } catch { /* ignore selector errors */ }
     }
 
-    // Not blocked.
-    // Google: explicitly reveal by adding data-shh-ok so the cover CSS lifts.
-    //   Only do this when we found at least one external link — if there are
-    //   no links yet the node is a skeleton and we must wait for links to arrive
-    //   (the MutationObserver closest() handler will re-call tryHide then).
-    // Other engines: nothing to do — they were never covered.
-    if (isGoogle && hasExternalLink) {
+    // Check only the first meaningful external link (most result cards have one).
+    const a = el.querySelector<HTMLAnchorElement>('a[href]:not([href^="#"]):not([href^="javascript"])');
+    if (!a) return;
+    const href = a.getAttribute("href") ?? "";
+    if (!href || href.startsWith("#") || href.startsWith("javascript")) return;
+
+    const host = resolveHost(a);
+    if (host && hostMatches(host)) {
+      // Blocked — hide with display:none and mark.
+      (el as HTMLElement).style.setProperty("display", "none", "important");
+      el.setAttribute("data-shh-preloaded", "true");
+      return;
+    }
+
+    // Not blocked — reveal if Google and has external link.
+    if (isGoogle) {
       el.setAttribute("data-shh-ok", "true");
     }
   }
@@ -454,18 +466,30 @@
 
   // Rescan after the DOM is fully parsed — catches results that Google's
   // inline scripts add between document_start and DOMContentLoaded.
-  // Also schedule extra rescans at 100/300/600 ms to catch Google's deferred
-  // two-step hydration (shell inserted first, links added shortly after).
+  // Use a single requestAnimationFrame loop instead of multiple setTimeouts
+  // to catch Google's deferred two-step hydration efficiently.
+  let rafScanCount = 0;
+  function rafRescan(): void {
+    try {
+      const nodes = document.querySelectorAll(SELS);
+      let hasUnprocessed = false;
+      for (const node of nodes) {
+        if (!node.getAttribute("data-shh-preloaded") && !node.getAttribute("data-shh-ok")) {
+          tryHide(node);
+          hasUnprocessed = true;
+        }
+      }
+      rafScanCount++;
+      // Stop after 3 scans or when all nodes are processed
+      if (hasUnprocessed && rafScanCount < 3) {
+        requestAnimationFrame(rafRescan);
+      }
+    } catch { /* ignore */ }
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     try { document.querySelectorAll(SELS).forEach(tryHide); } catch { /* ignore */ }
-    // Extra timed rescans: Google hydrates the page in multiple JS tasks
-    // after DOMContentLoaded.  Running tryHide a few times in the first
-    // 600 ms catches any result that was populated after the initial scan.
-    for (const delay of [100, 300, 600]) {
-      setTimeout(() => {
-        try { document.querySelectorAll(SELS).forEach(tryHide); } catch { /* ignore */ }
-      }, delay);
-    }
+    requestAnimationFrame(rafRescan);
     // Safety-net: after 2 s, reveal any Google results that are still covered
     // (e.g. the content script took longer than expected to run processResults).
     // The content script calls __shhRevealGoogle() itself after processResults()

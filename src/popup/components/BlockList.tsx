@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from "preact/hooks";
+import { useState, useMemo, useRef, useCallback, useEffect } from "preact/hooks";
 import type { BlockEntry, Prefs, BulkOperation } from "../../shared/types";
 import { sortEntries, filterEntries } from "../../shared/list-utils";
 import { normalizeDomain } from "../../shared/domain-utils";
@@ -14,6 +14,9 @@ interface Props {
 
 type SortKey = "date_desc" | "date_asc" | "alpha_asc" | "alpha_desc";
 
+const ROW_HEIGHT = 36;
+const BUFFER_SIZE = 5;
+
 export function BlockList({ entries, prefs, onRefresh }: Props) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("date_desc");
@@ -21,7 +24,11 @@ export function BlockList({ entries, prefs, onRefresh }: Props) {
   const [addDomain, setAddDomain] = useState("");
   const [showImportExport, setShowImportExport] = useState(false);
   const [feedback, setFeedback] = useState("");
+  const [scrollTop, setScrollTop] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(400);
   const addInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const blockEntries = entries.filter((e) => e.mode === "block");
   const filtered = useMemo(
@@ -31,8 +38,15 @@ export function BlockList({ entries, prefs, onRefresh }: Props) {
 
   function flash(msg: string) {
     setFeedback(msg);
-    setTimeout(() => setFeedback(""), 2500);
+    if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
+    feedbackTimer.current = setTimeout(() => setFeedback(""), 2500);
   }
+
+  useEffect(() => {
+    return () => {
+      if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
+    };
+  }, []);
 
   async function handleAdd() {
     const domain = normalizeDomain(addDomain.trim());
@@ -74,6 +88,33 @@ export function BlockList({ entries, prefs, onRefresh }: Props) {
       return n;
     });
   }
+
+  const onScroll = useCallback((e: Event) => {
+    const target = e.currentTarget as HTMLDivElement;
+    setScrollTop(target.scrollTop);
+  }, []);
+
+  // Measure container height on mount and resize
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerHeight(Math.floor(entry.contentRect.height));
+      }
+    });
+    ro.observe(el);
+    setContainerHeight(el.clientHeight);
+    return () => ro.disconnect();
+  }, []);
+
+  // Virtualization: render only visible rows + buffer
+  const visibleStart = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_SIZE);
+  const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + BUFFER_SIZE * 2;
+  const visibleEnd = Math.min(filtered.length, visibleStart + visibleCount);
+  const visibleEntries = filtered.slice(visibleStart, visibleEnd);
+  const topPadding = visibleStart * ROW_HEIGHT;
+  const bottomPadding = (filtered.length - visibleEnd) * ROW_HEIGHT;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -174,10 +215,7 @@ export function BlockList({ entries, prefs, onRefresh }: Props) {
       )}
 
       {/* ── Scrollable area: list + Import/Export panel ── */}
-      {/* This single scrollable div contains everything that can grow,
-          so ImportExport is always reachable by scrolling — it never
-          gets clipped by the parent overflow:hidden. */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+      <div ref={scrollRef} onScroll={onScroll} style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
         {filtered.length === 0 ? (
           <div style={{
             padding: "24px",
@@ -190,16 +228,22 @@ export function BlockList({ entries, prefs, onRefresh }: Props) {
               : "No blocked domains yet. Browse a search engine and click the block button next to a result."}
           </div>
         ) : (
-          filtered.map((entry) => (
-            <ListEntry
-              key={entry.domain}
-              entry={entry}
-              selected={selected.has(entry.domain)}
-              onSelect={() => toggleSelect(entry.domain)}
-              onRemove={() => void handleRemove(entry.domain)}
-              onToggle={(enabled) => void handleToggle(entry.domain, enabled)}
-            />
-          ))
+          <div style={{ position: "relative" }}>
+            <div style={{ height: topPadding }} />
+            {visibleEntries.map((entry) => (
+              <div style={{ height: ROW_HEIGHT }}>
+                <ListEntry
+                  key={entry.domain}
+                  entry={entry}
+                  selected={selected.has(entry.domain)}
+                  onSelect={() => toggleSelect(entry.domain)}
+                  onRemove={() => void handleRemove(entry.domain)}
+                  onToggle={(enabled) => void handleToggle(entry.domain, enabled)}
+                />
+              </div>
+            ))}
+            <div style={{ height: bottomPadding }} />
+          </div>
         )}
 
         {/* Import/Export lives inside the scroll area so it's always accessible */}

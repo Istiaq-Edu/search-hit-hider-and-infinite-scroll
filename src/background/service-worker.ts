@@ -21,6 +21,10 @@ import { addEntry, removeEntry, updateEntry, applyBulkOp } from "../shared/list-
 let cachedEntries: BlockEntry[] | null = null;
 let cachedPrefs: Prefs | null = null;
 
+// Debounced storage writes to avoid sequential writes for rapid changes
+let pendingSave: ReturnType<typeof setTimeout> | null = null;
+let pendingEntries: BlockEntry[] | null = null;
+
 async function getEntries(): Promise<BlockEntry[]> {
   if (!cachedEntries) cachedEntries = await loadEntries();
   return cachedEntries;
@@ -33,7 +37,28 @@ async function getPrefs(): Promise<Prefs> {
 
 async function persistEntries(entries: BlockEntry[]): Promise<void> {
   cachedEntries = entries;
-  await saveEntries(entries);
+  scheduleSave(entries);
+}
+
+function scheduleSave(entries: BlockEntry[]): void {
+  pendingEntries = entries;
+  if (pendingSave) clearTimeout(pendingSave);
+  pendingSave = setTimeout(() => {
+    if (pendingEntries) {
+      saveEntries(pendingEntries);
+      pendingEntries = null;
+    }
+    pendingSave = null;
+  }, 500);
+}
+
+// Flush pending writes on extension shutdown
+if (browser.runtime.onSuspend) {
+  browser.runtime.onSuspend.addListener(() => {
+    if (pendingEntries) {
+      saveEntries(pendingEntries);
+    }
+  });
 }
 
 // Invalidate cache when storage changes externally (e.g. other device via sync)
@@ -50,11 +75,21 @@ browser.storage.onChanged.addListener((changes, area) => {
 // Message handler
 // ============================================================
 
+// Track tabs with active content scripts to avoid broadcasting to all tabs
+const activeTabIds = new Set<number>();
+
 browser.runtime.onMessage.addListener(
   (
     message: unknown,
-    _sender: browser.runtime.MessageSender
+    sender: browser.runtime.MessageSender
   ): Promise<unknown> | true => {
+    // Register tabs that send us messages (content scripts are active)
+    if (sender.tab?.id && message && typeof message === "object" && "type" in message) {
+      const msg = message as { type: string };
+      if (msg.type !== "PREFS_UPDATED" && msg.type !== "LIST_UPDATED") {
+        activeTabIds.add(sender.tab.id);
+      }
+    }
     if (!message || typeof message !== "object" || !("type" in message)) {
       return true;
     }
@@ -63,6 +98,10 @@ browser.runtime.onMessage.addListener(
     return handleMessage(msg);
   }
 );
+
+browser.tabs.onRemoved.addListener((tabId) => {
+  activeTabIds.delete(tabId);
+});
 
 async function handleMessage(msg: ExtMessage): Promise<unknown> {
   switch (msg.type) {
@@ -167,19 +206,33 @@ async function handleMessage(msg: ExtMessage): Promise<unknown> {
 // ============================================================
 
 async function broadcastToContentScripts(message: object): Promise<void> {
-  try {
-    const tabs = await browser.tabs.query({});
-    for (const tab of tabs) {
-      if (tab.id !== undefined) {
-        try {
-          await browser.tabs.sendMessage(tab.id, message);
-        } catch {
-          // Tab has no content script — ignore
+  if (activeTabIds.size === 0) {
+    // Fallback: no registered tabs yet, query all tabs (first-run scenario)
+    try {
+      const tabs = await browser.tabs.query({});
+      for (const tab of tabs) {
+        if (tab.id !== undefined) {
+          try {
+            await browser.tabs.sendMessage(tab.id, message);
+            activeTabIds.add(tab.id);
+          } catch { /* Tab has no content script — ignore */ }
         }
       }
+    } catch { /* tabs API unavailable */ }
+    return;
+  }
+
+  const deadTabs: number[] = [];
+  for (const tabId of activeTabIds) {
+    try {
+      await browser.tabs.sendMessage(tabId, message);
+    } catch {
+      deadTabs.push(tabId);
     }
-  } catch {
-    // tabs API unavailable in this context — ignore
+  }
+  // Clean up dead tabs
+  for (const tabId of deadTabs) {
+    activeTabIds.delete(tabId);
   }
 }
 

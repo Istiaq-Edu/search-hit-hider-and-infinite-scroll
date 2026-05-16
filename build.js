@@ -35,9 +35,12 @@ async function build() {
   copyFileSync("manifest.json", "dist/manifest.json");
 
   const iconsDir = "src/assets/icons";
+  const REQUIRED_ICONS = ["icon-16.png", "icon-32.png", "icon-48.png", "icon-96.png", "icon-128.png"];
   if (existsSync(iconsDir)) {
     for (const f of readdirSync(iconsDir)) {
-      copyFileSync(join(iconsDir, f), join("dist/assets/icons", f));
+      if (REQUIRED_ICONS.includes(f)) {
+        copyFileSync(join(iconsDir, f), join("dist/assets/icons", f));
+      }
     }
   }
 

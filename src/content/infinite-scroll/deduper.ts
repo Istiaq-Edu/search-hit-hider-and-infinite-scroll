@@ -2,21 +2,36 @@ import type { EngineAdapter } from "../engines/base";
 
 export class Deduper {
   private seen: Set<string>;
+  private insertionOrder: string[];
+  private readonly MAX_SIZE = 500;
+  private readonly EVICT_COUNT = 125;
 
   constructor() {
     this.seen = new Set();
+    this.insertionOrder = [];
   }
 
   isDuplicate(node: Element, engine: EngineAdapter): boolean {
     const id = this.getNodeId(node, engine);
     if (!id) return false;
     if (this.seen.has(id)) return true;
+
+    // Evict oldest entries if at capacity
+    if (this.seen.size >= this.MAX_SIZE) {
+      for (let i = 0; i < this.EVICT_COUNT; i++) {
+        const oldest = this.insertionOrder.shift();
+        if (oldest) this.seen.delete(oldest);
+      }
+    }
+
     this.seen.add(id);
+    this.insertionOrder.push(id);
     return false;
   }
 
   reset(): void {
     this.seen.clear();
+    this.insertionOrder = [];
   }
 
   get size(): number {

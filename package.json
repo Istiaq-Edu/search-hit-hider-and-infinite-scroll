@@ -16,8 +16,7 @@
     "package": "node build.js && web-ext build --source-dir=dist --artifacts-dir=releases"
   },
   "dependencies": {
-    "preact": "^10.22.0",
-    "tldts": "^6.1.32"
+    "preact": "^10.22.0"
   },
   "devDependencies": {
     "@types/firefox-webext-browser": "^120.0.4",

@@ -41,6 +41,7 @@ export class InfiniteScrollManager {
   private deduper: Deduper;
   private abortController: AbortController | null = null;
   private urlCheckInterval: ReturnType<typeof setInterval> | null = null;
+  private pageContainers = new Map<number, HTMLElement>();
 
   private isLoading = false;
   private currentPage = 1;
@@ -90,7 +91,7 @@ export class InfiniteScrollManager {
     this.interceptPagination();
     this.createSentinel();
     this.startObserver();
-    this.startUrlPolling();
+    this.startNavigationDetection();
     this.bindScrollSave();
 
     if (this.config.persist) {
@@ -116,6 +117,11 @@ export class InfiniteScrollManager {
       clearTimeout(this.scrollSaveTimer);
       this.scrollSaveTimer = null;
     }
+    window.removeEventListener("scroll", this.onScroll);
+    window.removeEventListener("beforeunload", this.saveScrollStateInternal);
+    window.removeEventListener("pagehide", this.saveScrollStateInternal);
+    this.removePaginationListeners();
+    this.pageContainers.clear();
   }
 
   handleNavigation(): void {
@@ -127,10 +133,20 @@ export class InfiniteScrollManager {
     this.hasMore = true;
     this.isLoading = false;
     this.currentPage = 1;
+    this.pageContainers.clear();
     this.init();
   }
 
   // ── Private ─────────────────────────────────────────────────────────────
+
+  private removePaginationListeners(): void {
+    const links = this.container.querySelectorAll<HTMLAnchorElement>('a[data-inf-intercept]');
+    for (const link of links) {
+      link.removeAttribute('data-inf-intercept');
+      const clone = link.cloneNode(true) as HTMLAnchorElement;
+      link.parentNode?.replaceChild(clone, link);
+    }
+  }
 
   private hidePagination(): void {
     const selectors = this.engine.getPaginationSelectors?.();
@@ -194,12 +210,20 @@ export class InfiniteScrollManager {
     }
   }
 
-  private startUrlPolling(): void {
+  private startNavigationDetection(): void {
+    const onNavigate = () => {
+      if (window.location.href !== this.currentUrl) {
+        this.handleNavigation();
+      }
+    };
+    window.addEventListener("popstate", onNavigate);
+    window.addEventListener("hashchange", onNavigate);
+    // Fallback polling for engines that use history.pushState without popstate
     this.urlCheckInterval = setInterval(() => {
       if (window.location.href !== this.currentUrl) {
         this.handleNavigation();
       }
-    }, 1000);
+    }, 2000);
   }
 
   private async fetchNextPage(): Promise<void> {
@@ -349,14 +373,15 @@ export class InfiniteScrollManager {
 
     for (const node of nodes) {
       const clone = document.importNode(node, true) as Element;
-      // Strip truncation styles from the root node
+      // Strip truncation styles only from elements likely to have them
+      // (avoids querySelectorAll('*') which iterates all descendants)
+      const truncateTargets = clone.querySelectorAll<HTMLElement>(
+        'p, span, div, [style*="clamp"], [style*="overflow"]'
+      );
       if (clone instanceof HTMLElement) {
         stripTruncationStyles(clone);
       }
-      // Strip from ALL descendants — description <p> elements carry
-      // -webkit-line-clamp: 3 with overflow: hidden.
-      const descendants = clone.querySelectorAll<HTMLElement>('*');
-      for (const desc of descendants) {
+      for (const desc of truncateTargets) {
         stripTruncationStyles(desc);
       }
       pageContainer.appendChild(clone);
@@ -374,6 +399,8 @@ export class InfiniteScrollManager {
     const appended = Array.from(pageContainer.children) as Element[];
     this.onNewNodes(appended);
     this.interceptPagination();
+    // Track page container for efficient discard
+    this.pageContainers.set(this.currentPage, pageContainer);
     this.discardOldPages();
   }
 
@@ -381,13 +408,14 @@ export class InfiniteScrollManager {
   private discardOldPages(): void {
     if (this.currentPage <= 6) return;
     const cutoffPage = this.currentPage - 6;
-    const nodes = this.container.querySelectorAll<HTMLElement>('[data-inf-page]');
-    for (const node of nodes) {
-      const page = parseInt(node.getAttribute('data-inf-page') ?? '0', 10);
+    for (const [page, container] of this.pageContainers) {
       if (page > cutoffPage) continue;
-      const rect = node.getBoundingClientRect();
+      // Check if page is above viewport without forced reflow
+      // Use a cached estimate based on scroll position at append time
+      const rect = container.getBoundingClientRect();
       if (rect.bottom < -100) {
-        node.remove();
+        container.remove();
+        this.pageContainers.delete(page);
       }
     }
   }

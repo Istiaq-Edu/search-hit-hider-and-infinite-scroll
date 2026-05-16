@@ -1,5 +1,7 @@
-import type { BlockEntry, Prefs } from "../shared/types";
+import type { BlockEntry, Prefs, BlockMode } from "../shared/types";
 import { detectEngine } from "./engines/registry";
+import type { EngineAdapter } from "./engines/base";
+import type { MatchResult } from "./blocking/matcher";
 import { DomainMatcher } from "./blocking/matcher";
 import { hideResult, showOnce, rehideResult, restoreByDomain, getHiddenNodes, convertHiddenToPermaban, restoreResult } from "./blocking/hider";
 import { ResultObserver } from "./blocking/observer";
@@ -14,11 +16,94 @@ import { InfiniteScrollManager } from "./infinite-scroll/manager";
 // Content script entry point
 // ============================================================
 
+// Shared action handler class — reduces per-node closure allocations
+class ResultActions {
+  constructor(
+    private node: Element,
+    private domain: string,
+    private url: string,
+    private matchResult: MatchResult,
+    private prefs: Prefs,
+    private engine: EngineAdapter,
+    private onStateChange: () => void
+  ) {}
+
+  doShowOnce = (): void => {
+    showOnce(this.node, this.domain, this.doRehide, this.doUnblock);
+  };
+
+  doRehide = (): void => {
+    rehideResult(this.node, this.matchResult, this.url, this.prefs.showNotices,
+      this.doShowOnce, this.doUnblock, this.doPermaban);
+  };
+
+  doUnblock = async (): Promise<void> => {
+    const releasedRoots = restoreByDomain(this.domain);
+    const releasedSet = new Set(releasedRoots);
+
+    entries = entries.filter((e) => e.domain !== this.domain);
+    refreshMatcher();
+    updateCache();
+    updateHasRules();
+
+    const allNodes = getCachedResultNodes();
+    processResults(allNodes.filter((n) => !releasedSet.has(n)));
+
+    for (const n of releasedRoots) {
+      const nodeUrl = this.engine.getResultUrl(n);
+      if (nodeUrl) injectButtonForResult(n, nodeUrl);
+    }
+
+    await removeEntry(this.domain);
+    showToast(`Unblocked ${this.domain}`, async () => {
+      const restored = await undoLast();
+      if (restored) {
+        entries = [...entries, restored];
+        refreshMatcher();
+        updateCache();
+        processResults(this.engine.getResultNodes(document));
+        updateHasRules();
+      }
+    });
+  };
+
+  doPermaban = async (): Promise<void> => {
+    entries = entries.map((entry) =>
+      entry.domain === this.domain ? { ...entry, mode: "pban" as const, enabled: true } : entry
+    );
+    refreshMatcher();
+    updateCache();
+    updateHasRules();
+    convertHiddenToPermaban(this.node);
+    await updateEntry(this.domain, { mode: "pban", enabled: true });
+    showToast(`Perma-banned ${this.domain}`, async () => {
+      entries = entries.map((entry) =>
+        entry.domain === this.domain ? { ...entry, mode: "block" as const, enabled: true } : entry
+      );
+      refreshMatcher();
+      updateCache();
+      updateHasRules();
+      restoreResult(this.node);
+      hideResult(
+        this.node,
+        { matched: true, domain: this.domain, mode: "block" },
+        this.url,
+        this.prefs.showNotices,
+        this.doShowOnce,
+        this.doUnblock,
+        this.doPermaban
+      );
+      await updateEntry(this.domain, { mode: "block", enabled: true });
+    });
+  };
+}
+
 let entries: BlockEntry[] = [];
 let prefs: Prefs | null = null;
 let matcher: DomainMatcher | null = null;
 let observer: ResultObserver | null = null;
 let infiniteScrollManager: InfiniteScrollManager | null = null;
+let cachedResultNodes: Element[] | null = null;
 
 const currentUrl = new URL(location.href);
 const engine = detectEngine(currentUrl);
@@ -120,7 +205,7 @@ async function init(): Promise<void> {
   }
 
   // Process existing results.
-  processResults(engine.getResultNodes(document));
+  processResults(getCachedResultNodes());
 
   // Google-specific: the preload keeps ALL div.g containers visibility:hidden
   // until they are confirmed safe (data-shh-ok) or blocked (data-shh-preloaded).
@@ -131,32 +216,71 @@ async function init(): Promise<void> {
   // Watch for dynamic results (infinite scroll, AJAX pagination, etc.)
   if (prefs.mutationObserver) {
     const IGNORE = [".shh-placeholder", ".shh-dialog", ".shh-toast", "[data-shh-btn]"];
+    // Batch mutations via queueMicrotask to avoid redundant processResults calls
+    let pendingNodes: Element[] = [];
+    let microtaskScheduled = false;
+
     observer = new ResultObserver((newNodes) => {
-      const resultNodes: Element[] = [];
-      for (const node of newNodes) {
-        const engineNodes = engine.getResultNodes(node as unknown as Document);
-        if (engineNodes.length > 0) {
-          resultNodes.push(...engineNodes);
-        } else {
-          // The mutated node itself might be a result
-          const url = engine.getResultUrl(node);
-          if (url) resultNodes.push(node);
-        }
+      pendingNodes.push(...newNodes);
+      if (!microtaskScheduled) {
+        microtaskScheduled = true;
+        queueMicrotask(() => {
+          const batch = pendingNodes.splice(0);
+          microtaskScheduled = false;
+          if (batch.length === 0) return;
+          // Deduplicate by reference
+          const seen = new Set<Element>();
+          const unique: Element[] = [];
+          for (const n of batch) {
+            if (!seen.has(n)) {
+              seen.add(n);
+              unique.push(n);
+            }
+          }
+          processResultNodes(unique);
+        });
       }
-      processResults(resultNodes);
     }, IGNORE);
 
     observer.start(document.body, engine.observerOptions?.());
   }
 
   // Listen for messages from popup (prefs/list updates)
-  browser.runtime.onMessage.addListener((msg: unknown) => {
+  const messageHandler = (msg: unknown) => {
     if (msg && typeof msg === "object" && "type" in msg) {
       const m = msg as { type: string };
       if (m.type === "PREFS_UPDATED") void refreshPrefs();
       if (m.type === "LIST_UPDATED")  void refreshEntries();
     }
-  });
+  };
+  browser.runtime.onMessage.addListener(messageHandler);
+}
+
+function getCachedResultNodes(): Element[] {
+  if (!cachedResultNodes) {
+    cachedResultNodes = engine!.getResultNodes(document);
+  }
+  return cachedResultNodes;
+}
+
+function invalidateNodeCache(): void {
+  cachedResultNodes = null;
+}
+
+function processResultNodes(nodes: Element[]): void {
+  const resultNodes: Element[] = [];
+  for (const node of nodes) {
+    const engineNodes = engine!.getResultNodes(node as unknown as Document);
+    if (engineNodes.length > 0) {
+      resultNodes.push(...engineNodes);
+    } else {
+      const url = engine!.getResultUrl(node);
+      if (url) resultNodes.push(node);
+    }
+  }
+  if (resultNodes.length > 0) {
+    processResults(resultNodes);
+  }
 }
 
 function processResults(nodes: Element[]): void {
@@ -172,110 +296,14 @@ function processResults(nodes: Element[]): void {
     // do nothing when clicked, so injecting it would confuse the user.
     if (!url) continue;
 
+    // Mark cache as stale since we're processing new nodes
+    invalidateNodeCache();
+
     const matchResult = matcher.match(url);
 
     if (matchResult.matched) {
-      const domain = matchResult.domain;
-
-      const doUnblock = async (d: string) => {
-        // 1. Restore result immediately — eliminates flicker.
-        //    Collect which nodes were actually restored so we can handle
-        //    them separately below (edge-case: a parent/wildcard domain
-        //    like "wikipedia.org" may still be in the block list after
-        //    removing a subdomain entry like "en.wikipedia.org"; without
-        //    this guard the re-run of processResults would immediately
-        //    re-hide the just-released nodes under the parent domain).
-        const releasedNodes = restoreByDomain(d);
-        const releasedSet = new Set(releasedNodes);
-
-        // 2. Drop from in-memory entries BEFORE refreshMatcher so the new
-        //    matcher no longer has this domain blocked.
-        entries = entries.filter((e) => e.domain !== d);
-        refreshMatcher();
-        updateCache();
-        // Remove the :has() rule for this domain so restored nodes don't
-        // stay hidden by the persistent CSS rule after restoreByDomain().
-        updateHasRules();
-
-        // 3. Re-process only nodes that were NOT just explicitly released
-        //    by the user. This prevents a parent/wildcard entry from
-        //    immediately re-hiding the unblocked result.
-        const allNodes = engine!.getResultNodes(document);
-        processResults(allNodes.filter((n) => !releasedSet.has(n)));
-
-        // 4. For the released nodes: inject block buttons so the user can
-        //    re-block if they want, but do NOT pass them through the matcher
-        //    (they were deliberately shown by an explicit user action).
-        for (const node of releasedNodes) {
-          const nodeUrl = engine!.getResultUrl(node);
-          if (nodeUrl) injectButtonForResult(node, nodeUrl);
-        }
-
-        // 5. Persist to storage (UI is already consistent).
-        await removeEntry(d);
-        showToast(`Unblocked ${d}`, async () => {
-          const restored = await undoLast();
-          if (restored) {
-            entries = [...entries, restored];
-            refreshMatcher();
-            updateCache();
-            processResults(engine!.getResultNodes(document));
-            // Re-add the :has() rule for the re-blocked domain.
-            updateHasRules();
-          }
-        });
-      };
-
-      // Mutual closures mirror the userscript's reshow ↔ rehide flow:
-      //   doShowOnce — makes the result visible, inserts a notice bar with
-      //                "Hide Again" and "Unblock" buttons at the top.
-      //   doRehide   — removes the notice bar, re-hides, re-inserts placeholder.
-      const doShowOnce = (n: Element) => {
-        showOnce(n, domain, () => doRehide(n), doUnblock);
-      };
-
-      const doPermaban = async (d: string, n: Element) => {
-        entries = entries.map((entry) =>
-          entry.domain === d ? { ...entry, mode: "pban", enabled: true } : entry
-        );
-        refreshMatcher();
-        updateCache();
-        updateHasRules();
-        convertHiddenToPermaban(n);
-        await updateEntry(d, { mode: "pban", enabled: true });
-        showToast(`Perma-banned ${d}`, async () => {
-          entries = entries.map((entry) =>
-            entry.domain === d ? { ...entry, mode: "block", enabled: true } : entry
-          );
-          refreshMatcher();
-          updateCache();
-          updateHasRules();
-          restoreResult(n);
-          hideResult(
-            n,
-            { matched: true, domain: d, mode: "block" },
-            url,
-            prefs!.showNotices,
-            doShowOnce,
-            doUnblock,
-            doPermaban
-          );
-          await updateEntry(d, { mode: "block", enabled: true });
-        });
-      };
-
-      const doRehide = (n: Element) => {
-        rehideResult(n, matchResult, url, prefs!.showNotices, doShowOnce, doUnblock, doPermaban);
-      };
-
-      // Always call hideResult — regardless of showNotices or mode.
-      // hideResult handles both pban (no placeholder) and block (with or
-      // without placeholder based on showNotices). The previous guard
-      // `if (prefs.showNotices || mode === "pban")` was wrong: it caused
-      // blocked results to never receive data-shh-result when showNotices
-      // was false, so they were only hidden by the preload's localStorage
-      // cache and would flash visible if that cache was stale.
-      hideResult(node, matchResult, url, prefs.showNotices, doShowOnce, doUnblock, doPermaban);
+      const actions = new ResultActions(node, matchResult.domain, url, matchResult, prefs, engine, refreshMatcher);
+      hideResult(node, matchResult, url, prefs.showNotices, actions.doShowOnce, actions.doUnblock, actions.doPermaban);
     } else {
       // If the preload hid this node based on a stale cache (domain was since
       // unblocked), clear ALL hiding layers before injecting the button.
@@ -401,7 +429,7 @@ async function handleBlock(
     // replacements by Google's JS are hidden without any JS marking step.
     updateHasRules();
     // Re-process page to catch any other results from the same domain
-    processResults(engine!.getResultNodes(document));
+    processResults(getCachedResultNodes());
     showToast(
       `${mode === "pban" ? "Perma-banned" : "Blocked"}: ${domain}`,
       async () => {
@@ -480,7 +508,7 @@ async function refreshEntries(): Promise<void> {
     }
   }
 
-  // Domains that were removed from the list: restore immediately (show them).
+  // Domains that were removed from the list: restore immediate (show them).
   for (const node of unblocked) {
     restoreResult(node);
   }
@@ -489,17 +517,19 @@ async function refreshEntries(): Promise<void> {
   // placeholder so processResults() can re-stamp and rebuild the placeholder
   // (handles mode changes: block → pban etc.) WITHOUT ever removing the
   // display:none — no visible flash at any point.
+  const clearedNodes: Element[] = [];
   for (const node of stillBlocked) {
     const prev = node.previousElementSibling;
     if (prev?.getAttribute("data-shh-placeholder")) prev.remove();
     node.removeAttribute("data-shh-result");
     node.removeAttribute("data-shh-mode");
+    clearedNodes.push(node);
     // display:none is intentionally left in place — no repaint until
     // processResults() stamps the node again below.
   }
 
-  // Re-process: re-hides the cleared nodes and catches any new nodes.
-  processResults(engine.getResultNodes(document));
+  // Re-process only the cleared nodes (no full DOM re-scan).
+  processResults(clearedNodes);
   // Keep :has() rules in sync with the updated list.
   updateHasRules();
 }
@@ -551,10 +581,16 @@ function earlyHideFromCache(): void {
     if (!raw) return;
     const cache = JSON.parse(raw) as { domains?: string[]; wildcard?: boolean };
     const domains = Array.isArray(cache.domains) ? cache.domains : [];
-    const wildcard = cache.wildcard !== false;
     if (domains.length === 0) return;
 
-    const lc = domains.map((d) => d.toLowerCase().replace(/^www\./, ""));
+    // Build a temporary matcher from cache entries (reuses optimized DomainMatcher)
+    const cacheEntries: BlockEntry[] = domains.map((d) => ({
+      domain: d,
+      mode: "block" as const,
+      enabled: true,
+      createdAt: 0,
+    }));
+    const cacheMatcher = new DomainMatcher(cacheEntries, cache.wildcard !== false);
 
     for (const node of engine.getResultNodes(document)) {
       // Skip nodes the preload already marked or the content script stamped.
@@ -562,27 +598,21 @@ function earlyHideFromCache(): void {
 
       const url = engine.getResultUrl(node);
       if (!url) continue;
-      try {
-        const host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
-        const blocked = lc.some(
-          (d) => host === d || (wildcard && host.endsWith("." + d))
-        );
-        if (blocked) {
-          // Three-layer protection so the result stays hidden even if Google's
-          // JS resets inline styles or attributes before processResults() runs:
-          //   1. Attribute  → matched by [data-shh-preloaded]{display:none!important}
-          //      (adoptedStyleSheet from preload — never a DOM node, page JS can't
-          //      remove it).
-          //   2. Class      → matched by .shh-hidden{display:none!important}
-          //      (adoptedStyleSheet from injectHidingStyles(), already active because
-          //      injectHidingStyles() is called before earlyHideFromCache()).
-          //      Survives Google resetting the inline `style` attribute.
-          //   3. Inline style → last resort if both sheets are somehow bypassed.
-          node.setAttribute("data-shh-preloaded", "true");
-          node.classList.add("shh-hidden");
-          (node as HTMLElement).style.setProperty("display", "none", "important");
-        }
-      } catch { /* skip invalid URL */ }
+      if (cacheMatcher.match(url).matched) {
+        // Three-layer protection so the result stays hidden even if Google's
+        // JS resets inline styles or attributes before processResults() runs:
+        //   1. Attribute  → matched by [data-shh-preloaded]{display:none!important}
+        //      (adoptedStyleSheet from preload — never a DOM node, page JS can't
+        //      remove it).
+        //   2. Class      → matched by .shh-hidden{display:none!important}
+        //      (adoptedStyleSheet from injectHidingStyles(), already active because
+        //      injectHidingStyles() is called before earlyHideFromCache()).
+        //      Survives Google resetting the inline `style` attribute.
+        //   3. Inline style → last resort if both sheets are somehow bypassed.
+        node.setAttribute("data-shh-preloaded", "true");
+        node.classList.add("shh-hidden");
+        (node as HTMLElement).style.setProperty("display", "none", "important");
+      }
     }
   } catch { /* localStorage unavailable or JSON corrupt — safe to ignore */ }
 }
