@@ -7,7 +7,7 @@
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-green)](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json)
 [![Version](https://img.shields.io/badge/version-1.6.1-informational)](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
 
-[![Get it on Firefox Add-ons](https://img.shields.io/badge/Get%20it%20on-Firefox%20Add--ons-FF7139?style=for-the-badge&logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/en-US/firefox/addon/search-hit-hider/)
+[![Get it on Firefox Add-ons](https://img.shields.io/badge/Get%20it%20on-Firefox%20Add--ons-FF7139?style=for-the-badge&logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/)
 
 ---
 
@@ -95,7 +95,7 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 ## Installation
 
 ### From Firefox Add-ons (AMO)
-Install Search Hit Hider and Infinite Scroll from [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/search-hit-hider/).
+Install Search Hit Hider and Infinite Scroll from [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/).
 
 ### Manual (from a release zip)
 1. Download the latest `search-hit-hider-vX.X.X.zip` from [Releases](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
