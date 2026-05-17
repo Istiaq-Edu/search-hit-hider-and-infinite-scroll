@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Search Hit Hider and Infinite Scroll - A Firefox extension that hides unwanted domains from search results with one click. Auto-load more results as you scroll.">
+    <meta name="keywords" content="firefox extension, search results, domain blocker, infinite scroll, google, duckduckgo, bing, yandex, brave">
+    <meta name="author" content="Istiaq-Edu">
+    <meta property="og:title" content="Search Hit Hider and Infinite Scroll">
+    <meta property="og:description" content="Hide unwanted domains from search results with one click. Auto-load more results as you scroll.">
+    <meta property="og:image" content="assets/images/icon-128.png">
+    <meta property="og:type" content="website">
+    <title>Search Hit Hider and Infinite Scroll - Firefox Extension</title>
+    <link rel="icon" type="image/png" href="assets/images/icon-128.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <nav class="navbar" id="navbar">
+        <div class="container nav-container">
+            <a href="#" class="nav-logo">
+                <img src="assets/images/icon-128.png" alt="Search Hit Hider Logo" class="nav-logo-img">
+                <span class="nav-logo-text">Search Hit Hider</span>
+            </a>
+            <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation menu">
+                <span class="nav-toggle-bar"></span>
+                <span class="nav-toggle-bar"></span>
+                <span class="nav-toggle-bar"></span>
+            </button>
+            <ul class="nav-menu" id="navMenu">
+                <li><a href="#features" class="nav-link">Features</a></li>
+                <li><a href="#how-it-works" class="nav-link">How It Works</a></li>
+                <li><a href="#engines" class="nav-link">Supported Engines</a></li>
+                <li><a href="#screenshots" class="nav-link">Screenshots</a></li>
+                <li><a href="#faq" class="nav-link">FAQ</a></li>
+                <li><a href="https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/" class="nav-link nav-cta" target="_blank" rel="noopener">Install Now</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <section class="hero" id="hero">
+            <div class="container hero-container">
+                <div class="hero-content">
+                    <span class="hero-badge">Firefox Extension v1.6.1</span>
+                    <h1 class="hero-title">Take Control of Your <span class="gradient-text">Search Results</span></h1>
+                    <p class="hero-subtitle">Hide unwanted domains with one click. Auto-load more results as you scroll. No accounts, no servers, no tracking — everything lives in your browser.</p>
+                    <div class="hero-actions">
+                        <a href="https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/" class="btn btn-primary" target="_blank" rel="noopener">
+                            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Get it on Firefox Add-ons
+                        </a>
+                        <a href="https://github.com/Istiaq-Edu/Search-Hit-Hider" class="btn btn-secondary" target="_blank" rel="noopener">
+                            <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                            View on GitHub
+                        </a>
+                    </div>
+                    <div class="hero-stats">
+                        <div class="stat">
+                            <span class="stat-value">6+</span>
+                            <span class="stat-label">Search Engines</span>
+                        </div>
+                        <div class="stat-divider"></div>
+                        <div class="stat">
+                            <span class="stat-value">40+</span>
+                            <span class="stat-label">Google Domains</span>
+                        </div>
+                        <div class="stat-divider"></div>
+                        <div class="stat">
+                            <span class="stat-value">100%</span>
+                            <span class="stat-label">Privacy Focused</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="hero-visual">
+                    <div class="hero-mockup">
+                        <div class="mockup-browser">
+                            <div class="mockup-browser-bar">
+                                <div class="mockup-browser-dots">
+                                    <span class="mockup-dot mockup-dot-red"></span>
+                                    <span class="mockup-dot mockup-dot-yellow"></span>
+                                    <span class="mockup-dot mockup-dot-green"></span>
+                                </div>
+                                <div class="mockup-browser-url">google.com/search?q=example</div>
+                            </div>
+                            <div class="mockup-browser-content">
+                                <div class="mockup-result">
+                                    <div class="mockup-result-title">Example Result One</div>
+                                    <div class="mockup-result-url">example.com/page</div>
+                                    <div class="mockup-result-desc">This is a search result description...</div>
+                                </div>
+                                <div class="mockup-result mockup-result-blocked">
+                                    <div class="mockup-block-badge">Hidden</div>
+                                    <div class="mockup-result-title">Blocked Domain Result</div>
+                                    <div class="mockup-result-url">blocked-site.com</div>
+                                </div>
+                                <div class="mockup-result">
+                                    <div class="mockup-result-title">Example Result Two</div>
+                                    <div class="mockup-result-url">another-site.com/article</div>
+                                    <div class="mockup-result-desc">Another relevant search result...</div>
+                                </div>
+                                <div class="mockup-block-btn">block</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="hero-bg-shape hero-bg-shape-1"></div>
+            <div class="hero-bg-shape hero-bg-shape-2"></div>
+        </section>
+
+        <section class="features" id="features">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-badge">Features</span>
+                    <h2 class="section-title">Everything You Need for <span class="gradient-text">Cleaner Searches</span></h2>
+                    <p class="section-subtitle">Powerful features designed to give you complete control over your search experience.</p>
+                </div>
+                <div class="features-grid">
+                    <div class="feature-card">
+                        <div class="feature-icon feature-icon-blue">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                        </div>
+                        <h3 class="feature-title">One-Click Blocking</h3>
+                        <p class="feature-desc">Click the block button next to any result to hide that domain instantly. Choose exact subdomain, root domain, or let the extension decide.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon feature-icon-purple">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                        </div>
+                        <h3 class="feature-title">Infinite Scroll</h3>
+                        <p class="feature-desc">Scroll to the bottom and more results load automatically. No more clicking through pagination. Configurable threshold and max pages.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon feature-icon-green">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        </div>
+                        <h3 class="feature-title">100% Private</h3>
+                        <p class="feature-desc">Zero external requests, zero data collection, zero telemetry. Block lists stored locally. Preferences synced via Firefox Sync only if you enable it.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon feature-icon-orange">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+                        </div>
+                        <h3 class="feature-title">Two Blocking Modes</h3>
+                        <p class="feature-desc">Regular block shows a placeholder you can undo. Perma-ban removes results entirely with no trace. Switch between modes anytime.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon feature-icon-pink">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                        </div>
+                        <h3 class="feature-title">Import & Export</h3>
+                        <p class="feature-desc">Full JSON backup, plain domain lists, and userscript format compatibility. Move your block lists between browsers effortlessly.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon feature-icon-cyan">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                        </div>
+                        <h3 class="feature-title">Dark Mode Support</h3>
+                        <p class="feature-desc">System, light, or dark theme for the popup. Page-injected styles adapt to each search engine's background color in real time.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon feature-icon-indigo">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                        </div>
+                        <h3 class="feature-title">Bulk Management</h3>
+                        <p class="feature-desc">Search, sort, and bulk-select entries. Delete, enable/disable, convert between modes, deduplicate, and strip www. prefixes in one click.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon feature-icon-teal">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                        </div>
+                        <h3 class="feature-title">Zero Flicker</h3>
+                        <p class="feature-desc">Preload script hides blocked results before the first paint. Three-layer CSS protection survives page JavaScript interference.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="how-it-works" id="how-it-works">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-badge">How It Works</span>
+                    <h2 class="section-title">Three Steps to <span class="gradient-text">Cleaner Results</span></h2>
+                    <p class="section-subtitle">Get started in seconds. No setup, no accounts, no configuration required.</p>
+                </div>
+                <div class="steps-grid">
+                    <div class="step-card">
+                        <div class="step-number">1</div>
+                        <div class="step-content">
+                            <h3 class="step-title">Install the Extension</h3>
+                            <p class="step-desc">Get it from Firefox Add-ons or install manually from GitHub. Works with Firefox 112+.</p>
+                        </div>
+                    </div>
+                    <div class="step-connector"></div>
+                    <div class="step-card">
+                        <div class="step-number">2</div>
+                        <div class="step-content">
+                            <h3 class="step-title">Search as Usual</h3>
+                            <p class="step-desc">A small "block" button appears next to each result on supported search engines. Click to hide any domain.</p>
+                        </div>
+                    </div>
+                    <div class="step-connector"></div>
+                    <div class="step-card">
+                        <div class="step-number">3</div>
+                        <div class="step-content">
+                            <h3 class="step-title">Scroll & Enjoy</h3>
+                            <p class="step-desc">More results load automatically as you scroll. Blocked domains stay hidden across all future searches.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="engines" id="engines">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-badge">Compatibility</span>
+                    <h2 class="section-title">Works With Your <span class="gradient-text">Favorite Engines</span></h2>
+                    <p class="section-subtitle">Supports all major search engines with 40+ Google regional domains covered.</p>
+                </div>
+                <div class="engines-grid">
+                    <div class="engine-card">
+                        <div class="engine-logo engine-google">G</div>
+                        <h4 class="engine-name">Google</h4>
+                        <span class="engine-domains">40+ regional domains</span>
+                    </div>
+                    <div class="engine-card">
+                        <div class="engine-logo engine-duckduckgo">D</div>
+                        <h4 class="engine-name">DuckDuckGo</h4>
+                        <span class="engine-domains">Web + React SPA</span>
+                    </div>
+                    <div class="engine-card">
+                        <div class="engine-logo engine-bing">B</div>
+                        <h4 class="engine-name">Bing</h4>
+                        <span class="engine-domains">Web results</span>
+                    </div>
+                    <div class="engine-card">
+                        <div class="engine-logo engine-yandex">Y</div>
+                        <h4 class="engine-name">Yandex</h4>
+                        <span class="engine-domains">9 regional domains</span>
+                    </div>
+                    <div class="engine-card">
+                        <div class="engine-logo engine-baidu">B</div>
+                        <h4 class="engine-name">Baidu</h4>
+                        <span class="engine-domains">Web results</span>
+                    </div>
+                    <div class="engine-card">
+                        <div class="engine-logo engine-brave">B</div>
+                        <h4 class="engine-name">Brave Search</h4>
+                        <span class="engine-domains">+ Tor onion support</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="screenshots" id="screenshots">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-badge">Screenshots</span>
+                    <h2 class="section-title">See It In <span class="gradient-text">Action</span></h2>
+                    <p class="section-subtitle">A clean, intuitive interface that stays out of your way.</p>
+                </div>
+                <div class="screenshots-grid">
+                    <div class="screenshot-card">
+                        <img src="assets/images/showcase-1.png" alt="Block list management popup showing blocked domains" class="screenshot-img" loading="lazy">
+                        <div class="screenshot-caption">Block list management with search, sort, and bulk actions</div>
+                    </div>
+                    <div class="screenshot-card">
+                        <img src="assets/images/showcase-2.png" alt="Search results with hidden placeholders and actions" class="screenshot-img" loading="lazy">
+                        <div class="screenshot-caption">Hidden results with Show, Unblock, and Perma-ban actions</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="privacy" id="privacy">
+            <div class="container">
+                <div class="privacy-card">
+                    <div class="privacy-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    </div>
+                    <div class="privacy-content">
+                        <h3 class="privacy-title">Your Privacy Matters</h3>
+                        <p class="privacy-desc">No accounts. No servers. No tracking. Block lists stored locally in your browser. Zero external network requests. No analytics, no crash reporting, no telemetry. Fully open source — auditable by anyone.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="faq" id="faq">
+            <div class="container">
+                <div class="section-header">
+                    <span class="section-badge">FAQ</span>
+                    <h2 class="section-title">Frequently Asked <span class="gradient-text">Questions</span></h2>
+                </div>
+                <div class="faq-list">
+                    <div class="faq-item">
+                        <button class="faq-question" aria-expanded="false">
+                            <span>What does this extension do?</span>
+                            <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                        </button>
+                        <div class="faq-answer">
+                            <p>Search Hit Hider lets you hide unwanted domains from search results with a single click. It also adds infinite scroll to automatically load more results as you scroll down. Supports Google, DuckDuckGo, Bing, Yandex, Baidu, and Brave Search.</p>
+                        </div>
+                    </div>
+                    <div class="faq-item">
+                        <button class="faq-question" aria-expanded="false">
+                            <span>Is my data safe? Does it collect any information?</span>
+                            <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                        </button>
+                        <div class="faq-answer">
+                            <p>Absolutely. The extension makes zero external network requests. Block lists are stored locally in your browser. Preferences can optionally sync via Firefox Sync if you have it enabled. There is no analytics, no crash reporting, and no telemetry of any kind.</p>
+                        </div>
+                    </div>
+                    <div class="faq-item">
+                        <button class="faq-question" aria-expanded="false">
+                            <span>What's the difference between Regular Block and Perma-ban?</span>
+                            <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                        </button>
+                        <div class="faq-answer">
+                            <p>Regular Block hides the result but shows a quiet placeholder that lets you show or unblock it. Perma-ban removes the result entirely with no trace — it's as if the result never existed.</p>
+                        </div>
+                    </div>
+                    <div class="faq-item">
+                        <button class="faq-question" aria-expanded="false">
+                            <span>Can I import my block list from another browser?</span>
+                            <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                        </button>
+                        <div class="faq-answer">
+                            <p>Yes! The extension supports JSON export/import for full round-trip backup, plain domain lists (one per line), and the original Google Hit Hider userscript format for compatibility with Greasy Fork.</p>
+                        </div>
+                    </div>
+                    <div class="faq-item">
+                        <button class="faq-question" aria-expanded="false">
+                            <span>Does infinite scroll work on all supported engines?</span>
+                            <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                        </button>
+                        <div class="faq-answer">
+                            <p>Infinite scroll works on Google, Bing, Yandex, Brave Search (fetch-based), and DuckDuckGo (native trigger mode). Each engine uses the optimal approach for its architecture. You can configure the scroll threshold, max pages, and scroll persistence in settings.</p>
+                        </div>
+                    </div>
+                    <div class="faq-item">
+                        <button class="faq-question" aria-expanded="false">
+                            <span>How do I undo a block?</span>
+                            <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                        </button>
+                        <div class="faq-answer">
+                            <p>After blocking a domain, a toast notification appears for 4 seconds with an "Undo" button. You can also click "Show" on the placeholder to temporarily reveal a hidden result, or "Unblock" to permanently remove it from your block list.</p>
+                        </div>
+                    </div>
+                    <div class="faq-item">
+                        <button class="faq-question" aria-expanded="false">
+                            <span>Is this extension open source?</span>
+                            <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                        </button>
+                        <div class="faq-answer">
+                            <p>Yes! The full source code is available on GitHub under the MIT license. No minified blobs, no remote scripts — everything is auditable. Bug reports and pull requests are welcome.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="cta" id="install">
+            <div class="container">
+                <div class="cta-card">
+                    <h2 class="cta-title">Ready for Cleaner Searches?</h2>
+                    <p class="cta-desc">Install Search Hit Hider and Infinite Scroll today. Free, open source, and privacy-respecting.</p>
+                    <div class="cta-actions">
+                        <a href="https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/" class="btn btn-primary btn-lg" target="_blank" rel="noopener">
+                            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Install from Firefox Add-ons
+                        </a>
+                        <a href="https://github.com/Istiaq-Edu/Search-Hit-Hider" class="btn btn-outline btn-lg" target="_blank" rel="noopener">
+                            <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                            Star on GitHub
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-grid">
+                <div class="footer-brand">
+                    <a href="#" class="footer-logo">
+                        <img src="assets/images/icon-128.png" alt="Search Hit Hider Logo" class="footer-logo-img">
+                        <span>Search Hit Hider</span>
+                    </a>
+                    <p class="footer-desc">A Firefox extension that hides unwanted domains from search results with one click. Auto-load more results as you scroll.</p>
+                    <div class="footer-social">
+                        <a href="https://github.com/Istiaq-Edu/Search-Hit-Hider" target="_blank" rel="noopener" aria-label="GitHub">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                        </a>
+                        <a href="https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/" target="_blank" rel="noopener" aria-label="Firefox Add-ons">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+                        </a>
+                    </div>
+                </div>
+                <div class="footer-links">
+                    <h4 class="footer-heading">Product</h4>
+                    <ul>
+                        <li><a href="#features">Features</a></li>
+                        <li><a href="#engines">Supported Engines</a></li>
+                        <li><a href="https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/" target="_blank" rel="noopener">Firefox Add-ons</a></li>
+                        <li><a href="https://greasyfork.org/en/scripts/1682-google-hit-hider-by-domain-search-filter-block-sites" target="_blank" rel="noopener">Userscript Version</a></li>
+                    </ul>
+                </div>
+                <div class="footer-links">
+                    <h4 class="footer-heading">Resources</h4>
+                    <ul>
+                        <li><a href="https://github.com/Istiaq-Edu/Search-Hit-Hider" target="_blank" rel="noopener">GitHub Repository</a></li>
+                        <li><a href="privacy-policy.md" target="_blank" rel="noopener">Privacy Policy</a></li>
+                        <li><a href="LICENSE" target="_blank" rel="noopener">MIT License</a></li>
+                        <li><a href="https://github.com/Istiaq-Edu/Search-Hit-Hider/releases" target="_blank" rel="noopener">Releases</a></li>
+                    </ul>
+                </div>
+                <div class="footer-links">
+                    <h4 class="footer-heading">Developers</h4>
+                    <ul>
+                        <li><a href="https://github.com/Istiaq-Edu/Search-Hit-Hider#development" target="_blank" rel="noopener">Development Guide</a></li>
+                        <li><a href="https://github.com/Istiaq-Edu/Search-Hit-Hider/issues" target="_blank" rel="noopener">Report a Bug</a></li>
+                        <li><a href="https://github.com/Istiaq-Edu/Search-Hit-Hider/pulls" target="_blank" rel="noopener">Pull Requests</a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>MIT &copy; 2026 Istiaq-Edu. Built upon <a href="https://greasyfork.org/en/scripts/1682-google-hit-hider-by-domain-search-filter-block-sites" target="_blank" rel="noopener">Google Hit Hider by Domain</a> by Jefferson Scher.</p>
+            </div>
+        </div>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>
