@@ -13,6 +13,7 @@ const ENGINE_LABELS: Record<EngineId, string> = {
   yandex: "Yandex",
   baidu: "Baidu",
   brave: "Brave Search",
+  startpage: "Startpage",
 };
 
 export function EngineSettings({ prefs, onUpdatePrefs }: Props) {

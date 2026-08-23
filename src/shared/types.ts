@@ -10,7 +10,8 @@ export type EngineId =
   | "bing"
   | "yandex"
   | "baidu"
-  | "brave";
+  | "brave"
+  | "startpage";
 
 export type ButtonStyle = "text" | "icon" | "icon+text";
 
@@ -53,6 +54,7 @@ export const ALL_ENGINE_IDS: EngineId[] = [
   "yandex",
   "baidu",
   "brave",
+  "startpage",
 ];
 
 export const DEFAULT_PREFS: Prefs = {

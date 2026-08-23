@@ -6,7 +6,7 @@ export class Sentinel {
   readonly element: HTMLElement;
   private _state: SentinelState = "idle";
 
-  constructor(container: Element) {
+  constructor(container: Element, before?: Element) {
     this.element = document.createElement("div");
     this.element.id = "is-sentinel";
     this.element.style.cssText = `
@@ -21,7 +21,14 @@ export class Sentinel {
       margin: 2rem 0;
       transition: opacity 0.3s ease;
     `;
-    container.after(this.element);
+    // Prefer a spot directly beneath the streamed results (before the
+    // pager anchor) so the spinner appears where new results arrive;
+    // fall back to after the container.
+    if (before && before.parentNode === container) {
+      container.insertBefore(this.element, before);
+    } else {
+      container.after(this.element);
+    }
     this.injectSpinnerStyle();
     this.setState("idle");
   }

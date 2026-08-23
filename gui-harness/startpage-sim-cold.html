@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Startpage cold-start sim</title>
+</head>
+<body>
+  <!-- Reproduces the user's issue-1 scenario: results hydrate at 1s, the
+       background event page is COLD — first messaging hangs 8s before
+       answering (like a Firefox MV3 event page waking up). Expected after
+       the fix: block buttons appear from cache/defaults without waiting,
+       then real state swaps in when messaging recovers. -->
+  <div class="Layout"><div class="themeProvider"><main><section id="main">
+    <div class="w-gl css-1og29rd"><span class="w-gl-attribution">Results</span></div>
+    <div class="pagination-container"><nav class="pagination">
+      <form action="/sp/search" method="post">
+        <input type="hidden" name="sc" value="simtoken123">
+        <input type="hidden" name="query" value="test">
+        <button type="submit">Next</button>
+      </form>
+    </nav></div>
+  </section></main></div></div>
+
+  <script src="/gui-harness/mock-cold.js"></script>
+  <script type="module" src="/gui-harness/startpage-sim.js"></script>
+  <script>
+    // hydrate at 1s
+    setTimeout(() => {
+      const wgl = document.querySelector("#main .w-gl");
+      const mk = (url, title) => {
+        const d = document.createElement("div");
+        d.className = "result css-z73qjy";
+        const a = document.createElement("a");
+        a.className = "result-title result-link css-1ubyvt6";
+        a.href = url;
+        const h = document.createElement("h3");
+        h.textContent = title;
+        a.appendChild(h);
+        d.appendChild(a);
+        wgl.appendChild(d);
+      };
+      mk("https://pinterest.com/pin/1", "Blocked result one");
+      mk("https://example.org/a", "Normal result two");
+      mk("https://example.org/b", "Normal result three");
+      window.__simHydrated = true;
+    }, 1000);
+  </script>
+</body>
+</html>

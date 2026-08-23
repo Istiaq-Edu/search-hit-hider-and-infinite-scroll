@@ -5,12 +5,15 @@ export interface FetchResult {
 
 /**
  * Fetch a search results page and parse it into a Document.
- * Returns null on any error (network, non-2xx, parse failure).
+ * `init` allows engines that paginate via POST (e.g. Startpage) to supply
+ * method/body; GET is the default for all other engines.
+ * Returns null on any error (network, non-2xx, parse failure, captcha).
  */
 export async function fetchPage(
   url: string,
   signal: AbortSignal,
-  delayMs: number
+  delayMs: number,
+  init?: RequestInit
 ): Promise<FetchResult | null> {
   if (delayMs > 0) {
     // Add ±50% jitter to avoid detection patterns
@@ -22,10 +25,14 @@ export async function fetchPage(
     const response = await fetch(url, {
       signal,
       credentials: "include",
+      ...init,
       headers: {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": navigator.language,
-        "Cache-Control": "no-cache",
+        ...(init?.method === "POST"
+          ? { "Content-Type": "application/x-www-form-urlencoded" }
+          : {}),
+        ...(init?.headers as Record<string, string> | undefined),
       },
     });
 
@@ -35,12 +42,14 @@ export async function fetchPage(
     const doc = new DOMParser().parseFromString(html, "text/html");
 
     // Google (and sometimes Bing) serve CAPTCHA/"sorry" interstitials with
-    // HTTP 200.  Treating them as a results page yields zero results and can
-    // derail pagination — report them as failures so the manager backs off
-    // (3 consecutive errors stop infinite scroll, native pagination remains).
+    // HTTP 200.  Startpage redirects to /sp/captcha.  Treating them as a
+    // results page yields zero results and can derail pagination — report
+    // them as failures so the manager backs off (3 consecutive errors stop
+    // infinite scroll, native pagination remains).
     const finalUrl = response.url || url;
     const looksLikeCaptcha =
       finalUrl.includes("/sorry/") ||
+      finalUrl.includes("/sp/captcha") ||
       doc.getElementById("captcha") !== null ||
       doc.querySelector("form[action*='/sorry']") !== null ||
       doc.querySelector(".g-recaptcha") !== null;

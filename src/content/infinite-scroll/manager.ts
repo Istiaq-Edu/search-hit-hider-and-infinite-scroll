@@ -19,6 +19,13 @@ export interface InfiniteScrollPrefs {
   freshnessMinutes: number;
   fetchDelay: number;
   debugMode: boolean;
+  /**
+   * Copy the fetched page's <style> rules into the appended page container.
+   * Needed when fetched SSR markup uses style classes (e.g. emotion css-*
+   * hashes) that the live page's client-rendered stylesheet does not define —
+   * without it, auto-loaded results render with wrong colors (Startpage).
+   */
+  portFetchedStyles?: boolean;
 }
 
 const DEFAULT_PREFS: InfiniteScrollPrefs = {
@@ -46,6 +53,10 @@ export class InfiniteScrollManager {
   private isLoading = false;
   private currentPage = 1;
   private nextUrl: string | null = null;
+  // Engines that paginate via POST (Startpage) supply a request descriptor
+  // instead of a plain GET URL; nextUrl is kept in sync for the sentinel state.
+  private nextPageRequest: { url: string; init: RequestInit } | null = null;
+  private consecutiveEmptyPages = 0;
   private hasMore = true;
   private currentUrl: string;
 
@@ -77,10 +88,18 @@ export class InfiniteScrollManager {
       this.nextUrl = "trigger://page";
       this.hasMore = true;
     } else {
-      this.nextUrl = this.engine.getNextPageUrl?.(document) ?? null;
-      this.hasMore = !!this.nextUrl;
+      const req = this.buildNextPageRequest(document);
+      if (req) {
+        this.nextPageRequest = req;
+        this.nextUrl = req.url;
+      } else {
+        this.nextUrl = this.engine.getNextPageUrl?.(document) ?? null;
+        this.nextPageRequest = null;
+      }
+      this.hasMore = !!(this.nextPageRequest || this.nextUrl);
     }
     this.currentPage = 1;
+    this.consecutiveEmptyPages = 0;
 
     if (!this.hasMore) {
       return;
@@ -130,6 +149,8 @@ export class InfiniteScrollManager {
     this.destroy();
     this.currentUrl = window.location.href;
     this.nextUrl = null;
+    this.nextPageRequest = null;
+    this.consecutiveEmptyPages = 0;
     this.hasMore = true;
     this.isLoading = false;
     this.currentPage = 1;
@@ -187,7 +208,11 @@ export class InfiniteScrollManager {
   }
 
   private createSentinel(): void {
-    this.sentinel = new Sentinel(this.container);
+    // Place the spinner directly beneath the streamed results when the
+    // engine exposes a pager anchor (Startpage/Bing/Yandex); otherwise
+    // after the container, as before.
+    const anchor = this.engine.getInsertionAnchor?.(this.container) ?? null;
+    this.sentinel = new Sentinel(this.container, anchor ?? undefined);
   }
 
   private startObserver(): void {
@@ -278,7 +303,12 @@ export class InfiniteScrollManager {
     this.abortController = new AbortController();
 
     try {
-      const result = await fetchPage(this.nextUrl!, this.abortController.signal, this.config.fetchDelay);
+      const result = await fetchPage(
+        this.nextUrl!,
+        this.abortController.signal,
+        this.config.fetchDelay,
+        this.nextPageRequest?.init
+      );
       if (this.destroyed) return;
 
       if (!result) {
@@ -297,14 +327,37 @@ export class InfiniteScrollManager {
       const newNodes = this.extractNewNodes(result.doc);
       const deduped = newNodes.filter((n) => !this.deduper.isDuplicate(n, this.engine));
 
+      // Increment BEFORE appending and building the next request: the page
+      // container marker and the next page number must both reflect the page
+      // that was just fetched (building first, incrementing later produced
+      // an off-by-one that re-fetched the same page for POST engines).
+      this.currentPage++;
+
       if (deduped.length > 0) {
-        this.appendNodes(deduped);
+        this.appendNodes(deduped, result.doc);
+        this.consecutiveEmptyPages = 0;
+      } else {
+        // A 200 page with zero extractable results is either a soft block
+        // page or a client-hydrated response whose result markup never
+        // appears in the raw HTML (Startpage renders results from a JSON
+        // hydration payload). Stop after two empties instead of hammering
+        // the engine with pointless requests.
+        this.consecutiveEmptyPages++;
+        this.log("Fetched page yielded no result nodes", this.consecutiveEmptyPages);
       }
 
-      const fetchedNextUrl = this.engine.getNextPageUrl?.(result.doc);
-      this.nextUrl = fetchedNextUrl ?? null;
-      this.hasMore = !!this.nextUrl;
-      this.currentPage++;
+      const fetchedReq = this.buildNextPageRequest(result.doc);
+      if (fetchedReq) {
+        this.nextPageRequest = fetchedReq;
+        this.nextUrl = fetchedReq.url;
+      } else {
+        this.nextUrl = this.engine.getNextPageUrl?.(result.doc) ?? null;
+        this.nextPageRequest = null;
+      }
+      this.hasMore = !!(this.nextPageRequest || this.nextUrl);
+      if (this.consecutiveEmptyPages >= 2) {
+        this.hasMore = false;
+      }
 
       this.sentinel?.setState(this.hasMore ? "idle" : "done");
     } catch (err) {
@@ -314,6 +367,75 @@ export class InfiniteScrollManager {
       this.sentinel?.setState("error", () => this.retryFetch());
     } finally {
       this.isLoading = false;
+    }
+  }
+
+  /**
+   * Build the next-page request for POST-paginated engines (Startpage);
+   * null for all GET-based engines.
+   */
+  private buildNextPageRequest(doc: Document): { url: string; init: RequestInit } | null {
+    const req = this.engine.getNextPageRequest?.(doc, this.currentPage + 1);
+    if (!req) return null;
+    return {
+      url: req.url,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(req.body).toString(),
+      },
+    };
+  }
+
+  /** Style texts already ported from fetched pages (dedupe across pages). */
+  private portedStyleHashes = new Set<string>();
+
+  /**
+   * Copy a fetched page's <style> rules into the appended container so its
+   * class-based styling (emotion css-* hashes) resolves. Rules are FILTERED:
+   * document-level selectors (html/body/:root/*) are dropped — the fetched
+   * page's theme can differ from the live one (server default vs. user
+   * preference), and porting them would recolor results to the wrong theme.
+   * Only class/element-scoped rules survive. Duplicates (live or earlier
+   * pages) are skipped; injected tags carry data-shh-fetched-style.
+   */
+  private portStyles(sourceDoc: Document, pageContainer: HTMLElement): void {
+    try {
+      const liveTexts = new Set<string>();
+      for (const s of document.querySelectorAll("style")) {
+        const t = (s.textContent ?? "").trim();
+        if (t) liveTexts.add(t);
+      }
+      for (const s of sourceDoc.querySelectorAll("style")) {
+        const t = (s.textContent ?? "").trim();
+        if (!t || liveTexts.has(t) || this.portedStyleHashes.has(t)) continue;
+        const filtered = this.filterDocumentScopedRules(t);
+        if (!filtered) continue;
+        this.portedStyleHashes.add(t);
+        const style = document.createElement("style");
+        style.setAttribute("data-shh-fetched-style", "true");
+        style.textContent = filtered;
+        pageContainer.appendChild(style);
+      }
+    } catch { /* styling is cosmetic — never fail the append on it */ }
+  }
+
+  /** Drop rules that style the whole document (theme fights); keep the rest. */
+  private filterDocumentScopedRules(cssText: string): string | null {
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(cssText);
+      const kept: string[] = [];
+      for (const rule of sheet.cssRules) {
+        const sel = (rule as CSSStyleRule).selectorText ?? "";
+        if (/^\s*(html|body|:root|\*|\*,)\b/i.test(sel) || /^\s*(html|body|:root)\b/i.test(sel)) {
+          continue; // document-level theme rule — the live page already has one
+        }
+        kept.push(rule.cssText);
+      }
+      return kept.length > 0 ? kept.join("\n") : null;
+    } catch {
+      return cssText; // unparsable — port as-is rather than losing styling
     }
   }
 
@@ -348,14 +470,27 @@ export class InfiniteScrollManager {
     });
   }
 
-  private appendNodes(nodes: Element[]): void {
+  private appendNodes(nodes: Element[], sourceDoc?: Document): void {
     // Wrap the page's results in a container (mirrors the userscript pattern
     // that works reliably for Brave).  This provides proper spacing and keeps
     // fetched nodes grouped together.
+    //
+    // Engines whose fetched markup depends on ancestor styling context
+    // (Startpage's emotion-scoped classes) can provide a wrapper element from
+    // the fetched doc; it is shallow-cloned (classes/attributes preserved,
+    // original children not) and the result clones live inside it.
     const pageContainer = document.createElement('div');
     pageContainer.id = `shh-inf-page-${this.currentPage}`;
     pageContainer.setAttribute('data-inf-page', String(this.currentPage));
     pageContainer.style.marginTop = '20px';
+
+    let resultHost: HTMLElement = pageContainer;
+    const wrapper = sourceDoc ? this.engine.getFetchWrapper?.(sourceDoc) : null;
+    if (wrapper) {
+      const wrapClone = document.importNode(wrapper, false) as HTMLElement;
+      pageContainer.appendChild(wrapClone);
+      resultHost = wrapClone;
+    }
 
     // Brave's server-rendered HTML carries inline styles on inner elements
     // that truncate text (-webkit-line-clamp, overflow:hidden, etc.).  The
@@ -393,25 +528,40 @@ export class InfiniteScrollManager {
       for (const desc of truncateTargets) {
         stripTruncationStyles(desc);
       }
-      pageContainer.appendChild(clone);
+      resultHost.appendChild(clone);
     }
 
-    // Insert before an engine-provided anchor (e.g. Yandex's visible pager,
-    // which must stay below the streamed results) or the generic pagination
-    // element; otherwise append to the end of the results container. The
-    // parentNode guard keeps insertBefore from throwing if an anchor is not
-    // a direct child of this container.
+    // Insert before the SENTINEL when it lives inside the container (the
+    // spinner then always sits directly beneath the newest results), else
+    // before an engine-provided anchor (e.g. a visible pager), else at the
+    // end of the results container. The parentNode guards keep insertBefore
+    // from throwing on misplaced references.
+    const sentinelEl = this.sentinel?.element ?? null;
     const anchor = this.engine.getInsertionAnchor?.(this.container) ?? null;
     const pagination =
       anchor ??
       this.container.querySelector('#pagination-snippet, nav[role="pagination"], .pagination');
-    if (pagination && pagination.parentNode === this.container) {
-      this.container.insertBefore(pageContainer, pagination);
+    const insertRef =
+      sentinelEl && sentinelEl.parentNode === this.container
+        ? sentinelEl
+        : pagination && pagination.parentNode === this.container
+          ? pagination
+          : null;
+    if (insertRef) {
+      this.container.insertBefore(pageContainer, insertRef);
     } else {
       this.container.appendChild(pageContainer);
     }
 
-    const appended = Array.from(pageContainer.children) as Element[];
+    // Port the fetched page's own styles when the engine needs it: fetched
+    // SSR markup can carry class names the live page never defines.
+    if (this.config.portFetchedStyles && sourceDoc) {
+      this.portStyles(sourceDoc, pageContainer);
+    }
+
+    // Report the individual result nodes (not the wrapper) so the blocking
+    // pipeline keeps per-result hiding granularity.
+    const appended = Array.from(resultHost.children) as Element[];
     this.onNewNodes(appended);
     this.interceptPagination();
     // Track page container for efficient discard

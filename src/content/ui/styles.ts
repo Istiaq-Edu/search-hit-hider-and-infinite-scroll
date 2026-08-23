@@ -36,6 +36,18 @@ function isColorDark(color: string): boolean {
 export function injectBaseStyles(): void {
   if (document.getElementById(STYLE_ID)) return;
 
+  // document_start safety: colors are read from <body> and the style lands
+  // in <head> — defer until both exist.
+  if (!document.body || !document.head) {
+    const retry = (): void => injectBaseStyles();
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", retry, { once: true });
+    } else {
+      setTimeout(retry, 50);
+    }
+    return;
+  }
+
   const colors = detectPageColors();
   const style = document.createElement("style");
   style.id = STYLE_ID;

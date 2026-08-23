@@ -13,7 +13,7 @@
 
 ## What it does
 
-When you search on Google, DuckDuckGo, Bing, Yandex, Baidu, or Brave Search, a small **block** button appears next to each result. Click it to hide that domain from all future searches. Blocked results are replaced with a quiet placeholder that lets you show or unblock them any time. Scroll to the bottom and more results load automatically — no pagination clicks needed.
+When you search on Google, DuckDuckGo, Bing, Yandex, Baidu, Brave Search, or Startpage, a small **block** button appears next to each result. Click it to hide that domain from all future searches. Blocked results are replaced with a quiet placeholder that lets you show or unblock them any time. Scroll to the bottom and more results load automatically — no pagination clicks needed.
 
 No accounts. No servers. No tracking. Everything lives in your browser.
 
@@ -70,7 +70,7 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 - **Auto-load more results** — scroll to the bottom and the next page loads automatically
 - **Configurable** — adjust scroll threshold, max pages, and scroll persistence in settings
 - **Linked to blocking** — works together with hit-hider; when most results are blocked, infinite scroll keeps feeding new pages
-- **Supported engines** — Google (fetch), Bing (fetch), DuckDuckGo (native), Yandex (fetch, pagination kept visible), Brave Search (fetch with container wrapping)
+- **Supported engines** — Google (fetch), Bing (fetch), DuckDuckGo (native), Yandex (fetch, pagination kept visible), Brave Search (fetch with container wrapping), Startpage (POST fetch, pagination kept visible)
 - **Dedup** — prevents duplicate results across pages (attribute-based + URL hash fallback)
 - **Smart pagination** — clicking a page number scrolls to already-fetched content instead of reloading
 - **Fetch jitter** — randomized delays to avoid detection patterns
@@ -89,6 +89,7 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 | Yandex | yandex.com / yandex.ru (+ 6 regional) | Web (organic, ad-filtered) |
 | Baidu | baidu.com | Web results |
 | Brave Search | search.brave.com | Web results |
+| Startpage | startpage.com | Web results (proxy links unwrapped) |
 
 ---
 

@@ -58,4 +58,38 @@ describe("fetchPage", () => {
     }));
     expect(await fetchPage("https://www.bing.com/search?q=test&first=11", SIGNAL, 0)).toBeNull();
   });
+
+  it("returns null for a Startpage /sp/captcha redirect", async () => {
+    vi.stubGlobal("fetch", stubFetch({
+      url: "https://www.startpage.com/sp/captcha?continue=/sp/search",
+      body: "<html><body>are you human</body></html>",
+    }));
+    expect(await fetchPage("https://www.startpage.com/sp/search", SIGNAL, 0)).toBeNull();
+  });
+
+  it("sends POST bodies for POST-paginated engines (Startpage)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      url: "https://www.startpage.com/sp/search",
+      text: async () => '<html><body><input name="sc" value="next"></body></html>',
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await fetchPage(
+      "https://www.startpage.com/sp/search",
+      SIGNAL,
+      0,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "query=test&page=2&sc=tok",
+      }
+    );
+    expect(res).not.toBeNull();
+    const call = fetchMock.mock.calls[0]!;
+    expect(call[1]!.method).toBe("POST");
+    expect(call[1]!.body).toBe("query=test&page=2&sc=tok");
+    expect((call[1]!.headers as Record<string, string>)["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(call[1]!.credentials).toBe("include");
+  });
 });

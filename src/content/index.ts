@@ -1,4 +1,5 @@
 import type { BlockEntry, Prefs, BlockMode } from "../shared/types";
+import { DEFAULT_PREFS } from "../shared/types";
 import { detectEngine } from "./engines/registry";
 import type { EngineAdapter } from "./engines/base";
 import type { MatchResult } from "./blocking/matcher";
@@ -108,6 +109,24 @@ let cachedResultNodes: Element[] | null = null;
 // Tracked so pref changes can transition the page live instead of requiring
 // a reload — and so a paused load never hides results it cannot unhide.
 let engineActive = false;
+// Set when init proceeded from cache/defaults because the background was
+// unreachable; reviveFromBackground() heals the state once messaging works.
+let degradedStart = false;
+
+// Concise always-on lifecycle logging — appears in the page console with an
+// [SHH] prefix AND is mirrored into <html data-shh-diag> so it survives
+// console filters and being opened late. Inspect anytime from DevTools:
+//   document.documentElement.getAttribute("data-shh-diag")
+const shhDiagLines: string[] = [];
+function shhLog(msg: string, data?: unknown): void {
+  const line = `t=${Math.round(performance.now())}ms ${msg}` + (data !== undefined && data !== "" ? ` ${String(data)}` : "");
+  console.log(`[SHH] ${line}`);
+  shhDiagLines.push(line);
+  if (shhDiagLines.length > 10) shhDiagLines.shift();
+  try {
+    document.documentElement.setAttribute("data-shh-diag", shhDiagLines.join(" | "));
+  } catch { /* detached document — ignore */ }
+}
 
 const currentUrl = new URL(location.href);
 const engine = detectEngine(currentUrl);
@@ -138,16 +157,35 @@ async function init(): Promise<void> {
   // hides any still-visible blocked results SYNCHRONOUSLY, before the storage
   // await below, closing that timing gap without any async delay.
   earlyHideFromCache();
+  shhLog(`init start v${browser.runtime.getManifest?.().version ?? "?"}`);
 
   try {
-    [entries, prefs] = await Promise.all([getList(), getPrefs()]);
+    [entries, prefs] = await withTimeout(Promise.all([getList(), getPrefs()]), 2500);
   } catch {
-    // Extension context may not be ready yet — retry once
-    await sleep(500);
-    try {
-      [entries, prefs] = await Promise.all([getList(), getPrefs()]);
-    } catch {
-      return;
+    // A cold MV3 event page can HANG the first response for seconds (a hang,
+    // not a rejection — retries do not help). Race-bounded retries cover fast
+    // rejections (listener not ready); if messaging stays slow, continue in
+    // degraded mode from the preload cache / defaults and self-heal later.
+    let recoveredMsg = false;
+    for (let i = 0; i < 2 && !recoveredMsg; i++) {
+      await sleep(400);
+      try {
+        [entries, prefs] = await withTimeout(Promise.all([getList(), getPrefs()]), 2500);
+        recoveredMsg = true;
+      } catch { /* keep retrying */ }
+    }
+    if (!recoveredMsg) {
+      // Degraded mode: blocking from the cache (or empty on fresh installs —
+      // block buttons still work) until reviveFromBackground() swaps in the
+      // real state. A cache that explicitly says paused means do nothing.
+      const fromCache = recoverStateFromCache();
+      shhLog("messaging timeout — degraded start", fromCache ? "cache/defaults" : "paused, idle");
+      if (!fromCache) return;
+      entries = fromCache.entries;
+      prefs = fromCache.prefs;
+      degradedStart = true;
+    } else {
+      shhLog(`state loaded (entries=${entries.length})`);
     }
   }
 
@@ -160,6 +198,7 @@ async function init(): Promise<void> {
     !prefs.pausedGlobally &&
     !prefs.pausedEngines.includes(engine.id) &&
     prefs.engineToggles[engine.id] !== false;
+  shhLog(`engine=${engine.id} active=${engineActive} pausedGlobally=${prefs.pausedGlobally} toggle=${prefs.engineToggles[engine.id]} hover=${prefs.showOnHover} entries=${entries.length}`);
   if (!engineActive) return;
 
   // Inject styles
@@ -176,8 +215,15 @@ async function init(): Promise<void> {
   // Build matcher
   matcher = new DomainMatcher(entries, prefs.subdomainWildcard);
 
-  // Brave Search is a Svelte SPA — results render slightly after document idle
-  if (engine.id === "brave") {
+  // Observer FIRST: background tabs clamp timers (the 400ms sleep below can
+  // take a minute there), and hydration itself waits for foreground rAF —
+  // the observer must already be listening whenever the page wakes up.
+  startResultObserver();
+
+  // Brave Search is a Svelte SPA and Startpage renders results late
+  // (POST-based search + React hydration, per the userscript's 300ms delayed
+  // init) — both need a beat after document idle before scanning.
+  if (engine.id === "brave" || engine.id === "startpage") {
     await sleep(400);
   }
 
@@ -188,29 +234,10 @@ async function init(): Promise<void> {
   updateHasRules();
 
   // ── Infinite scroll ─────────────────────────────────────────────────
-  // Must be initialized BEFORE processResults() so getResultNodes() still
-  // returns unstamped nodes (processResults stamps with data-shh-result).
-  // The sentinel is placed after the container, which is fine since results
-  // are already in the DOM at this point.
-  if (prefs.infiniteScroll && (engine.getNextPageUrl || engine.triggerNextPage)) {
-    const container = findInfiniteScrollContainer();
-    if (container) {
-      infiniteScrollManager = new InfiniteScrollManager(
-        engine,
-        container,
-        (nodes) => processResults(nodes),
-        {
-          threshold: prefs.infiniteScrollThreshold,
-          maxPages: prefs.infiniteScrollMaxPages,
-          persist: prefs.infiniteScrollPersist,
-          freshnessMinutes: 30,
-          fetchDelay: 1500,
-          debugMode: prefs.debugMode,
-        }
-      );
-      infiniteScrollManager.init();
-    }
-  }
+  // On document_start the results container may not exist yet (client-rendered
+  // engines like Startpage build #main after hydration) — tryStartInfiniteScroll
+  // retries until it appears.
+  tryStartInfiniteScroll();
 
   // Process existing results.
   processResults(getCachedResultNodes());
@@ -223,6 +250,19 @@ async function init(): Promise<void> {
 
   // Watch for dynamic results (infinite scroll, AJAX pagination, etc.)
   startResultObserver();
+  shhLog(`init done: processed=${getCachedResultNodes().length} observer=${!!observer} infScroll=${!!infiniteScrollManager}`);
+
+  // Background tabs freeze/thaw — Startpage hydrates when the tab becomes
+  // visible, so re-process on every visibility change (idempotent: stamped
+  // nodes are skipped, the observer no-ops if already running).
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if (!matcher || !prefs || !engine) return;
+    invalidateNodeCache();
+    processResults(getCachedResultNodes());
+    if (!observer) startResultObserver();
+    tryStartInfiniteScroll();
+  });
 
   // Listen for messages from popup (prefs/list updates)
   const messageHandler = (msg: unknown) => {
@@ -233,13 +273,156 @@ async function init(): Promise<void> {
     }
   };
   browser.runtime.onMessage.addListener(messageHandler);
+
+  // Degraded start (cold background): poll until messaging recovers, then
+  // swap in the real list/prefs and re-process the page.
+  if (degradedStart) void reviveFromBackground();
+
+  // Startpage insurance: results hydrate client-side on a page whose events
+  // (load, sometimes DOMContentLoaded) stall behind hanging resources — if
+  // the MutationObserver ever misses the hydration window, these rescans
+  // and the URL watcher below still pick the results up.
+  if (engine.id === "startpage") {
+    for (const delay of [1000, 2000, 4000, 8000]) {
+      setTimeout(() => {
+        if (matcher && prefs) {
+          invalidateNodeCache();
+          processResults(getCachedResultNodes());
+        }
+      }, delay);
+    }
+  }
+}
+
+// Last-search URL — used by the SPA-navigation watcher to detect soft
+// navigations (no page load → no fresh injection; the resident script must
+// re-process results itself).
+let lastSeenUrl = location.href;
+setInterval(() => {
+  if (location.href === lastSeenUrl) return;
+  lastSeenUrl = location.href;
+  if (matcher && prefs && engine) {
+    invalidateNodeCache();
+    processResults(getCachedResultNodes());
+  }
+}, 1500);
+
+// ── withTimeout ────────────────────────────────────────────────────────────
+// Rejects after `ms` — used to bound first-load messaging because a cold
+// event page HANGS rather than rejects, which would stall init indefinitely.
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  const timer = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error("shh-messaging-timeout")), ms)
+  );
+  // the losing promise rejects later — swallow it to avoid unhandled-rejection noise
+  timer.catch(() => {});
+  return Promise.race([p, timer]);
+}
+
+// ── reviveFromBackground ───────────────────────────────────────────────────
+// Background healer for degraded starts: polls messaging, then replaces the
+// cache-derived state with the real list/prefs and re-processes results.
+async function reviveFromBackground(): Promise<void> {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await sleep(2000);
+    try {
+      const [realEntries, realPrefs] = await withTimeout(
+        Promise.all([getList(), getPrefs()]), 3000
+      );
+      entries = realEntries;
+      prefs = realPrefs;
+      refreshMatcher();
+      updateCache();
+      updateHasRules();
+      if (prefs && engine) {
+        engineActive =
+          !prefs.pausedGlobally &&
+          !prefs.pausedEngines.includes(engine.id) &&
+          prefs.engineToggles[engine.id] !== false;
+        if (engineActive) {
+          processResults(getCachedResultNodes());
+          (window as Window & { __shhRevealGoogle?: () => void }).__shhRevealGoogle?.();
+        }
+      }
+      degradedStart = false;
+      shhLog(`revived from background (entries=${entries.length})`);
+      return;
+    } catch { /* background still cold — keep polling */ }
+  }
 }
 
 function getCachedResultNodes(): Element[] {
   if (!cachedResultNodes) {
-    cachedResultNodes = engine!.getResultNodes(document);
+    const nodes = engine!.getResultNodes(document);
+    // Never cache an empty snapshot: on late-hydrating engines (Startpage
+    // renders results client-side) an empty list would stick forever and
+    // starve every later re-processing pass.
+    if (nodes.length > 0) cachedResultNodes = nodes;
+    return nodes;
   }
   return cachedResultNodes;
+}
+
+// ── tryStartInfiniteScroll ─────────────────────────────────────────────────
+// Creates the manager when a results container exists; retries briefly when
+// the container hasn't been built yet (client-rendered engines at
+// document_start). Idempotent — safe against double invocation.
+function tryStartInfiniteScroll(retriesLeft = 25): void {
+  if (!prefs || !engine || infiniteScrollManager) return;
+  if (!prefs.infiniteScroll) return;
+  if (!(engine.getNextPageUrl || engine.triggerNextPage || engine.getNextPageRequest)) return;
+  const container = findInfiniteScrollContainer();
+  if (container) {
+    infiniteScrollManager = new InfiniteScrollManager(
+      engine,
+      container,
+      (nodes) => processResults(nodes),
+      {
+        threshold: prefs.infiniteScrollThreshold,
+        maxPages: prefs.infiniteScrollMaxPages,
+        persist: prefs.infiniteScrollPersist,
+        freshnessMinutes: 30,
+        fetchDelay: 1500,
+        debugMode: prefs.debugMode,
+        // Startpage's fetched SSR markup uses class names the live
+        // client-rendered stylesheet never defines.
+        portFetchedStyles: engine.id === "startpage",
+      }
+    );
+    infiniteScrollManager.init();
+    return;
+  }
+  if (retriesLeft > 0) {
+    setTimeout(() => tryStartInfiniteScroll(retriesLeft - 1), 600);
+  }
+}
+
+// ── recoverStateFromCache ──────────────────────────────────────────────────
+// Rebuilds entries + prefs from the preload's localStorage cache when the
+// background is unreachable (cold event page). Degraded mode: blocking and
+// placeholders work; actions needing messaging may fail until the reviver
+// swaps in real state. Returns null ONLY when the cache explicitly says
+// this engine is paused — otherwise always proceeds (fresh installs get
+// empty entries + defaults, so block buttons work on the very first load).
+function recoverStateFromCache(): { entries: BlockEntry[]; prefs: Prefs } | null {
+  try {
+    const raw = localStorage.getItem("_shh_cache");
+    if (raw) {
+      const cache = JSON.parse(raw) as { domains?: string[]; wildcard?: boolean; paused?: boolean };
+      if (cache.paused === true) return null;
+      const domains = Array.isArray(cache.domains) ? cache.domains : [];
+      return {
+        entries: domains.map((d) => ({
+          domain: d, mode: "block" as const, enabled: true, createdAt: 0,
+        })),
+        prefs: {
+          ...DEFAULT_PREFS,
+          subdomainWildcard: cache.wildcard !== false,
+        },
+      };
+    }
+  } catch { /* fall through to defaults */ }
+  return { entries: [], prefs: { ...DEFAULT_PREFS } };
 }
 
 // ── startResultObserver ────────────────────────────────────────────────────
@@ -274,7 +457,8 @@ function startResultObserver(): void {
     }
   }, IGNORE);
 
-  observer.start(document.body, engine.observerOptions?.());
+  // document_start safety: <body> may not exist yet — observe from the root.
+  observer.start(document.body ?? document.documentElement, engine.observerOptions?.());
 }
 
 function invalidateNodeCache(): void {
@@ -510,7 +694,7 @@ async function refreshPrefs(): Promise<void> {
     if (!prefs.infiniteScroll && infiniteScrollManager) {
       infiniteScrollManager.destroy();
       infiniteScrollManager = null;
-    } else if (prefs.infiniteScroll && !infiniteScrollManager && (engine?.getNextPageUrl || engine?.triggerNextPage)) {
+    } else if (prefs.infiniteScroll && !infiniteScrollManager && (engine?.getNextPageUrl || engine?.triggerNextPage || engine?.getNextPageRequest)) {
       const container = findInfiniteScrollContainer();
       if (container) {
         infiniteScrollManager = new InfiniteScrollManager(
@@ -524,6 +708,9 @@ async function refreshPrefs(): Promise<void> {
             freshnessMinutes: 30,
             fetchDelay: 1500,
             debugMode: prefs.debugMode,
+            // Startpage's fetched SSR markup uses class names the live
+            // client-rendered stylesheet never defines.
+            portFetchedStyles: engine.id === "startpage",
           }
         );
         infiniteScrollManager.init();

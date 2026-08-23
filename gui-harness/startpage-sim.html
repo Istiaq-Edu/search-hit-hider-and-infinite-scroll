@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Startpage sim</title>
+</head>
+<body>
+  <!-- Mirrors the live Startpage 2026 shell; results are inserted 2s after
+       load to simulate React hydration (the raw server HTML has none). -->
+  <div class="Layout"><div class="themeProvider"><main><section id="main">
+    <div class="w-gl css-1og29rd"><span class="w-gl-attribution">Results</span></div>
+    <div class="pagination-container css-1kfqg5z"><nav class="pagination" aria-label="more search results">
+      <form action="/sp/search" method="post">
+        <input type="hidden" name="sc" value="simtoken123">
+        <input type="hidden" name="query" value="test">
+        <button type="submit">Next</button>
+      </form>
+    </nav></div>
+  </section></main></div></div>
+
+  <script src="/gui-harness/mock.js"></script>
+  <!-- Real content bundle, patched so the Startpage adapter matches this host -->
+  <script type="module" src="/gui-harness/startpage-sim.js"></script>
+  <script>
+    // Hydration simulation: insert result nodes 2s after load. The mock
+    // blocks pinterest.com — expect it hidden with a placeholder, the rest
+    // with block buttons.
+    setTimeout(() => {
+      const wgl = document.querySelector("#main .w-gl");
+      const mk = (url, title) => {
+        const d = document.createElement("div");
+        d.className = "result css-z73qjy";
+        const a = document.createElement("a");
+        a.className = "result-title result-link css-1ubyvt6";
+        a.href = url;
+        const h = document.createElement("h3");
+        h.textContent = title;
+        a.appendChild(h);
+        d.appendChild(a);
+        wgl.appendChild(d);
+      };
+      mk("https://pinterest.com/pin/1", "Blocked result one");
+      mk("https://example.org/a", "Normal result two");
+      mk("https://example.org/b", "Normal result three");
+      window.__simHydrated = true;
+    }, 2000);
+  </script>
+</body>
+</html>

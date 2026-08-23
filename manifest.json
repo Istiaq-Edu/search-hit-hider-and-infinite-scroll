@@ -1,11 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Search Hit Hider and Infinite Scroll",
-  "version": "1.6.1",
-  "description": "Hide unwanted domains from search results with one click. Auto-load more results as you scroll. Supports Google, DuckDuckGo, Bing, Yandex, Baidu, and Brave Search.",
+  "version": "1.6.2",
+  "description": "Hide unwanted domains from search results with one click. Auto-load more results as you scroll. Supports Google, DuckDuckGo, Bing, Yandex, Baidu, Brave Search, and Startpage.",
   "author": "Istiaq-Edu",
   "homepage_url": "https://github.com/Istiaq-Edu/Search-Hit-Hider",
-
   "icons": {
     "16": "assets/icons/icon-16.png",
     "32": "assets/icons/icon-32.png",
@@ -13,7 +12,6 @@
     "96": "assets/icons/icon-96.png",
     "128": "assets/icons/icon-128.png"
   },
-
   "action": {
     "default_popup": "popup/index.html",
     "default_icon": {
@@ -24,12 +22,12 @@
     },
     "default_title": "Search Hit Hider and Infinite Scroll"
   },
-
   "background": {
-    "scripts": ["background/service-worker.js"],
+    "scripts": [
+      "background/service-worker.js"
+    ],
     "type": "module"
   },
-
   "content_scripts": [
     {
       "matches": [
@@ -90,10 +88,16 @@
         "*://ya.ru/*",
         "*://www.baidu.com/*",
         "*://search.brave.com/*",
-        "*://search.brave4u7jddbv7cyvyptnt5corw0tamlzo53lwd5s7vm223nr3ro2ryd.onion/*"
+        "*://search.brave4u7jddbv7cyvyptnt5corw0tamlzo53lwd5s7vm223nr3ro2ryd.onion/*",
+        "*://*.startpage.com/*",
+        "*://startpage.com/*"
       ],
-      "css": ["content/preload.css"],
-      "js": ["content/preload.js"],
+      "css": [
+        "content/preload.css"
+      ],
+      "js": [
+        "content/preload.js"
+      ],
       "run_at": "document_start",
       "all_frames": false
     },
@@ -141,7 +145,9 @@
         "*://*.google.com.sa/*",
         "*://*.google.ae/*"
       ],
-      "js": ["content/index.js"],
+      "js": [
+        "content/index.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     },
@@ -152,7 +158,9 @@
         "*://start.duckduckgo.com/*",
         "*://safe.duckduckgo.com/*"
       ],
-      "js": ["content/index.js"],
+      "js": [
+        "content/index.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     },
@@ -160,7 +168,9 @@
       "matches": [
         "*://www.bing.com/*"
       ],
-      "js": ["content/index.js"],
+      "js": [
+        "content/index.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     },
@@ -176,7 +186,9 @@
         "*://yandex.de/*",
         "*://ya.ru/*"
       ],
-      "js": ["content/index.js"],
+      "js": [
+        "content/index.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     },
@@ -184,7 +196,9 @@
       "matches": [
         "*://www.baidu.com/*"
       ],
-      "js": ["content/index.js"],
+      "js": [
+        "content/index.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     },
@@ -193,16 +207,27 @@
         "*://search.brave.com/*",
         "*://search.brave4u7jddbv7cyvyptnt5corw0tamlzo53lwd5s7vm223nr3ro2ryd.onion/*"
       ],
-      "js": ["content/index.js"],
+      "js": [
+        "content/index.js"
+      ],
       "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "*://*.startpage.com/*",
+        "*://startpage.com/*"
+      ],
+      "js": [
+        "content/index.js"
+      ],
+      "run_at": "document_start",
       "all_frames": false
     }
   ],
-
   "permissions": [
     "storage"
   ],
-
   "host_permissions": [
     "*://*.google.com/*",
     "*://*.google.co.uk/*",
@@ -261,15 +286,18 @@
     "*://ya.ru/*",
     "*://www.baidu.com/*",
     "*://search.brave.com/*",
-    "*://search.brave4u7jddbv7cyvyptnt5corw0tamlzo53lwd5s7vm223nr3ro2ryd.onion/*"
+    "*://search.brave4u7jddbv7cyvyptnt5corw0tamlzo53lwd5s7vm223nr3ro2ryd.onion/*",
+    "*://*.startpage.com/*",
+    "*://startpage.com/*"
   ],
-
   "browser_specific_settings": {
     "gecko": {
       "id": "{b7e3a1d2-4f8c-4a9e-b5d6-2c0f1e3a7b9d}",
       "strict_min_version": "112.0",
       "data_collection_permissions": {
-        "required": ["none"],
+        "required": [
+          "none"
+        ],
         "optional": []
       }
     }

@@ -92,6 +92,14 @@
       paused = c.paused === true;
     }
   } catch { /* localStorage unavailable or JSON corrupted */ }
+  const buildV = browser.runtime.getManifest?.().version ?? "?";
+  console.log(`[SHH-preload v${buildV}] host=${location.hostname} domains=${domains.length} paused=${paused}`);
+  try {
+    document.documentElement.setAttribute(
+      "data-shh-preload-run",
+      `v=${buildV};host=${location.hostname};domains=${domains.length};paused=${paused}`
+    );
+  } catch { /* ignore */ }
 
   // Pause / engine-disable must stop ALL preload hiding. The main content
   // script writes this flag whenever blocking is suspended for this engine;
@@ -278,7 +286,8 @@
   }
 
   // Resolve the real destination host for a link.
-  // Google wraps result URLs in /url?q= redirects — unwrap them.
+  // Google wraps result URLs in /url?q= redirects; Startpage's "anonymous
+  // view" proxies wrap them in a u= param — unwrap both.
   function resolveHost(a: HTMLAnchorElement): string {
     const raw = a.getAttribute("href") ?? "";
     if (raw.includes("/url?") || raw.includes("google.com/url")) {
@@ -286,6 +295,17 @@
         const qs = raw.slice(raw.indexOf("?") + 1);
         const q = new URLSearchParams(qs).get("q");
         if (q && q.startsWith("http")) return new URL(q).hostname;
+      } catch { /* fall through to .href */ }
+    }
+    if (
+      raw.includes("ixquick-proxy.com/do/spg/highlight.pl") ||
+      raw.includes("startpage.com/av/proxy")
+    ) {
+      try {
+        const q = raw.slice(raw.indexOf("?") + 1);
+        // URLSearchParams.get() already percent-decodes once.
+        const u = new URLSearchParams(q).get("u");
+        if (u && u.startsWith("http")) return new URL(u).hostname;
       } catch { /* fall through to .href */ }
     }
     try { return new URL(a.href).hostname; } catch { return ""; }
@@ -326,9 +346,11 @@
     // Ecosia
     "section.web__mainline div.mainline__result-wrapper",
     "div.results-wrapper div.web-result",
-    // Startpage
-    "div#main div.w-gl > div.result",
-    "div#main div.w-bg > div.result",
+    // Startpage — 2026 live layout uses <section id="main"> (div#main matches
+    // nothing), so keep #main tag-agnostic; unscoped fallback for resilience.
+    "#main div.w-gl > div.result",
+    "#main div.w-bg > div.result",
+    "div.w-gl > div.result",
     "div.w-gl__result",
     "section#main div.css-ndwlbg > div.article",
     "[data-view='results'] li.search-result",

@@ -46,6 +46,24 @@ export interface EngineAdapter {
   /** Return the URL for the next page of results (e.g. the "Next" button href), or null. */
   getNextPageUrl?(doc: Document, currentUrl?: string): string | null;
 
+  /**
+   * Optional: return a wrapper element from a FETCHED doc that fetched result
+   * nodes should be appended inside. The manager shallow-clones it (keeping
+   * classes/attributes for styling context — e.g. Startpage's emotion rules
+   * are ancestor-scoped) and places the cloned result nodes within. Return
+   * null for the default plain page container.
+   */
+  getFetchWrapper?(doc: Document): Element | null;
+
+  /**
+   * Optional: return a full request descriptor for the next page instead of
+   * a plain GET URL — for engines whose pagination requires POST form data
+   * with a session token (Startpage's `sc`). `pageNo` is the 1-based number
+   * of the page being fetched. Return null to fall back to getNextPageUrl /
+   * end of results.
+   */
+  getNextPageRequest?(doc: Document, pageNo: number): { url: string; method: "POST"; body: Record<string, string> } | null;
+
   /** CSS selectors for pagination elements to hide when infinite scroll is active. */
   getPaginationSelectors?(): string[];
 

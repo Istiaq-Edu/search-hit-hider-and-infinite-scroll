@@ -101,10 +101,11 @@ describe("ALL_ENGINE_IDS", () => {
     "yandex",
     "baidu",
     "brave",
+    "startpage",
   ];
 
-  it("contains exactly 6 engines", () => {
-    expect(ALL_ENGINE_IDS).toHaveLength(6);
+  it("contains exactly 7 engines", () => {
+    expect(ALL_ENGINE_IDS).toHaveLength(7);
   });
 
   it("contains all expected engine IDs", () => {

@@ -29,7 +29,7 @@ export function About() {
         marginBottom: "14px",
       }}>
         A Firefox extension that lets you hide unwanted domains from search results with one click.
-        Supports Google, DuckDuckGo, Yandex, Bing, and more.
+        Supports Google, DuckDuckGo, Bing, Yandex, Baidu, Brave Search, and Startpage.
       </div>
 
       {/* Privacy */}

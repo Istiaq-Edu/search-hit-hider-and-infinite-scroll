@@ -5,6 +5,7 @@ import { YandexAdapter } from "./yandex";
 import { BingAdapter } from "./bing";
 import { BaiduAdapter } from "./baidu";
 import { BraveAdapter } from "./brave";
+import { StartpageAdapter } from "./startpage";
 
 // ============================================================
 // Engine registry — detects the active engine from the URL
@@ -17,6 +18,7 @@ const ALL_ADAPTERS: EngineAdapter[] = [
   new BingAdapter(),
   new BaiduAdapter(),
   new BraveAdapter(),
+  new StartpageAdapter(),
 ];
 
 /**
