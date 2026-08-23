@@ -1,4 +1,5 @@
 import type { Prefs } from "../../shared/types";
+import { Toggle } from "./Toggle";
 
 interface Props {
   prefs: Prefs;
@@ -22,28 +23,6 @@ const MAX_PAGES_OPTIONS = [
   { value: -1, label: "Unlimited" },
 ];
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: () => void }) {
-  return (
-    <div
-      onClick={onChange}
-      style={{
-        width: "34px", height: "18px",
-        background: checked ? "var(--accent)" : "var(--bg-3)",
-        borderRadius: "9px", position: "relative", cursor: "pointer",
-        transition: "background 0.2s", border: "1px solid var(--border)",
-        flexShrink: 0,
-      }}
-    >
-      <div style={{
-        position: "absolute", top: "2px",
-        left: checked ? "16px" : "2px",
-        width: "12px", height: "12px",
-        background: "#fff", borderRadius: "50%",
-        transition: "left 0.2s", boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
-      }} />
-    </div>
-  );
-}
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: preact.ComponentChildren }) {
   return (
@@ -64,8 +43,7 @@ export function InfiniteScrollSettings({ prefs, onUpdatePrefs }: Props) {
         label="Enable infinite scroll"
         hint="Auto-load next page when scrolling to the bottom"
       >
-        <Toggle
-          checked={prefs.infiniteScroll}
+        <Toggle label="Enable infinite scroll" checked={prefs.infiniteScroll}
           onChange={() => void onUpdatePrefs({ infiniteScroll: !prefs.infiniteScroll })}
         />
       </Row>
@@ -81,6 +59,7 @@ export function InfiniteScrollSettings({ prefs, onUpdatePrefs }: Props) {
               min="200"
               max="2000"
               step="200"
+              aria-label="Load threshold"
               value={prefs.infiniteScrollThreshold}
               onInput={(e) => void onUpdatePrefs({
                 infiniteScrollThreshold: parseInt((e.target as HTMLInputElement).value, 10)
@@ -111,8 +90,7 @@ export function InfiniteScrollSettings({ prefs, onUpdatePrefs }: Props) {
             label="Restore scroll position"
             hint="Pick up where you left off after page reload"
           >
-            <Toggle
-              checked={prefs.infiniteScrollPersist}
+            <Toggle label="Restore scroll position" checked={prefs.infiniteScrollPersist}
               onChange={() => void onUpdatePrefs({ infiniteScrollPersist: !prefs.infiniteScrollPersist })}
             />
           </Row>

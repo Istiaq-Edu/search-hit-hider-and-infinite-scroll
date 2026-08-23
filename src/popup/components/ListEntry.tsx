@@ -33,6 +33,7 @@ export function ListEntry({ entry, selected, onSelect, onRemove, onToggle }: Pro
         type="checkbox"
         checked={selected}
         onChange={onSelect}
+        aria-label={`Select ${entry.domain}`}
         style={{ width: "13px", height: "13px", cursor: "pointer", accentColor: "var(--accent)", flexShrink: 0 }}
       />
 
@@ -62,6 +63,7 @@ export function ListEntry({ entry, selected, onSelect, onRemove, onToggle }: Pro
       <button
         onClick={() => onToggle(!entry.enabled)}
         title={entry.enabled ? "Disable (keep but don't block)" : "Enable"}
+        aria-label={`${entry.enabled ? "Disable" : "Enable"} ${entry.domain}`}
         style={{
           background: entry.enabled ? "var(--success)" : "var(--bg-3)",
           color: entry.enabled ? "#fff" : "var(--text-3)",
@@ -81,6 +83,7 @@ export function ListEntry({ entry, selected, onSelect, onRemove, onToggle }: Pro
       <button
         onClick={onRemove}
         title="Remove from block list"
+        aria-label={`Remove ${entry.domain}`}
         style={{
           background: "none",
           border: "none",

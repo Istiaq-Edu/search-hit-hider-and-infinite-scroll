@@ -1,32 +1,11 @@
 import type { Prefs, ButtonStyle } from "../../shared/types";
+import { Toggle } from "./Toggle";
 
 interface Props {
   prefs: Prefs;
   onUpdatePrefs: (patch: Partial<Prefs>) => Promise<void>;
 }
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: () => void }) {
-  return (
-    <div
-      onClick={onChange}
-      style={{
-        width: "34px", height: "18px",
-        background: checked ? "var(--accent)" : "var(--bg-3)",
-        borderRadius: "9px", position: "relative", cursor: "pointer",
-        transition: "background 0.2s", border: "1px solid var(--border)",
-        flexShrink: 0,
-      }}
-    >
-      <div style={{
-        position: "absolute", top: "2px",
-        left: checked ? "16px" : "2px",
-        width: "12px", height: "12px",
-        background: "#fff", borderRadius: "50%",
-        transition: "left 0.2s", boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
-      }} />
-    </div>
-  );
-}
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: preact.ComponentChildren }) {
   return (
@@ -128,8 +107,7 @@ export function AppearanceSettings({ prefs, onUpdatePrefs }: Props) {
         label="Show button on hover only"
         hint="Button stays hidden until you move the mouse over a result"
       >
-        <Toggle
-          checked={prefs.showOnHover}
+        <Toggle label="Show button on hover only" checked={prefs.showOnHover}
           onChange={() => void onUpdatePrefs({ showOnHover: !prefs.showOnHover })}
         />
       </Row>
