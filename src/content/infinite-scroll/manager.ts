@@ -2,6 +2,7 @@ import type { EngineAdapter } from "../engines/base";
 import { Sentinel } from "./sentinel";
 import { Deduper, unwrapProxyDestination } from "./deduper";
 import { fetchPage } from "./fetcher";
+import { extractFaviconData } from "./favicon-data";
 import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type ScrollState } from "./persist";
 
 // Inline CSS properties that truncate text in server-rendered HTML from SPAs.
@@ -695,10 +696,11 @@ export class InfiniteScrollManager {
       // gets the live theme color in the same pass.
       this.hydrateDisplayUrls(appended);
       this.reSkinClones(appended);
-      // Current-generation Startpage SSR carries NO favicon URLs at all —
-      // icons are painted by hydration, which clones never receive
-      // (diagnostics prove faviconsPainted:0). Assign them ourselves.
-      this.ensureCloneFavicons(appended);
+      // Current-generation Startpage SSR carries NO favicon URLs in chip
+      // markup — icons ride inline in the SSR JSON state ("faviconData")
+      // and hydration copies them on; clones are never hydrated, so we
+      // parse the blob ourselves (see favicon-data.ts) and paint tier 0.
+      this.ensureCloneFavicons(appended, sourceDoc);
     }
     if (this.config.debugMode) {
       const page = appended[0]?.closest("[data-inf-page]") as HTMLElement | null;
@@ -755,6 +757,14 @@ export class InfiniteScrollManager {
    * recomputing per append both wasted cycles and lost the data forever.
    */
   private faviconIntel: { map: Map<string, string>; pattern: string | null } | null = null;
+
+  /**
+   * First-party inline icon art (host -> data: URL) parsed from Startpage's
+   * SSR JSON state ("faviconData"). Merged into faviconIntel.map at capture
+   * time; kept separately so fetched snapshots can extend it per append
+   * (each fetched page carries its OWN inline blob with page-2+ hosts).
+   */
+  private faviconInline: Map<string, string> = new Map();
 
   /** Pending empty-intel retry (hydration may land late — React #423). */
   private faviconRetryTimer: number | null = null;
@@ -1077,17 +1087,20 @@ export class InfiniteScrollManager {
    * first result's icon (the "EF everywhere" bug).
    *
    * Icon source priority:
+   *   0. First-party inline art from THIS page's SSR JSON ("faviconData",
+   *      data: URLs — exact artwork, no network, CSP-proof). Merged into
+   *      the session map so later pages can reuse earlier art.
    *   1. Live page-1 chip of the SAME destination domain — exact artwork,
    *      first-party URL (built once per append).
    *   2. Icon-endpoint pattern learned from any live chip, {domain}-substituted.
-   *   3. DuckDuckGo public icon service (opt-in).
+   *   3. DuckDuckGo public icon service (opt-in; CSP-blocked on Startpage).
    *   4. NEVER-BLANK guarantee: synthesized monogram — first letter of the
    *      host on a deterministic per-host color. Live evidence shows
    *      Startpage's own hydration can leave even PAGE-1 chips blank
    *      (React #423 partial recovery), so "no source" is a normal state,
    *      not an error: blank white circles are the one unacceptable result.
    */
-  private ensureCloneFavicons(appended: Element[]): void {
+  private ensureCloneFavicons(appended: Element[], sourceDoc?: Document): void {
     try {
       if (appended.length === 0) return;
       this.loadFaviconIntel(false);
@@ -1095,6 +1108,23 @@ export class InfiniteScrollManager {
       const pattern = this.faviconIntel!.pattern;
       let urlFilled = 0;
       let monograms = 0;
+      // Tier 0: this fetched snapshot's own inline blob. Each page carries
+      // its OWN hosts' art — exactly the page-2 domains the page-1 intel
+      // structurally cannot cover. First record wins across pages.
+      if (
+        sourceDoc &&
+        this.engine.id === "startpage"
+      ) {
+        try {
+          for (const el of Array.from(sourceDoc.querySelectorAll("script"))) {
+            const txt = el.textContent ?? "";
+            if (txt.indexOf("faviconData") === -1 || txt.length >= 3_000_000) continue;
+            for (const [h, u] of extractFaviconData(txt)) {
+              if (!this.faviconInline.has(h)) this.faviconInline.set(h, u);
+            }
+          }
+        } catch { /* cosmetic — tier simply stays empty */ }
+      }
       for (const node of appended) {
         try {
           const dest = this.engine.getResultUrl(node);
@@ -1109,6 +1139,7 @@ export class InfiniteScrollManager {
               continue;
             }
             const url =
+              this.faviconInline.get(host) ??
               liveIcons.get(host) ??
               (pattern && pattern.includes("{domain}")
                 ? pattern.replace("{domain}", host)
@@ -1195,6 +1226,15 @@ export class InfiniteScrollManager {
    * `repaint` (timer path): walk ALL appended pages and fill any chip the
    * earlier blind pass skipped. Populated snapshots are never re-captured,
    * so steady-state cost stays at zero extra sweeps.
+   *
+   * Tier 0 (first-party inline art): Startpage SSR embeds every result's
+   * icon as a data: URL ("faviconData") in the page's JSON state — both on
+   * live page 1 (read via document) and inside every fetched snapshot we
+   * already hold (sourceDoc). Parsing needs no network and no permissions,
+   * and data: URLs pass Startpage's CSP (img-src … data:) that blocks every
+   * third-party icon service. Page-1 chips are often blank precisely because
+   * hydration crashed — the JSON blob survives the crash, so this tier ALSO
+   * repairs page-1 blanks via buildLiveFaviconMap below.
    */
   private loadFaviconIntel(repaint: boolean): void {
     try {
@@ -1202,15 +1242,40 @@ export class InfiniteScrollManager {
         !this.faviconIntel ||
         (this.faviconIntel.map.size === 0 && !this.faviconIntel.pattern);
       if (!wasEmpty) return;
+      let inlineMap = new Map<string, string>();
+      try {
+        // Live document first (covers page-1 results even when their chips
+        // never got painted); fetched snapshots merge in per append.
+        for (const el of Array.from(document.querySelectorAll("script"))) {
+          const txt = el.textContent ?? "";
+          if (txt.indexOf("faviconData") !== -1 && txt.length < 3_000_000) {
+            inlineMap = extractFaviconData(txt);
+            if (inlineMap.size > 0) break;
+          }
+        }
+      } catch { /* cosmetic — fall through to chip harvesting */ }
+      // MERGE, never assign: faviconInline accumulates art extracted from
+      // each fetched snapshot. Assigning here (an earlier draft) wiped the
+      // accumulated map on EVERY still-empty-intel recapture (the retry
+      // path runs up to 6×), destroying page-2 art before page-3 could
+      // reuse it — mutation-caught by the first-snapshot-wins test.
+      for (const [h, u] of inlineMap) {
+        if (!this.faviconInline.has(h)) this.faviconInline.set(h, u);
+      }
       this.faviconIntel = {
         map: this.buildLiveFaviconMap(),
         pattern: this.learnLiveFaviconPattern(),
       };
+      if (this.engine.id === "startpage") {
+        for (const [h, u] of this.faviconInline) {
+          if (!this.faviconIntel.map.has(h)) this.faviconIntel.map.set(h, u);
+        }
+      }
       const nowFilled =
         this.faviconIntel.map.size > 0 || !!this.faviconIntel.pattern;
       this.log(
         "favicon intel captured:",
-        `${this.faviconIntel.map.size} hosts, pattern: ${this.faviconIntel.pattern ? "yes" : "none"}`
+        `${this.faviconIntel.map.size} hosts, pattern: ${this.faviconIntel.pattern ? "yes" : "none"}, inline: ${this.faviconInline.size}`
       );
       if (!nowFilled) {
         this.faviconRetryCount++;
