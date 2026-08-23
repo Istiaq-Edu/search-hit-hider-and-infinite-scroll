@@ -1081,7 +1081,12 @@ export class InfiniteScrollManager {
    *   1. Live page-1 chip of the SAME destination domain — exact artwork,
    *      first-party URL (built once per append).
    *   2. Icon-endpoint pattern learned from any live chip, {domain}-substituted.
-   *   3. DuckDuckGo public icon service.
+   *   3. DuckDuckGo public icon service (opt-in).
+   *   4. NEVER-BLANK guarantee: synthesized monogram — first letter of the
+   *      host on a deterministic per-host color. Live evidence shows
+   *      Startpage's own hydration can leave even PAGE-1 chips blank
+   *      (React #423 partial recovery), so "no source" is a normal state,
+   *      not an error: blank white circles are the one unacceptable result.
    */
   private ensureCloneFavicons(appended: Element[]): void {
     try {
@@ -1110,21 +1115,21 @@ export class InfiniteScrollManager {
               (this.config.allowThirdPartyIcons
                 ? `https://icons.duckduckgo.com/ip3/${host}.ico`
                 : null);
-            if (!url) {
-              // No consented source for this host — keep whatever the SSR
-              // shipped (letter avatar) rather than paint a broken URL.
-              continue;
-            }
-            // Clear letter-avatar content — but ONLY bare text ("D", "EF").
-            // If the SSR ever ships a real child element (<img>/<svg>),
-            // that IS the icon: leave it and skip painting over it.
-            const hasElementChild = Array.from(icon.children).length > 0;
-            if (!hasElementChild) {
+            if (url) {
+              // Clear letter-avatar content — but ONLY bare text ("D", "EF").
+              // If the SSR ever ships a real child element (<img>/<svg>),
+              // that IS the icon: leave it and skip painting over it.
+              if (Array.from(icon.children).length > 0) {
+                filled++;
+                continue;
+              }
               icon.textContent = "";
               icon.style.backgroundImage = `url("${url}")`;
               icon.style.backgroundSize = "contain";
               icon.style.backgroundPosition = "center";
               icon.style.backgroundRepeat = "no-repeat";
+            } else {
+              this.paintMonogram(icon, host);
             }
             filled++;
           }
@@ -1132,6 +1137,32 @@ export class InfiniteScrollManager {
       }
       this.log("favicon fallback filled:", String(filled));
     } catch { /* favicon assignment is cosmetic — never fail the append */ }
+  }
+
+  /**
+   * Deterministic per-host monogram: hue hashed from the hostname, letter
+   * centered on the chip. No network, no privacy exposure, stable across
+   * pages — and it guarantees no chip ever ships blank.
+   */
+  private paintMonogram(icon: HTMLElement, host: string): void {
+    let hash = 5381;
+    for (let i = 0; i < host.length; i++) hash = ((hash << 5) + hash + host.charCodeAt(i)) | 0;
+    const hue = Math.abs(hash) % 360;
+    const bg = `hsl(${hue}, 62%, 42%)`;
+    const fg = "hsl(0, 0%, 100%)";
+    const label = (host.replace(/^www\./, "").split(".")[0] ?? "?").charAt(0).toUpperCase();
+    if (Array.from(icon.children).length > 0) return; // real child markup wins
+    icon.textContent = label;
+    icon.style.backgroundColor = bg;
+    icon.style.color = fg;
+    icon.style.display = "flex";
+    icon.style.alignItems = "center";
+    icon.style.justifyContent = "center";
+    icon.style.fontWeight = "700";
+    icon.style.fontSize = "12px";
+    icon.style.lineHeight = "1";
+    icon.style.backgroundImage = "none";
+    icon.style.borderRadius = "50%";
   }
 
   /**
@@ -1216,13 +1247,17 @@ export class InfiniteScrollManager {
         (this.config.allowThirdPartyIcons
           ? `https://icons.duckduckgo.com/ip3/${host}.ico`
           : null);
-      if (!url) continue;
-      if (Array.from(icon.children).length > 0) continue;
-      icon.textContent = "";
-      icon.style.backgroundImage = `url("${url}")`;
-      icon.style.backgroundSize = "contain";
-      icon.style.backgroundPosition = "center";
-      icon.style.backgroundRepeat = "no-repeat";
+      if (url) {
+        if (Array.from(icon.children).length > 0) continue;
+        icon.textContent = "";
+        icon.style.backgroundImage = `url("${url}")`;
+        icon.style.backgroundSize = "contain";
+        icon.style.backgroundPosition = "center";
+        icon.style.backgroundRepeat = "no-repeat";
+      } else {
+        // Never-blank guarantee applies on repaints too.
+        this.paintMonogram(icon, host);
+      }
     }
   }
 

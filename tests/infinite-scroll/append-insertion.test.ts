@@ -593,8 +593,11 @@ describe("InfiniteScrollManager fetched-style porting", () => {
     try {
       const page = container.querySelector("[data-inf-page]") as HTMLElement;
       const chip = page.querySelector(".favicon-container") as HTMLElement;
-      // No third-party consent -> no paint at all; SSR letter avatar kept.
-      expect(chip.style.backgroundImage).toBe("");
+      // No third-party consent -> no icon URL; the NEVER-BLANK guarantee
+      // paints a deterministic monogram instead (letter + per-host color;
+      // jsdom may normalize hsl() to rgb()).
+      expect(["", "none"]).toContain(chip.style.backgroundImage); // no URL
+      expect(chip.style.backgroundColor).not.toBe("");
       expect(chip.textContent).toBe("S");
     } finally {
       vi.restoreAllMocks();
@@ -625,7 +628,9 @@ describe("InfiniteScrollManager fetched-style porting", () => {
       callAppend(manager, [early], parseHTML("<html><head></head></html>"));
       const page = container.querySelector("[data-inf-page]") as HTMLElement;
       const earlyChip = page.querySelector(".favicon-container") as HTMLElement;
-      expect(earlyChip.style.backgroundImage).toBe(""); // blind pass
+      // Blind pass: no URL painted yet (monogram may fill it — the contract
+      // under test is that intel stays uncached, proven by the later steal).
+      expect(["", "none"]).toContain(earlyChip.style.backgroundImage);
 
       // React #423-style LATE hydration paints page-1.
       live = document.createElement("div");
@@ -670,8 +675,9 @@ describe("InfiniteScrollManager fetched-style porting", () => {
     callAppend(manager, [early], parseHTML("<html><head></head></html>"));
     const page1 = container.querySelector("[data-inf-page]") as HTMLElement;
     const earlyChip = page1.querySelector(".favicon-container") as HTMLElement;
-    // Empty intel must NOT be frozen into a broken paint...
-    expect(earlyChip.style.backgroundImage).toBe("");
+    // Empty intel must NOT be frozen into a broken paint (no URL either way;
+    // the monogram may have filled it — the later steal is the real assert).
+    expect(["", "none"]).toContain(earlyChip.style.backgroundImage);
 
     // ...hydration then paints page-1 (first-party endpoint).
     const live = document.createElement("div");
