@@ -373,6 +373,15 @@ export class InfiniteScrollManager {
 
     for (const node of nodes) {
       const clone = document.importNode(node, true) as Element;
+      // Fetched pages may carry <script> elements and inline event handlers.
+      // Scripts inside a DOMParser document are inert, but they EXECUTE when
+      // adopted into the live document — strip them, along with on* attributes.
+      clone.querySelectorAll("script").forEach((s) => s.remove());
+      for (const el of [clone, ...Array.from(clone.querySelectorAll("*"))]) {
+        for (const attr of el.getAttributeNames()) {
+          if (attr.startsWith("on")) el.removeAttribute(attr);
+        }
+      }
       // Strip truncation styles only from elements likely to have them
       // (avoids querySelectorAll('*') which iterates all descendants)
       const truncateTargets = clone.querySelectorAll<HTMLElement>(
@@ -387,10 +396,16 @@ export class InfiniteScrollManager {
       pageContainer.appendChild(clone);
     }
 
-    // Insert before the pagination element if it exists, otherwise append
-    // to the end of the results container.
-    const pagination = this.container.querySelector('#pagination-snippet, nav[role="pagination"], .pagination');
-    if (pagination) {
+    // Insert before an engine-provided anchor (e.g. Yandex's visible pager,
+    // which must stay below the streamed results) or the generic pagination
+    // element; otherwise append to the end of the results container. The
+    // parentNode guard keeps insertBefore from throwing if an anchor is not
+    // a direct child of this container.
+    const anchor = this.engine.getInsertionAnchor?.(this.container) ?? null;
+    const pagination =
+      anchor ??
+      this.container.querySelector('#pagination-snippet, nav[role="pagination"], .pagination');
+    if (pagination && pagination.parentNode === this.container) {
       this.container.insertBefore(pageContainer, pagination);
     } else {
       this.container.appendChild(pageContainer);

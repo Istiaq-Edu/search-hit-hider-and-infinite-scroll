@@ -170,6 +170,30 @@ export class YandexAdapter implements EngineAdapter {
     return [];
   }
 
+  /**
+   * Anchor for infinite scroll insertion: Yandex's pager stays visible, so
+   * fetched pages must be inserted BEFORE it. The pager block is located by
+   * walking up from the "Next" link to the element whose parent is the
+   * results container — resilient to Yandex renaming its pager classes.
+   */
+  getInsertionAnchor(container: Element): Element | null {
+    // Use the LAST matching link: some layouts render pager controls at the
+    // top as well, and a stray aria-label="Next" link inside a result card
+    // must never win over the real bottom pager.
+    const nexts = container.querySelectorAll(
+      'a.Pager-Item_type_next, a[aria-label="Next page"], a[aria-label="Next"], a.pager__next'
+    );
+    const next = nexts.length > 0 ? nexts[nexts.length - 1] : null;
+    if (!next) return null;
+    let el: Element = next;
+    while (el.parentElement && el.parentElement !== container) {
+      el = el.parentElement;
+    }
+    // If the walk escaped the container (pager lives outside it), let the
+    // manager fall back to append-at-end instead of a misplaced insert.
+    return el.parentElement === container ? el : null;
+  }
+
   getResultId(_node: Element): string | null {
     return null;
   }

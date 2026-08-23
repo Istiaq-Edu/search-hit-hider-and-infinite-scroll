@@ -50,6 +50,15 @@ export interface EngineAdapter {
   getPaginationSelectors?(): string[];
 
   /**
+   * Return the element that fetched pages should be inserted BEFORE —
+   * typically the visible pagination block. Must be a descendant of
+   * `container`. Return null to use the generic pagination selectors /
+   * append-at-end fallback. Used by engines that keep their pager visible
+   * (e.g. Yandex) so auto-loaded results land above it, not below.
+   */
+  getInsertionAnchor?(container: Element): Element | null;
+
+  /**
    * Return a unique identifier string for a result node (used for deduplication).
    * Return null to fall back to URL-hash dedup.
    */

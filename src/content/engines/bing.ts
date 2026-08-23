@@ -53,7 +53,35 @@ export class BingAdapter implements EngineAdapter {
   }
 
   getPaginationSelectors(): string[] {
-    return ['li.b_pag', 'nav[role="navigation"]', '#b_results li.b_pag'];
+    // Keep pagination visible as a manual fallback (consistent with Yandex
+    // and Brave): if automatic fetching breaks (rate limit, markup change),
+    // users can still page through results manually. Auto-loaded pages are
+    // inserted above the pager via getInsertionAnchor().
+    return [];
+  }
+
+  /**
+   * Anchor for infinite scroll insertion: Bing's pager stays visible, so
+   * fetched pages must be inserted BEFORE it. Located by walking up from
+   * the "Next" link to the element whose parent is the results container —
+   * resilient to Bing restructuring the pager's inner markup.
+   */
+  getInsertionAnchor(container: Element): Element | null {
+    const next = container.querySelector(
+      'a.sb_pagN, a.sb_pagN_bp, a[title="Next page"], a[title="Next"]'
+    );
+    if (!next) return null;
+    let el: Element = next;
+    while (el.parentElement && el.parentElement !== container) {
+      el = el.parentElement;
+    }
+    if (el.parentElement !== container) return null;
+    // Never anchor on an element that itself contains the results list.
+    // When the container is the broad #b_content wrapper, the walk from the
+    // Next link reaches ol#b_results (whose parent IS #b_content) — using it
+    // as the anchor would insert pages ABOVE the whole results list.
+    if (el.id === "b_results" || el.querySelector("#b_results, li.b_algo")) return null;
+    return el;
   }
 
   getResultId(_node: Element): string | null {
@@ -62,6 +90,10 @@ export class BingAdapter implements EngineAdapter {
 
   getResultsContainer(doc?: Document): Element | null {
     const d = doc ?? document;
-    return d.querySelector('#b_content, #b_results');
+    // Prefer the results list itself. querySelector returns the first match
+    // in DOCUMENT order, so listing #b_content first resolves to the broad
+    // wrapper (it CONTAINS #b_results) — which misplaces both the sentinel
+    // and the page-insertion anchor.
+    return d.querySelector("#b_results") ?? d.querySelector("#b_content");
   }
 }
