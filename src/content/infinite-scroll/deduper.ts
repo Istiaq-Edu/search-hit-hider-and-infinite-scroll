@@ -95,12 +95,22 @@ export class Deduper {
         try { url = new URL(unwrapped); } catch { /* keep outer */ }
       }
       url.hash = "";
-      // Tracking-parameter policy: prefix matches for param FAMILIES
-      // (utm_*, ref*), exact matches for specific session tokens
-      // (sc — Startpage's per-search token; cat/segment/lui/language are
-      // Startpage pager fields that vary per request).
-      const TRACKING_PARAM =
-        /^(utm_|ref|referrer|sp_|atb)|(?:^)(cat|segment|lui|language|sc)$/i;
+      if (unwrapped) {
+        // Proxy-WRAPPER identity: volatile params (sc token, pager fields,
+        // utm noise) live on the wrapper and were discarded with it. The
+        // unwrapped DESTINATION keeps its own query INTACT — stripping
+        // cat/language/sc there collapsed genuinely distinct pages
+        // (site.com/a?language=en vs ?language=fr) into one hash and
+        // silently dropped results.
+        url.hostname = url.hostname.replace(/^www\./, "");
+        return url.toString();
+      }
+      // Direct-link identity (hydration-rewritten page-1 anchors, engines
+      // without proxy wrappers): drop tracking params so analytics variants
+      // of one page hash equal. Prefix families only where they are truly
+      // namespaces (utm_*, sp_*); bare names match exactly (ref, referrer,
+      // atb) so site params like reference= or refresh= survive.
+      const TRACKING_PARAM = /^(utm_|sp_)[a-z0-9_-]*$|^(ref|referrer|atb)$/i;
       const keep: [string, string][] = [];
       url.searchParams.forEach((v, k) => {
         if (!TRACKING_PARAM.test(k)) {

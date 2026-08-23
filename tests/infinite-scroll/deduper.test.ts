@@ -123,4 +123,29 @@ describe("Deduper", () => {
     deduper.isDuplicate(clean, engine);
     expect(deduper.isDuplicate(tracked, engine)).toBe(true);
   });
+
+  it("keeps destination query params on proxy-unwrapped identities (no over-stripping)", () => {
+    const engine = makeMockEngine(() => null);
+    const en = makeElement(
+      "https://ixquick-proxy.com/do/spg/highlight.pl?sc=tok&u=https%3A%2F%2Fdocs.example.org%2Fapi%3Flanguage%3Den"
+    );
+    const fr = makeElement(
+      "https://ixquick-proxy.com/do/spg/highlight.pl?sc=other&u=https%3A%2F%2Fdocs.example.org%2Fapi%3Flanguage%3Dfr"
+    );
+    expect(deduper.isDuplicate(en, engine)).toBe(false);
+    // Distinct destinations differing ONLY in a param that used to be
+    // stripped must stay distinct — the strip collapsed them silently.
+    expect(deduper.isDuplicate(fr, engine)).toBe(false);
+  });
+
+  it("direct-link stripping: exact-name tracking params only (reference=/refresh= survive)", () => {
+    const engine = makeMockEngine(() => null);
+    const clean = makeElement("https://example.com/page?section=1");
+    const tracked = makeElement("https://example.com/page?section=1&utm_source=rss&ref=hn");
+    deduper.isDuplicate(clean, engine);
+    expect(deduper.isDuplicate(tracked, engine)).toBe(true);
+    // Site params that merely PREFIX-match tracking names must survive.
+    const variant = makeElement("https://example.com/page?reference=abc&refresh=5");
+    expect(deduper.isDuplicate(variant, engine)).toBe(false);
+  });
 });

@@ -43,6 +43,16 @@ export interface InfiniteScrollPrefs {
    * without it, auto-loaded results render with wrong colors (Startpage).
    */
   portFetchedStyles?: boolean;
+  /**
+   * Allow the DuckDuckGo public icon service as a LAST-resort favicon
+   * source for clone chips. Default OFF: it makes the browser request
+   * icons.duckduckgo.com with every auto-loaded destination host in the
+   * URL — third-party disclosure of browsing. Startpage's CSP blocks that
+   * request today, but a policy change would silently activate it.
+   * The primary sources (same-domain page-1 artwork + learned first-party
+   * pattern) need no consent.
+   */
+  allowThirdPartyIcons?: boolean;
 }
 
 const DEFAULT_PREFS: InfiniteScrollPrefs = {
@@ -390,8 +400,18 @@ export class InfiniteScrollManager {
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (this.destroyed) return;
+      // Thrown network failures count toward the same 3-strike budget as
+      // null results — otherwise a dead connection retries once per
+      // sentinel crossing forever (unbounded cycle, no backoff).
+      this.consecutiveErrors++;
       this.log("Fetch error:", err);
-      this.sentinel?.setState("error", () => this.retryFetch());
+      if (this.consecutiveErrors >= 3) {
+        this.log("Too many consecutive errors, stopping");
+        this.hasMore = false;
+        this.sentinel?.setState("done");
+      } else {
+        this.sentinel?.setState("error", () => this.retryFetch());
+      }
     } finally {
       this.isLoading = false;
     }
@@ -722,6 +742,14 @@ export class InfiniteScrollManager {
   private lastRefPath: string | null = null;
 
   /**
+   * Page-1 favicon intelligence (host->icon map + learned URL pattern),
+   * captured on the first append and reused for the session. Cached
+   * because page-1 is immutable AND gets discarded after ~6 pages —
+   * recomputing per append both wasted cycles and lost the data forever.
+   */
+  private faviconIntel: { map: Map<string, string>; pattern: string | null } | null = null;
+
+  /**
    * First computed text color found in the LIVE document for any of these
    * role selectors — excluding anything inside auto-loaded page containers
    * (clones are unstyled until this very function runs; measuring them
@@ -903,6 +931,39 @@ export class InfiniteScrollManager {
   }
 
   /**
+   * Split an inline style string into declarations WITHOUT breaking values
+   * that contain semicolons inside quotes or url(...) parentheses.
+   */
+  private splitStyleDecls(css: string): string[] {
+    const out: string[] = [];
+    let cur = "";
+    let quote: string | null = null;
+    let paren = 0;
+    for (const ch of css) {
+      if (quote) {
+        cur += ch;
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        cur += ch;
+        continue;
+      }
+      if (ch === "(") paren++;
+      if (ch === ")") paren = Math.max(0, paren - 1);
+      if (ch === ";" && paren === 0) {
+        out.push(cur);
+        cur = "";
+        continue;
+      }
+      cur += ch;
+    }
+    out.push(cur);
+    return out;
+  }
+
+  /**
    * Fetched HTML can carry palette in INLINE style="" attributes too —
    * harvestFetchedStyles only handled <style> tags. Same policy as rule
    * harvesting: drop paint, keep layout, preserve icon backgrounds inside
@@ -917,7 +978,9 @@ export class InfiniteScrollManager {
         const css = el.getAttribute("style");
         if (!css) continue;
         const kept: string[] = [];
-        for (const decl of css.split(";")) {
+        // Quote/paren-aware split: a naive css.split(";") corrupts values
+        // containing semicolons (url(data:...;base64), content:"a;b").
+        for (const decl of this.splitStyleDecls(css)) {
           const trimmed = decl.trim();
           if (!trimmed) continue;
           const colon = trimmed.indexOf(":");
@@ -1011,8 +1074,19 @@ export class InfiniteScrollManager {
   private ensureCloneFavicons(appended: Element[]): void {
     try {
       if (appended.length === 0) return;
-      const liveIcons = this.buildLiveFaviconMap();
-      const pattern = this.learnLiveFaviconPattern();
+      // Live page-1 intel is immutable once rendered — compute ONCE and
+      // reuse across appends. Rebuilding per append re-ran two full
+      // document-wide scans + ~500 getComputedStyle reads against a DOM
+      // growing past 10k nodes, and went BLIND after discardOldPages
+      // removed page-1 (~page 7+): later appends painted blank chips.
+      if (!this.faviconIntel) {
+        this.faviconIntel = {
+          map: this.buildLiveFaviconMap(),
+          pattern: this.learnLiveFaviconPattern(),
+        };
+      }
+      const liveIcons = this.faviconIntel.map;
+      const pattern = this.faviconIntel.pattern;
       let filled = 0;
       for (const node of appended) {
         try {
@@ -1029,14 +1103,27 @@ export class InfiniteScrollManager {
               (pattern && pattern.includes("{domain}")
                 ? pattern.replace("{domain}", host)
                 : null) ??
-              `https://icons.duckduckgo.com/ip3/${host}.ico`;
-            // Clear letter-avatar content, then paint ON the icon layer —
-            // a single visual element, no possible doubling.
-            icon.textContent = "";
-            icon.style.backgroundImage = `url("${url}")`;
-            icon.style.backgroundSize = "contain";
-            icon.style.backgroundPosition = "center";
-            icon.style.backgroundRepeat = "no-repeat";
+              // Third-party fallback is OPT-IN (default off): it would tell
+              // DuckDuckGo every auto-loaded destination via the URL.
+              (this.config.allowThirdPartyIcons
+                ? `https://icons.duckduckgo.com/ip3/${host}.ico`
+                : null);
+            if (!url) {
+              // No consented source for this host — keep whatever the SSR
+              // shipped (letter avatar) rather than paint a broken URL.
+              continue;
+            }
+            // Clear letter-avatar content — but ONLY bare text ("D", "EF").
+            // If the SSR ever ships a real child element (<img>/<svg>),
+            // that IS the icon: leave it and skip painting over it.
+            const hasElementChild = Array.from(icon.children).length > 0;
+            if (!hasElementChild) {
+              icon.textContent = "";
+              icon.style.backgroundImage = `url("${url}")`;
+              icon.style.backgroundSize = "contain";
+              icon.style.backgroundPosition = "center";
+              icon.style.backgroundRepeat = "no-repeat";
+            }
             filled++;
           }
         } catch { /* one bad node must not stop the rest */ }
@@ -1107,7 +1194,16 @@ export class InfiniteScrollManager {
         const q = u.indexOf("?");
         if (q !== -1) {
           // e.g. https://www.startpage.com/.../favicon?h=<site>&...
-          return u.replace(/([?&](?:h|domain|host|url)=)[^&"]+/i, "$1{domain}");
+          const candidate = u.replace(/([?&](?:h|domain|host|url)=)[^&"]+/i, "$1{domain}");
+          if (candidate === u) return null; // no param matched — nothing learned
+          // Round-trip validation: substituting the OBSERVED chip's own host
+          // must reproduce the observed URL. A base64/path-encoded value
+          // would fail this and poison every later substitution with 404s.
+          const ownHost = window.location.hostname.replace(/^www\./, "");
+          const roundTrip = candidate.replace("{domain}", encodeURIComponent(ownHost));
+          const normalized = roundTrip.replace(encodeURIComponent(ownHost), ownHost);
+          if (normalized !== u) return null;
+          return candidate;
         }
         return null; // path-based patterns vary per build — too risky to guess
       }

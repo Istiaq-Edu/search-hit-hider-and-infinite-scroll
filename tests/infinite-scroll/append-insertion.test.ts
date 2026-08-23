@@ -518,7 +518,7 @@ describe("InfiniteScrollManager fetched-style porting", () => {
         ...stubEngine(null),
         getResultUrl: () => "https://somesite.example/page",
       } as unknown as EngineAdapter,
-      container, () => {}, { maxPages: 5, portFetchedStyles: true }
+      container, () => {}, { maxPages: 5, portFetchedStyles: true, allowThirdPartyIcons: true }
     );
     vi.spyOn(
       manager as unknown as { learnLiveFaviconPattern(): string | null },
@@ -550,7 +550,7 @@ describe("InfiniteScrollManager fetched-style porting", () => {
         ...stubEngine(null),
         getResultUrl: () => "https://somesite.example/page",
       } as unknown as EngineAdapter,
-      container, () => {}, { maxPages: 5, portFetchedStyles: true }
+      container, () => {}, { maxPages: 5, portFetchedStyles: true, allowThirdPartyIcons: true }
     );
     // No live chip → learner returns null in this environment naturally;
     // pin it explicitly so the test is deterministic.
@@ -571,6 +571,36 @@ describe("InfiniteScrollManager fetched-style porting", () => {
     }
   });
 
+  it("DDG fallback is OPT-IN: without allowThirdPartyIcons no icon URL is painted", () => {
+    const doc = parseHTML('<div id="results"></div>');
+    const container = doc.querySelector("#results")!;
+    const manager = new InfiniteScrollManager(
+      {
+        ...stubEngine(null),
+        getResultUrl: () => "https://somesite.example/page",
+      } as unknown as EngineAdapter,
+      container, () => {}, { maxPages: 5, portFetchedStyles: true } // NO opt-in
+    );
+    vi.spyOn(
+      manager as unknown as { learnLiveFaviconPattern(): string | null },
+      "learnLiveFaviconPattern"
+    ).mockReturnValue(null);
+    const node = doc.createElement("div");
+    node.innerHTML =
+      '<span class="favicon-container">S</span><a href="https://somesite.example/page">t</a>';
+    callAppend(manager, [node], parseHTML("<html><head></head></html>"));
+
+    try {
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const chip = page.querySelector(".favicon-container") as HTMLElement;
+      // No third-party consent -> no paint at all; SSR letter avatar kept.
+      expect(chip.style.backgroundImage).toBe("");
+      expect(chip.textContent).toBe("S");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("paints ONLY the innermost favicon layer — never wipes nested chip markup", () => {
     const doc = parseHTML('<div id="results"></div>');
     const container = doc.querySelector("#results")!;
@@ -579,7 +609,7 @@ describe("InfiniteScrollManager fetched-style porting", () => {
         ...stubEngine(null),
         getResultUrl: () => "https://somesite.example/page",
       } as unknown as EngineAdapter,
-      container, () => {}, { maxPages: 5, portFetchedStyles: true }
+      container, () => {}, { maxPages: 5, portFetchedStyles: true, allowThirdPartyIcons: true }
     );
     vi.spyOn(
       manager as unknown as { learnLiveFaviconPattern(): string | null },

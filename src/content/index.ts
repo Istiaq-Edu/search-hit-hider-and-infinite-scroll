@@ -387,6 +387,9 @@ function tryStartInfiniteScroll(retriesLeft = 25): void {
         // Startpage's fetched SSR markup uses class names the live
         // client-rendered stylesheet never defines.
         portFetchedStyles: engine.id === "startpage",
+        // Privacy default: third-party icon lookups stay off (Startpage's
+        // CSP already blocks them; the pref exists for future engines).
+        allowThirdPartyIcons: false,
       }
     );
     infiniteScrollManager.init();
@@ -711,6 +714,9 @@ async function refreshPrefs(): Promise<void> {
             // Startpage's fetched SSR markup uses class names the live
             // client-rendered stylesheet never defines.
             portFetchedStyles: engine.id === "startpage",
+            // Privacy default: third-party icon lookups stay off (Startpage's
+            // CSP already blocks them; the pref exists for future engines).
+            allowThirdPartyIcons: false,
           }
         );
         infiniteScrollManager.init();
