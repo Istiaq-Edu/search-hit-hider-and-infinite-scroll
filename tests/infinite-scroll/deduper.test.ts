@@ -100,4 +100,27 @@ describe("Deduper", () => {
     deduper.isDuplicate(makeElement("https://c.com"), engine);
     expect(deduper.size).toBe(3);
   });
+
+  it("collapses Startpage proxy-wrapped duplicates to one identity", () => {
+    const engine = makeMockEngine(() => null);
+    // Same destination behind two different per-request proxy links
+    // (params differ; hydration may also rewrite the anchor).
+    const proxy1 = makeElement(
+      "https://ixquick-proxy.com/do/spg/highlight.pl?l=eu&c=bbb&u=https%3A%2F%2Fwww.efset.org%2F"
+    );
+    const proxy2 = makeElement(
+      "https://ixquick-proxy.com/do/spg/highlight.pl?l=eu&c=ccc&u=https%3A%2F%2Fefset.org%2F"
+    );
+    expect(deduper.isDuplicate(proxy1, engine)).toBe(false);
+    // Different proxy params + www-stripped destination must still collide.
+    expect(deduper.isDuplicate(proxy2, engine)).toBe(true);
+  });
+
+  it("strips tracking params so hydration rewrites cannot dodge the hash", () => {
+    const engine = makeMockEngine(() => null);
+    const clean = makeElement("https://example.com/page?a=1");
+    const tracked = makeElement("https://example.com/page?a=1&utm_source=x");
+    deduper.isDuplicate(clean, engine);
+    expect(deduper.isDuplicate(tracked, engine)).toBe(true);
+  });
 });

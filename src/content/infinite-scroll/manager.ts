@@ -1,6 +1,6 @@
 import type { EngineAdapter } from "../engines/base";
 import { Sentinel } from "./sentinel";
-import { Deduper } from "./deduper";
+import { Deduper, unwrapProxyDestination } from "./deduper";
 import { fetchPage } from "./fetcher";
 import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type ScrollState } from "./persist";
 
@@ -11,6 +11,23 @@ const TRUNCATION_PROPS = [
   'text-overflow',
   'overflow', 'overflow-x', 'overflow-y',
 ];
+
+// Declaration properties that carry THEME PALETTE. Ported rules keep layout
+// only — fetched pages encode the server-default (light) palette in class
+// rules, and same-generation css-* hashes match our clones, so any color /
+// background that survives porting paints appended results in the wrong
+// theme (recolored site links, white favicon chips).
+const PALETTE_PROPS =
+  /(^|-)(color|background|border|outline|box-shadow|text-shadow|filter|backdrop-filter|opacity|fill|stroke|caret-color|column-rule)(-|$)/i;
+
+// Values that smuggle paint in through otherwise-innocent properties
+// (e.g. `-webkit-text-fill`, gradients on `background-image` are already
+// caught by the property list; this catches color-bearing values elsewhere).
+const PALETTE_VALUES = /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(|\bcolor-scheme\b|gradient\(/i;
+
+// Pure-geometry exceptions inside palette-named families: these carry no
+// paint and must survive (favicon chips are circles via border-radius).
+const GEOMETRY_EXCEPTIONS = /^(-webkit-)?border(?:-radius|-top-left-radius|-top-right-radius|-bottom-left-radius|-bottom-right-radius)$/i;
 
 export interface InfiniteScrollPrefs {
   threshold: number;
@@ -108,6 +125,16 @@ export class InfiniteScrollManager {
     this.hidePagination();
     this.markInitialPage();
     this.interceptPagination();
+
+    // Seed the deduper with page-1 results so a fetched page that repeats
+    // them (Startpage re-serves the tail of page 1 at the top of page 2,
+    // with different proxy params) cannot append visible duplicates.
+    try {
+      for (const node of this.engine.getResultNodes(document)) {
+        this.deduper.isDuplicate(node, this.engine);
+      }
+    } catch { /* dedupe seeding is best-effort */ }
+
     this.createSentinel();
     this.startObserver();
     this.startNavigationDetection();
@@ -391,16 +418,26 @@ export class InfiniteScrollManager {
   private portedStyleHashes = new Set<string>();
 
   /**
-   * Copy a fetched page's <style> rules into the appended container so its
-   * class-based styling (emotion css-* hashes) resolves. Rules are FILTERED:
-   * document-level selectors (html/body/:root/*) are dropped — the fetched
-   * page's theme can differ from the live one (server default vs. user
-   * preference), and porting them would recolor results to the wrong theme.
-   * Only class/element-scoped rules survive. Duplicates (live or earlier
-   * pages) are skipped; injected tags carry data-shh-fetched-style.
+   * Copy a fetched page's <style> rules so its class-based styling (emotion
+   * css-* hashes) resolves on appended results. EVERY selector is rewritten
+   * under the `[data-inf-page]` scope — the attribute every appended page
+   * container carries (and the initial results never do):
+   *   • document-level rules (html/body/:root) become the scope itself, so
+   *     the fetched build's CSS custom properties (design tokens referenced
+   *     via var()) are re-defined per page container instead of hijacking
+   *     the live document's theme;
+   *   • class and ELEMENT rules (img/svg/…) get the scope prefix, so they
+   *     cannot reach the original page-1 results — the unscoped port
+   *     recolored their text and broke their favicons whenever a fetched
+   *     build's structural classes (.w-gl/.result) or element rules
+   *     collided with the live page's.
+   * Sheets are appended to <head> ONCE per unique text (raw-text dedupe is
+   * correct precisely because the scope is container-independent) and
+   * therefore survive discardOldPages() trimming old page containers.
    */
-  private portStyles(sourceDoc: Document, pageContainer: HTMLElement): void {
+  private portStyles(sourceDoc: Document): void {
     try {
+      const scope = "[data-inf-page]";
       const liveTexts = new Set<string>();
       for (const s of document.querySelectorAll("style")) {
         const t = (s.textContent ?? "").trim();
@@ -409,34 +446,86 @@ export class InfiniteScrollManager {
       for (const s of sourceDoc.querySelectorAll("style")) {
         const t = (s.textContent ?? "").trim();
         if (!t || liveTexts.has(t) || this.portedStyleHashes.has(t)) continue;
-        const filtered = this.filterDocumentScopedRules(t);
-        if (!filtered) continue;
+        const scoped = this.scopeCss(t, scope);
+        if (!scoped) continue;
         this.portedStyleHashes.add(t);
         const style = document.createElement("style");
         style.setAttribute("data-shh-fetched-style", "true");
-        style.textContent = filtered;
-        pageContainer.appendChild(style);
+        style.textContent = scoped;
+        document.head.appendChild(style);
       }
     } catch { /* styling is cosmetic — never fail the append on it */ }
   }
 
-  /** Drop rules that style the whole document (theme fights); keep the rest. */
-  private filterDocumentScopedRules(cssText: string): string | null {
+  /** Prefix every selector with `scope`; html/body/:root become the scope. */
+  private scopeCss(cssText: string, scope: string): string | null {
     try {
       const sheet = new CSSStyleSheet();
       sheet.replaceSync(cssText);
-      const kept: string[] = [];
-      for (const rule of sheet.cssRules) {
-        const sel = (rule as CSSStyleRule).selectorText ?? "";
-        if (/^\s*(html|body|:root|\*|\*,)\b/i.test(sel) || /^\s*(html|body|:root)\b/i.test(sel)) {
-          continue; // document-level theme rule — the live page already has one
-        }
-        kept.push(rule.cssText);
-      }
-      return kept.length > 0 ? kept.join("\n") : null;
+      const out = this.scopeRuleList(sheet.cssRules, scope);
+      return out.length > 0 ? out.join("\n") : null;
     } catch {
-      return cssText; // unparsable — port as-is rather than losing styling
+      // Unparsable sheet: drop it rather than port it unscoped — a raw copy
+      // is exactly the global-recolor/favicon leak this scoping exists to
+      // prevent.
+      return null;
     }
+  }
+
+  private scopeRuleList(rules: CSSRuleList, scope: string): string[] {
+    const out: string[] = [];
+    for (const rule of rules) {
+      if (rule instanceof CSSStyleRule) {
+        const sel = rule.selectorText ?? "";
+        // Document-level selectors carry the fetched build's SERVER-DEFAULT
+        // palette (verified: Startpage's `html,body{color:#202945}` is the
+        // light theme). Porting them — even scoped to the page container —
+        // paints appended results in the wrong theme when the user runs a
+        // non-default one (the live theme comes from client-side hydration,
+        // which fetched HTML never receives). Appended nodes sit inside the
+        // live <body>, so they inherit the live theme naturally; drop these.
+        if (/^(html|body|:root|\*)$/i.test(sel.trim())) continue;
+        const rewritten = sel
+          .split(",")
+          .map((part) => {
+            const s = part.trim();
+            if (!s) return null;
+            return `${scope} ${s}`;
+          })
+          .filter((x): x is string => x !== null)
+          .join(",");
+        if (rewritten) {
+          // Strip PALETTE declarations (color/background/borders/shadows…)
+          // from ported rules: fetched pages carry the SERVER-DEFAULT light
+          // palette in class rules too, and same-generation css-* hashes
+          // match our cloned nodes — painting them light inside a dark
+          // theme (recolored site links, white favicon chips). Layout
+          // properties (display/flex/padding/margins/sizes) survive.
+          const decls = this.stripPaletteDecls(rule.style);
+          if (decls) out.push(`${rewritten}{${decls}}`);
+        }
+      } else if (rule instanceof CSSMediaRule || rule instanceof CSSSupportsRule) {
+        const inner = this.scopeRuleList(rule.cssRules, scope);
+        if (inner.length > 0) {
+          const condition = rule instanceof CSSMediaRule
+            ? `@media ${rule.conditionText}`
+            : `@supports ${rule.conditionText}`;
+          out.push(`${condition}{${inner.join("\n")}}`);
+        }
+      } else if (
+        rule instanceof CSSKeyframesRule || rule instanceof CSSFontFaceRule
+      ) {
+        // Global by design — animations and font definitions have no selectors
+        // to scope and are safe (or required) outside the container.
+        out.push(rule.cssText);
+      } else {
+        // Anything else (@import, @charset, @namespace, unknown at-rules):
+        // DROP. These act document-globally — an @import would fetch remote
+        // CSS into the live page unscoped, recreating the exact leak this
+        // scoping exists to prevent.
+      }
+    }
+    return out;
   }
 
   /** Insert a page marker so interceptPagination can find page boundaries. */
@@ -511,7 +600,15 @@ export class InfiniteScrollManager {
       // Fetched pages may carry <script> elements and inline event handlers.
       // Scripts inside a DOMParser document are inert, but they EXECUTE when
       // adopted into the live document — strip them, along with on* attributes.
+      // Per-result emotion <style> tags (Startpage embeds them with the
+      // SERVER-DEFAULT light palette) must never enter the live document —
+      // they apply document-wide and same-generation css-* hashes collide
+      // with the live page's rules. Instead of inserting them, HARVEST their
+      // layout declarations onto the matched clone elements inline first
+      // (harvestFetchedStyles) — clones become self-contained.
       clone.querySelectorAll("script").forEach((s) => s.remove());
+      this.harvestFetchedStyles(clone);
+      this.sanitizeInlineStyles(clone);
       for (const el of [clone, ...Array.from(clone.querySelectorAll("*"))]) {
         for (const attr of el.getAttributeNames()) {
           if (attr.startsWith("on")) el.removeAttribute(attr);
@@ -554,19 +651,468 @@ export class InfiniteScrollManager {
     }
 
     // Port the fetched page's own styles when the engine needs it: fetched
-    // SSR markup can carry class names the live page never defines.
+    // SSR markup can carry class names the live page never defines. Sheets
+    // are scoped to [data-inf-page] and appended to <head>, so they style
+    // every appended page and cannot touch the original results.
     if (this.config.portFetchedStyles && sourceDoc) {
-      this.portStyles(sourceDoc, pageContainer);
+      this.portStyles(sourceDoc);
     }
 
     // Report the individual result nodes (not the wrapper) so the blocking
     // pipeline keeps per-result hiding granularity.
     const appended = Array.from(resultHost.children) as Element[];
+    // Re-skin clones with the LIVE page's theme before anything renders.
+    if (this.config.portFetchedStyles && sourceDoc && appended.length > 0) {
+      // Fill the URL-line slot Startpage's hydration normally writes
+      // (clones are never hydrated) BEFORE tinting, so the filled span
+      // gets the live theme color in the same pass.
+      this.hydrateDisplayUrls(appended);
+      this.reSkinClones(appended);
+      // Current-generation Startpage SSR carries NO favicon URLs at all —
+      // icons are painted by hydration, which clones never receive
+      // (diagnostics prove faviconsPainted:0). Assign them ourselves.
+      this.ensureCloneFavicons(appended);
+    }
+    if (this.config.debugMode) {
+      const page = appended[0]?.closest("[data-inf-page]") as HTMLElement | null;
+      const chips = page?.querySelectorAll('[class*="favicon" i]').length ?? 0;
+      const painted = page?.querySelectorAll(
+        '[class*="favicon" i][style*="background-image"], [class*="favicon" i] [style*="background-image"]'
+      ).length ?? 0;
+      const tinted = page
+        ? page.querySelectorAll(
+            "a.result-title[style], [class*='display-url'][style], [class*='link-text'][style], p.description[style]"
+          ).length
+        : 0;
+      this.log("page appended:", JSON.stringify({
+        nodes: appended.length,
+        faviconEls: chips,
+        faviconsPainted: painted,
+        tintedEls: tinted,
+        refColors: { title: this.lastRefTitle, path: this.lastRefPath },
+      }));
+    }
     this.onNewNodes(appended);
     this.interceptPagination();
     // Track page container for efficient discard
     this.pageContainers.set(this.currentPage, pageContainer);
     this.discardOldPages();
+  }
+
+  /**
+   * Copy only LAYOUT declarations from a fetched rule's declaration block.
+   * Palette-bearing properties (colors, backgrounds, borders, shadows,
+   * filters, opacity) are dropped — they encode the fetched build's
+   * server-default light theme and must never reach the live document.
+   */
+  private stripPaletteDecls(style: CSSStyleDeclaration): string {
+    const out: string[] = [];
+    for (let i = 0; i < style.length; i++) {
+      const prop = style.item(i);
+      if (PALETTE_PROPS.test(prop)) continue;
+      const val = style.getPropertyValue(prop);
+      if (val && PALETTE_VALUES.test(val)) continue;
+      out.push(`${prop}:${val}`);
+    }
+    return out.join(";");
+  }
+
+  /** Last measured live reference colors (diagnostics). */
+  private lastRefTitle: string | null = null;
+  private lastRefPath: string | null = null;
+
+  /**
+   * First computed text color found in the LIVE document for any of these
+   * role selectors — excluding anything inside auto-loaded page containers
+   * (clones are unstyled until this very function runs; measuring them
+   * would feed the clone its own nothing).
+   */
+  private measureLiveColor(sels: string[]): string | null {
+    try {
+      for (const sel of sels) {
+        for (const el of Array.from(document.querySelectorAll(sel))) {
+          if (el.closest("[data-inf-page]")) continue;
+          const c = window.getComputedStyle(el as HTMLElement).color;
+          if (c && c !== "rgba(0, 0, 0, 0)" && c !== "") return c;
+        }
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  /**
+   * Give fetched clones the LIVE page's presentation: text colors measured
+   * from page-1 counterparts (matched by structural role), plus promotion
+   * of lazy-loaded images so icons/photos fetch immediately instead of
+   * waiting for a hydration that never reaches clones.
+   * Fetched HTML carries the
+   * SERVER-DEFAULT light palette inline (per-result emotion styles — which
+   * we strip — plus class rules), while the user's theme (e.g. dark) is
+   * applied client-side and never reaches the clones. Measure computed
+   * colors from live page-1 results and apply them inline to the appended
+   * counterparts, matching by structural role (title link / snippet / url
+   * path). Inline values win over any residual class styling, so appended
+   * results render in the user's theme by construction.
+   */
+  private reSkinClones(appended: Element[]): void {
+    try {
+      // Measure reference colors DIRECTLY from the DOM, NOT via
+      // engine.getResultNodes(): the adapter filters out nodes already
+      // stamped data-shh-result — which is ALL of page 1 by auto-load
+      // time — so that path always yielded zero references and silently
+      // disabled the whole re-skin in production.
+      const titleSels = ["a.result-title", "a.w-gl__result-title", "a.wgl-site-title", "h2 a[href]", "h3 a[href]", "a.result-link"];
+      const snippetSels = ["p.description", "p.desc", ".result-description", "p.w-gl__description", "div.description"];
+      // Site-link line: cover the real Startpage anatomy (verified in
+      // archived SERP markup: a.wgl-display-url > span.link-text). The tint
+      // must land on the span itself — its own class rule (.link-text /
+      // default-link-text) sets a color that beats inheritance from the
+      // anchor. Specific selectors precede broad catch-alls.
+      const pathSels = [
+        "a[class*='display-url']", "a.wgl-display-url > span[class*='link-text' i]",
+        "[class*='display-url']", "span[class*='link-text' i]",
+        "span.result-link-path", "cite", ".result-url", "[class*='url-wrap']",
+      ];
+      const refTitle = this.measureLiveColor(titleSels);
+      const refSnippet = this.measureLiveColor(snippetSels);
+      const refPath = this.measureLiveColor(pathSels);
+      this.lastRefTitle = refTitle;
+      this.lastRefPath = refPath;
+
+      const targets = [...appended];
+      // The fetch wrapper itself may be a result-styled host; include it.
+      const wrapper = appended[0]?.closest("[data-inf-page]")?.firstElementChild;
+      if (wrapper && !targets.includes(wrapper)) targets.push(wrapper);
+
+      for (const node of targets) {
+        if (!node.isConnected) continue;
+        if (refTitle) {
+          for (const el of node.querySelectorAll(titleSels.join(", "))) {
+            (el as HTMLElement).style.color = refTitle;
+            // The VISIBLE title text usually lives in a styled CHILD
+            // (verified 2026 Startpage anatomy: a.result-title >
+            // h2.wgl-title, whose own emotion class sets a literal color
+            // and whose :visited variant paints it purple). Inline color
+            // on the anchor cannot reach it — inheritance loses to the
+            // child's own rule — so stamp the heading/span children too.
+            for (const t of el.querySelectorAll<HTMLElement>("h1, h2, h3, h4, span")) {
+              t.style.color = refTitle;
+            }
+          }
+        }
+        if (refSnippet) {
+          for (const el of node.querySelectorAll(snippetSels.join(", "))) {
+            (el as HTMLElement).style.color = refSnippet;
+          }
+        }
+        if (refPath) {
+          for (const el of node.querySelectorAll(pathSels.join(", "))) {
+            (el as HTMLElement).style.color = refPath;
+          }
+        }
+        // Favicons: fetched markup references lazy-loaded icon URLs that the
+        // live page's hydration normally triggers — clones never get it.
+        // Make every icon-bearing element eager so the browser fetches now.
+        for (const img of node.querySelectorAll("img")) {
+          const lazy = img.getAttribute("loading");
+          if (lazy) img.setAttribute("loading", "eager");
+          for (const attr of ["data-src", "data-original", "data-lazy-src"]) {
+            const v = img.getAttribute(attr);
+            if (v && !img.getAttribute("src")) img.setAttribute("src", v);
+          }
+        }
+      }
+    } catch { /* re-skinning is cosmetic — never fail the append on it */ }
+  }
+
+  /**
+   * Harvest per-result emotion CSS: for every <style> inside the clone,
+   * find elements the rules match and stamp the NON-palette declarations
+   * onto them inline (palette is re-derived from the live page instead).
+   * One exception: `background-image` on favicon elements IS the icon
+   * itself (Startpage paints favicons as CSS backgrounds on a chip span,
+   * not <img>) — preserved so icons render; its chip background-color
+   * still gets dropped as theme paint. <style> tags are removed after
+   * harvest — nothing fetched enters the document-wide stylesheet pool.
+   */
+  private harvestFetchedStyles(clone: Element): void {
+    try {
+      for (const tag of Array.from(clone.querySelectorAll("style"))) {
+        let sheet: CSSStyleSheet | null = null;
+        try {
+          sheet = new CSSStyleSheet();
+          sheet.replaceSync(tag.textContent ?? "");
+        } catch { sheet = null; }
+        if (sheet) {
+          for (const rule of sheet.cssRules) {
+            this.harvestRule(rule, clone);
+          }
+        }
+        tag.remove();
+      }
+    } catch { /* harvesting is cosmetic — never fail the append on it */ }
+  }
+
+  /** Apply one fetched rule's layout declarations to matching clone nodes. */
+  private harvestRule(rule: CSSRule, root: ParentNode): void {
+    try {
+      if (rule instanceof CSSStyleRule) {
+        const sel = rule.selectorText ?? "";
+        // Document-level rules have no clone-scoped meaning; skip.
+        if (/^(html|body|:root|\*)$/i.test(sel.trim())) return;
+        let matched: Element[] | null = null;
+        try { matched = Array.from(root.querySelectorAll(sel)); } catch { return; }
+        if (!matched || matched.length === 0) return;
+        for (const el of matched) {
+          const target = el as HTMLElement;
+          for (let i = 0; i < rule.style.length; i++) {
+            const prop = rule.style.item(i);
+            const val = rule.style.getPropertyValue(prop);
+            if (!val) continue;
+            if (PALETTE_PROPS.test(prop) && !GEOMETRY_EXCEPTIONS.test(prop)) {
+              // Favicon exception: background-image on (or under) a
+              // favicon element IS the ICON, not theme paint. Real markup:
+              // <span class="favicon-container …"><span class="css-hash"
+              // style="background-image:url(icon)"> — the class lives on
+              // the chip, the paint on the child.
+              const paintsFavicon =
+                prop === "background-image" &&
+                this.isWithinFavicon(target);
+              if (paintsFavicon) {
+                target.style.setProperty(prop, val);
+              }
+              continue;
+            }
+            if (PALETTE_VALUES.test(val)) continue;
+            target.style.setProperty(prop, val);
+          }
+        }
+      } else if (rule instanceof CSSMediaRule || rule instanceof CSSSupportsRule) {
+        // SKIP conditional blocks: harvesting their rules would FLATTEN
+        // viewport-dependent styles onto every clone. Verified real case
+        // (Startpage): desktop hides the raw URL text via `.css-x{display:
+        // none}`, and only `@media (max-width:990px)` re-shows it — with
+        // the server-default navy color. Flattened, clones would render
+        // the mobile variant on desktop. Top-level rules match the live
+        // desktop presentation; conditional variants are dropped.
+      }
+      // @keyframes/@font-face: animation/transform keyframes are layout-ish;
+      // harvest nothing (names may collide document-wide) — clones keep
+      // static layout only.
+    } catch { /* single rule failing must not kill the harvest */ }
+  }
+
+  /**
+   * Fetched HTML can carry palette in INLINE style="" attributes too —
+   * harvestFetchedStyles only handled <style> tags. Same policy as rule
+   * harvesting: drop paint, keep layout, preserve icon backgrounds inside
+   * favicon subtrees. Runs BEFORE the clone is adopted into the live
+   * document, so no fetched paint can flash on screen.
+   */
+  private sanitizeInlineStyles(clone: Element): void {
+    try {
+      const els = [clone, ...Array.from(clone.querySelectorAll<HTMLElement>("*"))];
+      for (const el of els) {
+        if (!(el instanceof HTMLElement)) continue;
+        const css = el.getAttribute("style");
+        if (!css) continue;
+        const kept: string[] = [];
+        for (const decl of css.split(";")) {
+          const trimmed = decl.trim();
+          if (!trimmed) continue;
+          const colon = trimmed.indexOf(":");
+          if (colon === -1) continue;
+          const prop = trimmed.slice(0, colon).trim();
+          const val = trimmed.slice(colon + 1).trim();
+          if (!prop || !val) continue;
+          if (PALETTE_PROPS.test(prop) && !GEOMETRY_EXCEPTIONS.test(prop)) {
+            // Icon backgrounds inside favicon subtrees ARE the icon.
+            if (prop === "background-image" && this.isWithinFavicon(el)) kept.push(`${prop}:${val}`);
+            continue;
+          }
+          if (PALETTE_VALUES.test(val)) continue;
+          kept.push(`${prop}:${val}`);
+        }
+        if (kept.length) el.setAttribute("style", kept.join(";"));
+        else el.removeAttribute("style");
+      }
+    } catch { /* cosmetic; never fail the append */ }
+  }
+
+  /**
+   * Innermost favicon paint targets: elements whose class mentions
+   * "favicon" and which contain NO other such element. Selecting every
+   * matching ancestor too (a.favicon-link > .favicon-container > .favicon)
+   * made an earlier build clear the anchor's content — deleting the whole
+   * chip subtree and erasing auto-loaded favicons entirely.
+   */
+  private getFaviconIconEls(root: ParentNode): HTMLElement[] {
+    const all = Array.from(root.querySelectorAll<HTMLElement>('[class*="favicon" i]'));
+    return all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
+  }
+
+  /**
+   * Current-generation Startpage SSR ships the visible URL-line slot
+   * (span.link-text inside a.wgl-display-url) EMPTY — hydration normally
+   * writes the URL text into it, and clones are never hydrated. Fill that
+   * slot ourselves from the anchor's aria-label, and hide the mobile-
+   * variant span (default-link-text) whose document-wide class rule paints
+   * it navy (#202C46) at narrow viewports.
+   */
+  private hydrateDisplayUrls(nodes: Element[]): void {
+    try {
+      for (const node of nodes) {
+        const anchors = node.querySelectorAll<HTMLAnchorElement>(
+          "a.wgl-display-url, a[class*='display-url']"
+        );
+        for (const a of anchors) {
+          const label = (a.getAttribute("aria-label") ?? "").trim();
+          const spans = Array.from(a.querySelectorAll<HTMLElement>("span[class*='link-text' i]"));
+          const slot = spans.find((s) => !(s.textContent ?? "").trim());
+          if (slot && label) slot.textContent = label;
+          for (const s of spans) {
+            if (/default-link-text/i.test(s.className)) s.style.display = "none";
+          }
+        }
+      }
+    } catch { /* cosmetic; never fail the append */ }
+  }
+
+  /** Does this element carry, or live inside, a favicon chip? */
+  private isWithinFavicon(el: Element): boolean {
+    for (let cur: Element | null = el; cur; cur = cur.parentElement) {
+      if (/favicon/i.test(cur.className || "")) return true;
+      // Stop at the page-container boundary.
+      if (cur.hasAttribute("data-inf-page")) break;
+    }
+    return false;
+  }
+
+  /**
+   * Paint favicons on clone results. Diagnostics prove Startpage NEVER paints
+   * clone icons itself (its loader is hydration-driven, and clones are never
+   * hydrated). Paint IMMEDIATELY on the innermost favicon layer
+   * (getFaviconIconEls), after CLEARING any letter-avatar content ("D"/"EF").
+   * Painting every class-matching ancestor instead made one earlier build
+   * wipe the whole chip subtree off the page.
+   *
+   * Iterate the RESULT NODES (appended), never the page container's
+   * children: engines hosting clones in a fetched wrapper (Startpage's
+   * div.w-gl) make that container's sole child the WRAPPER — resolving its
+   * URL yielded the first result's host, painting every result with the
+   * first result's icon (the "EF everywhere" bug).
+   *
+   * Icon source priority:
+   *   1. Live page-1 chip of the SAME destination domain — exact artwork,
+   *      first-party URL (built once per append).
+   *   2. Icon-endpoint pattern learned from any live chip, {domain}-substituted.
+   *   3. DuckDuckGo public icon service.
+   */
+  private ensureCloneFavicons(appended: Element[]): void {
+    try {
+      if (appended.length === 0) return;
+      const liveIcons = this.buildLiveFaviconMap();
+      const pattern = this.learnLiveFaviconPattern();
+      let filled = 0;
+      for (const node of appended) {
+        try {
+          const dest = this.engine.getResultUrl(node);
+          if (!dest) continue;
+          let host: string;
+          try { host = new URL(dest).hostname.replace(/^www\./, ""); } catch { continue; }
+          for (const icon of this.getFaviconIconEls(node)) {
+            // Harvested inline icon (per-result emotion rules) — done.
+            const cur = icon.style.backgroundImage;
+            if (cur && cur !== "none") continue;
+            const url =
+              liveIcons.get(host) ??
+              (pattern && pattern.includes("{domain}")
+                ? pattern.replace("{domain}", host)
+                : null) ??
+              `https://icons.duckduckgo.com/ip3/${host}.ico`;
+            // Clear letter-avatar content, then paint ON the icon layer —
+            // a single visual element, no possible doubling.
+            icon.textContent = "";
+            icon.style.backgroundImage = `url("${url}")`;
+            icon.style.backgroundSize = "contain";
+            icon.style.backgroundPosition = "center";
+            icon.style.backgroundRepeat = "no-repeat";
+            filled++;
+          }
+        } catch { /* one bad node must not stop the rest */ }
+      }
+      this.log("favicon fallback filled:", String(filled));
+    } catch { /* favicon assignment is cosmetic — never fail the append */ }
+  }
+
+  /**
+   * Map destination hostname -> rendered icon URL, harvested from LIVE
+   * page-1 favicon chips (never from our own appended containers).
+   */
+  private buildLiveFaviconMap(): Map<string, string> {
+    const map = new Map<string, string>();
+    try {
+      for (const el of this.getFaviconIconEls(document)) {
+        if (el.closest("[data-inf-page]")) continue;
+        const bg = window.getComputedStyle(el).backgroundImage;
+        const m = /url\(["']?([^"')]+)["']?\)/.exec(bg);
+        if (!m?.[1]) continue;
+        const host = this.hostOfChipResult(el);
+        if (host && !map.has(host)) map.set(host, m[1]);
+      }
+    } catch { /* ignore */ }
+    return map;
+  }
+
+  /** Destination host of the result a favicon chip belongs to. */
+  private hostOfChipResult(chip: HTMLElement): string | null {
+    try {
+      let cur: Element | null = chip;
+      while (cur && !cur.hasAttribute("data-inf-page")) {
+        const a = cur.querySelector<HTMLAnchorElement>("a[href]");
+        if (a) {
+          const href = a.getAttribute("href") ?? "";
+          // Shared identity rule (deduper.ts) so dedup hashing and icon
+          // provisioning can never disagree about what a result's
+          // destination is.
+          const unwrapped = unwrapProxyDestination(href, window.location.href);
+          if (unwrapped) return new URL(unwrapped).hostname.replace(/^www\./, "");
+          try {
+            if (/^https?:\/\//i.test(href)) {
+              return new URL(href).hostname.replace(/^www\./, "");
+            }
+          } catch { /* keep climbing */ }
+        }
+        cur = cur.parentElement;
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  /**
+   * Extract the icon-URL template from live page-1 favicon chips: find a
+   * first-party startpage.com URL and replace the hostname segment with a
+   * {domain} placeholder. Returns null when no usable pattern exists.
+   */
+  private learnLiveFaviconPattern(): string | null {
+    try {
+      for (const el of this.getFaviconIconEls(document)) {
+        if (el.closest("[data-inf-page]")) continue;
+        const img = window.getComputedStyle(el).backgroundImage;
+        const m = /url\(["']?([^"')]+)["']?\)/.exec(img);
+        if (!m?.[1] || !/startpage\.com/i.test(m[1])) continue;
+        // The icon endpoint carries the target site in its query/path —
+        // templatize any parameter-looking segment.
+        const u = m[1];
+        const q = u.indexOf("?");
+        if (q !== -1) {
+          // e.g. https://www.startpage.com/.../favicon?h=<site>&...
+          return u.replace(/([?&](?:h|domain|host|url)=)[^&"]+/i, "$1{domain}");
+        }
+        return null; // path-based patterns vary per build — too risky to guess
+      }
+    } catch { /* ignore */ }
+    return null;
   }
 
   /** Remove pages above the viewport to keep the DOM lean (keep ~5 pages). */
@@ -615,14 +1161,49 @@ export class InfiniteScrollManager {
       return;
     }
     if (saved.url !== window.location.href) return;
-    // Only restore scroll if extra pages were loaded — avoids auto-scrolling
+    // Only restore on BACK/FORWARD or RELOAD. A fresh navigation (a new
+    // search that lands on the same URL) must open at the TOP — restoring
+    // here jumped every re-search straight to the bottom of the page.
+    const navType = this.getNavigationType();
+    if (navType !== "back_forward" && navType !== "reload") {
+      clearScrollState();
+      return;
+    }
+    // Only restore if extra pages were loaded — avoids auto-scrolling
     // to the bottom on a fresh first-page visit.
     if (saved.loadedPages <= 1) return;
-
+    // Never clamp-jump: auto-loaded pages are NOT re-fetched on load, so a
+    // saved offset beyond the current document height would be clamped by
+    // the browser to (bottom of page 1) — the exact "lands at bottom" bug.
+    const maxY = document.documentElement.scrollHeight - window.innerHeight;
+    if (saved.scrollY > maxY) {
+      clearScrollState();
+      return;
+    }
     // Defer scroll restoration after DOM is stable
     requestAnimationFrame(() => {
       window.scrollTo(0, saved.scrollY);
     });
+  }
+
+  /**
+   * How did this page load? "back_forward" (history), "reload", or
+   * "navigate" (fresh navigation — link, form submit, address bar).
+   * Uses Navigation Timing level 2 with the legacy API as fallback.
+   */
+  private getNavigationType(): string {
+    try {
+      const timing = performance.getEntriesByType("navigation")[0] as
+        | PerformanceNavigationTiming
+        | undefined;
+      if (timing?.type) return timing.type;
+      const legacy = (
+        performance as Performance & { navigation?: { type?: number } }
+      ).navigation;
+      if (legacy?.type === 2) return "back_forward";
+      if (legacy?.type === 1) return "reload";
+    } catch { /* ignore */ }
+    return "navigate";
   }
 
   private log(msg: string, data?: unknown): void {
