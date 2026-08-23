@@ -1116,10 +1116,12 @@ export class InfiniteScrollManager {
                 ? `https://icons.duckduckgo.com/ip3/${host}.ico`
                 : null);
             if (url) {
-              // Clear letter-avatar content — but ONLY bare text ("D", "EF").
-              // If the SSR ever ships a real child element (<img>/<svg>),
-              // that IS the icon: leave it and skip painting over it.
-              if (Array.from(icon.children).length > 0) {
+              // Only REAL media children (<img>/<svg>/…) are icons worth
+              // preserving. Empty slot elements (<span/> placeholders the
+              // SSR ships inside the chip) are NOT icons — treating them
+              // as sacred made the guard bail on EVERY chip and paint
+              // nothing while the counter lied "filled".
+              if (this.hasRealMediaChild(icon)) {
                 filled++;
                 continue;
               }
@@ -1128,10 +1130,11 @@ export class InfiniteScrollManager {
               icon.style.backgroundSize = "contain";
               icon.style.backgroundPosition = "center";
               icon.style.backgroundRepeat = "no-repeat";
+              filled++;
             } else {
               this.paintMonogram(icon, host);
+              filled++;
             }
-            filled++;
           }
         } catch { /* one bad node must not stop the rest */ }
       }
@@ -1151,7 +1154,7 @@ export class InfiniteScrollManager {
     const bg = `hsl(${hue}, 62%, 42%)`;
     const fg = "hsl(0, 0%, 100%)";
     const label = (host.replace(/^www\./, "").split(".")[0] ?? "?").charAt(0).toUpperCase();
-    if (Array.from(icon.children).length > 0) return; // real child markup wins
+    if (this.hasRealMediaChild(icon)) return; // real child markup wins
     icon.textContent = label;
     icon.style.backgroundColor = bg;
     icon.style.color = fg;
@@ -1163,6 +1166,16 @@ export class InfiniteScrollManager {
     icon.style.lineHeight = "1";
     icon.style.backgroundImage = "none";
     icon.style.borderRadius = "50%";
+  }
+
+  /**
+   * Does this chip contain a REAL media element (<img>/<svg>/<canvas>)?
+   * Only those count as already-painted icons. The SSR ships EMPTY slot
+   * elements (<span/>, empty <div/>) inside chips — treating any element
+   * child as "already an icon" made the paint guard skip every chip.
+   */
+  private hasRealMediaChild(icon: HTMLElement): boolean {
+    return icon.querySelector("img, svg, canvas, video") !== null;
   }
 
   /**
@@ -1248,7 +1261,7 @@ export class InfiniteScrollManager {
           ? `https://icons.duckduckgo.com/ip3/${host}.ico`
           : null);
       if (url) {
-        if (Array.from(icon.children).length > 0) continue;
+        if (this.hasRealMediaChild(icon)) continue;
         icon.textContent = "";
         icon.style.backgroundImage = `url("${url}")`;
         icon.style.backgroundSize = "contain";

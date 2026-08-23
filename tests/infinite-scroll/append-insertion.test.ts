@@ -655,6 +655,68 @@ describe("InfiniteScrollManager fetched-style porting", () => {
     }
   });
 
+  it("paints chips that contain EMPTY slot children (filled:10/painted:0 regression)", () => {
+    const doc = parseHTML('<div id="results"></div>');
+    const container = doc.querySelector("#results")!;
+    const manager = new InfiniteScrollManager(
+      {
+        ...stubEngine(null),
+        getResultUrl: () => "https://somesite.example/page",
+      } as unknown as EngineAdapter,
+      container, () => {}, { maxPages: 5, portFetchedStyles: true, allowThirdPartyIcons: true }
+    );
+    vi.spyOn(
+      manager as unknown as { learnLiveFaviconPattern(): string | null },
+      "learnLiveFaviconPattern"
+    ).mockReturnValue(null);
+    // Live-log anatomy: the SSR ships an EMPTY slot element inside the
+    // chip. A guard treating ANY element child as an already-painted icon
+    // bailed on every chip — "filled: 10, faviconsPainted: 0", all blank.
+    const node = doc.createElement("div");
+    node.innerHTML =
+      '<span class="favicon-container"><span></span></span>' +
+      '<a href="https://somesite.example/page">t</a>';
+    callAppend(manager, [node], parseHTML("<html><head></head></html>"));
+
+    try {
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const chip = page.querySelector(".favicon-container") as HTMLElement;
+      expect(chip.style.backgroundImage).toContain("icons.duckduckgo.com");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("preserves REAL media children (<img>/<svg>) inside chips", () => {
+    const doc = parseHTML('<div id="results"></div>');
+    const container = doc.querySelector("#results")!;
+    const manager = new InfiniteScrollManager(
+      {
+        ...stubEngine(null),
+        getResultUrl: () => "https://somesite.example/page",
+      } as unknown as EngineAdapter,
+      container, () => {}, { maxPages: 5, portFetchedStyles: true, allowThirdPartyIcons: true }
+    );
+    vi.spyOn(
+      manager as unknown as { learnLiveFaviconPattern(): string | null },
+      "learnLiveFaviconPattern"
+    ).mockReturnValue(null);
+    const node = doc.createElement("div");
+    node.innerHTML =
+      '<span class="favicon-container"><img src="https://cdn.example/real.png" alt=""></span>' +
+      '<a href="https://somesite.example/page">t</a>';
+    callAppend(manager, [node], parseHTML("<html><head></head></html>"));
+
+    try {
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const chip = page.querySelector(".favicon-container") as HTMLElement;
+      // Real <img> child IS the icon — untouched by our painter.
+      expect(chip.querySelector("img")?.getAttribute("src")).toBe("https://cdn.example/real.png");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("recaptures page-1 favicon intel when the first snapshot was EMPTY (late hydration)", () => {
     const doc = parseHTML('<div id="results"></div>');
     const container = doc.querySelector("#results")!;
