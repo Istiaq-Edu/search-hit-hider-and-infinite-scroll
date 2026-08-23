@@ -1015,11 +1015,10 @@ export class InfiniteScrollManager {
   }
 
   /**
-   * Innermost favicon paint targets: elements whose class mentions
-   * "favicon" and which contain NO other such element. Selecting every
-   * matching ancestor too (a.favicon-link > .favicon-container > .favicon)
-   * made an earlier build clear the anchor's content — deleting the whole
-   * chip subtree and erasing auto-loaded favicons entirely.
+   * Innermost favicon paint targets (mutation-proven against the wipe
+   * bug): elements whose class mentions "favicon" and which contain NO
+   * other such element — the .favicon icon layer, never the a.favicon-
+   * link wrapper whose clearing deleted whole chips.
    */
   private getFaviconIconEls(root: ParentNode): HTMLElement[] {
     const all = Array.from(root.querySelectorAll<HTMLElement>('[class*="favicon" i]'));
@@ -1094,7 +1093,8 @@ export class InfiniteScrollManager {
       this.loadFaviconIntel(false);
       const liveIcons = this.faviconIntel!.map;
       const pattern = this.faviconIntel!.pattern;
-      let filled = 0;
+      let urlFilled = 0;
+      let monograms = 0;
       for (const node of appended) {
         try {
           const dest = this.engine.getResultUrl(node);
@@ -1104,7 +1104,10 @@ export class InfiniteScrollManager {
           for (const icon of this.getFaviconIconEls(node)) {
             // Harvested inline icon (per-result emotion rules) — done.
             const cur = icon.style.backgroundImage;
-            if (cur && cur !== "none") continue;
+            if (cur && cur !== "none") {
+              urlFilled++;
+              continue;
+            }
             const url =
               liveIcons.get(host) ??
               (pattern && pattern.includes("{domain}")
@@ -1122,7 +1125,7 @@ export class InfiniteScrollManager {
               // as sacred made the guard bail on EVERY chip and paint
               // nothing while the counter lied "filled".
               if (this.hasRealMediaChild(icon)) {
-                filled++;
+                urlFilled++;
                 continue;
               }
               icon.textContent = "";
@@ -1130,15 +1133,18 @@ export class InfiniteScrollManager {
               icon.style.backgroundSize = "contain";
               icon.style.backgroundPosition = "center";
               icon.style.backgroundRepeat = "no-repeat";
-              filled++;
+              urlFilled++;
             } else {
               this.paintMonogram(icon, host);
-              filled++;
+              monograms++;
             }
           }
         } catch { /* one bad node must not stop the rest */ }
       }
-      this.log("favicon fallback filled:", String(filled));
+      this.log(
+        "favicon paint outcome:",
+        `${urlFilled} urls, ${monograms} monograms`
+      );
     } catch { /* favicon assignment is cosmetic — never fail the append */ }
   }
 

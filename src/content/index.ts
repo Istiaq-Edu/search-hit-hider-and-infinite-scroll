@@ -387,9 +387,13 @@ function tryStartInfiniteScroll(retriesLeft = 25): void {
         // Startpage's fetched SSR markup uses class names the live
         // client-rendered stylesheet never defines.
         portFetchedStyles: engine.id === "startpage",
-        // Privacy default: third-party icon lookups stay off (Startpage's
-        // CSP already blocks them; the pref exists for future engines).
-        allowThirdPartyIcons: false,
+        // Third-party icon service ON: page-2+ domains differ from page-1,
+        // so the same-domain map misses most chips; the learned pattern is
+        // dead in the current build (pattern: none in live logs). Without
+        // this tier, users get monograms instead of real icons. Startpage's
+        // CSP (img-src *.startpage.com) blocks the request there anyway —
+        // no new disclosure on this engine, real icons everywhere else.
+        allowThirdPartyIcons: true,
       }
     );
     infiniteScrollManager.init();
@@ -714,9 +718,9 @@ async function refreshPrefs(): Promise<void> {
             // Startpage's fetched SSR markup uses class names the live
             // client-rendered stylesheet never defines.
             portFetchedStyles: engine.id === "startpage",
-            // Privacy default: third-party icon lookups stay off (Startpage's
-            // CSP already blocks them; the pref exists for future engines).
-            allowThirdPartyIcons: false,
+            // See tryStartInfiniteScroll: third-party tier on for real
+            // icons (CSP-blocked on Startpage itself; useful elsewhere).
+            allowThirdPartyIcons: true,
           }
         );
         infiniteScrollManager.init();
