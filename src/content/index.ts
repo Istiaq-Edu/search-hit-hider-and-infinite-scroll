@@ -104,6 +104,10 @@ let matcher: DomainMatcher | null = null;
 let observer: ResultObserver | null = null;
 let infiniteScrollManager: InfiniteScrollManager | null = null;
 let cachedResultNodes: Element[] | null = null;
+// Whether blocking is currently active for this engine (not paused, engine on).
+// Tracked so pref changes can transition the page live instead of requiring
+// a reload — and so a paused load never hides results it cannot unhide.
+let engineActive = false;
 
 const currentUrl = new URL(location.href);
 const engine = detectEngine(currentUrl);
@@ -149,10 +153,14 @@ async function init(): Promise<void> {
 
   if (!prefs) return;
 
-  // Check if this engine is disabled or extension is paused
-  if (prefs.pausedGlobally) return;
-  if (prefs.pausedEngines.includes(engine.id)) return;
-  if (!prefs.engineToggles[engine.id]) return;
+  // Check if this engine is disabled or extension is paused.  When inactive,
+  // do NOT hide anything — there would be no placeholder or Show/Unblock
+  // controls (those only come from processResults, which never runs).
+  engineActive =
+    !prefs.pausedGlobally &&
+    !prefs.pausedEngines.includes(engine.id) &&
+    prefs.engineToggles[engine.id] !== false;
+  if (!engineActive) return;
 
   // Inject styles
   injectBaseStyles();
@@ -214,36 +222,7 @@ async function init(): Promise<void> {
   (window as Window & { __shhRevealGoogle?: () => void }).__shhRevealGoogle?.();
 
   // Watch for dynamic results (infinite scroll, AJAX pagination, etc.)
-  if (prefs.mutationObserver) {
-    const IGNORE = [".shh-placeholder", ".shh-dialog", ".shh-toast", "[data-shh-btn]"];
-    // Batch mutations via queueMicrotask to avoid redundant processResults calls
-    let pendingNodes: Element[] = [];
-    let microtaskScheduled = false;
-
-    observer = new ResultObserver((newNodes) => {
-      pendingNodes.push(...newNodes);
-      if (!microtaskScheduled) {
-        microtaskScheduled = true;
-        queueMicrotask(() => {
-          const batch = pendingNodes.splice(0);
-          microtaskScheduled = false;
-          if (batch.length === 0) return;
-          // Deduplicate by reference
-          const seen = new Set<Element>();
-          const unique: Element[] = [];
-          for (const n of batch) {
-            if (!seen.has(n)) {
-              seen.add(n);
-              unique.push(n);
-            }
-          }
-          processResultNodes(unique);
-        });
-      }
-    }, IGNORE);
-
-    observer.start(document.body, engine.observerOptions?.());
-  }
+  startResultObserver();
 
   // Listen for messages from popup (prefs/list updates)
   const messageHandler = (msg: unknown) => {
@@ -261,6 +240,41 @@ function getCachedResultNodes(): Element[] {
     cachedResultNodes = engine!.getResultNodes(document);
   }
   return cachedResultNodes;
+}
+
+// ── startResultObserver ────────────────────────────────────────────────────
+// Watches for dynamically added results. Extracted from init() so that
+// refreshPrefs() can start it when blocking is resumed mid-session.
+function startResultObserver(): void {
+  if (observer || !prefs?.mutationObserver || !engine) return;
+  const IGNORE = [".shh-placeholder", ".shh-dialog", ".shh-toast", "[data-shh-btn]"];
+  // Batch mutations via queueMicrotask to avoid redundant processResults calls
+  let pendingNodes: Element[] = [];
+  let microtaskScheduled = false;
+
+  observer = new ResultObserver((newNodes) => {
+    pendingNodes.push(...newNodes);
+    if (!microtaskScheduled) {
+      microtaskScheduled = true;
+      queueMicrotask(() => {
+        const batch = pendingNodes.splice(0);
+        microtaskScheduled = false;
+        if (batch.length === 0) return;
+        // Deduplicate by reference
+        const seen = new Set<Element>();
+        const unique: Element[] = [];
+        for (const n of batch) {
+          if (!seen.has(n)) {
+            seen.add(n);
+            unique.push(n);
+          }
+        }
+        processResultNodes(unique);
+      });
+    }
+  }, IGNORE);
+
+  observer.start(document.body, engine.observerOptions?.());
 }
 
 function invalidateNodeCache(): void {
@@ -449,12 +463,46 @@ async function handleBlock(
 
 async function refreshPrefs(): Promise<void> {
   const prevInfiniteScroll = prefs?.infiniteScroll ?? true;
+  const wasActive = engineActive;
   prefs = await getPrefs();
+  if (!prefs || !engine) return;
 
   if (prefs.showOnHover) {
     document.documentElement.classList.add("shh-hover-mode");
   } else {
     document.documentElement.classList.remove("shh-hover-mode");
+  }
+
+  // ── Live pause / engine-toggle transitions ─────────────────────────────
+  engineActive =
+    !prefs.pausedGlobally &&
+    !prefs.pausedEngines.includes(engine.id) &&
+    prefs.engineToggles[engine.id] !== false;
+
+  if (wasActive && !engineActive) {
+    // Suspended mid-session: reveal everything we hid (placeholders, hidden
+    // classes, preload markers) and drop the :has() rules so nothing stays
+    // hidden with no controls.
+    for (const node of document.querySelectorAll(
+      "[data-shh-result], [data-shh-preloaded], .shh-hidden, .shh-pban"
+    )) {
+      restoreResult(node);
+    }
+    (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
+      .__shhUpdateHas?.([], prefs.subdomainWildcard);
+    updateCache();
+  } else if (!wasActive && engineActive) {
+    // Resumed mid-session: run the page processing init() skipped.  This also
+    // lifts any preload hiding from before the resume.
+    matcher = new DomainMatcher(entries, prefs.subdomainWildcard);
+    injectBaseStyles();
+    updateCache();
+    updateHasRules();
+    processResults(getCachedResultNodes());
+    startResultObserver();
+    (window as Window & { __shhRevealGoogle?: () => void }).__shhRevealGoogle?.();
+  } else {
+    updateCache();
   }
 
   // Toggle infinite scroll without requiring page reload
@@ -579,7 +627,10 @@ function earlyHideFromCache(): void {
   try {
     const raw = localStorage.getItem("_shh_cache");
     if (!raw) return;
-    const cache = JSON.parse(raw) as { domains?: string[]; wildcard?: boolean };
+    const cache = JSON.parse(raw) as { domains?: string[]; wildcard?: boolean; paused?: boolean };
+    // Blocking suspended for this engine — hiding here would leave results
+    // invisible with no placeholder and no way to show them.
+    if (cache.paused === true) return;
     const domains = Array.isArray(cache.domains) ? cache.domains : [];
     if (domains.length === 0) return;
 
@@ -641,12 +692,19 @@ function findInfiniteScrollContainer(): Element | null {
 // Only ENABLED entries are written — disabled ones must not be pre-hidden,
 // because the main content script will not re-hide them (they are not
 // matched) and the preload hiding would cause a visible "unblock" flash.
+// The paused flag is written whenever blocking is suspended for this engine
+// so the preload and earlyHide both stand down on the next load.
 function updateCache(): void {
-  if (!prefs) return;
+  if (!prefs || !engine) return;
+  const paused =
+    prefs.pausedGlobally ||
+    prefs.pausedEngines.includes(engine.id) ||
+    prefs.engineToggles[engine.id] === false;
   try {
     localStorage.setItem("_shh_cache", JSON.stringify({
-      domains: entries.filter((e) => e.enabled).map((e) => e.domain),
+      domains: paused ? [] : entries.filter((e) => e.enabled).map((e) => e.domain),
       wildcard: prefs.subdomainWildcard,
+      paused,
     }));
   } catch { /* localStorage may be unavailable in some browser configs */ }
 }

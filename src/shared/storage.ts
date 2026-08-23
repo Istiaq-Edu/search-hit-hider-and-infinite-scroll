@@ -30,6 +30,16 @@ export async function loadPrefs(): Promise<Prefs> {
   } catch {
     // storage.sync may be unavailable in some environments
   }
+  // Fallback: prefs previously saved locally when sync was unavailable
+  // (savePrefs writes here when sync throws). Without this read the
+  // fallback key is write-only and those prefs are silently lost.
+  try {
+    const local = await browser.storage.local.get(STORAGE_KEY_PREFS + "_local");
+    const raw = local[STORAGE_KEY_PREFS + "_local"];
+    if (raw && typeof raw === "object") {
+      return deepMerge(DEFAULT_PREFS, raw as Partial<Prefs>);
+    }
+  } catch { /* local also unavailable — defaults */ }
   return { ...DEFAULT_PREFS };
 }
 
@@ -75,23 +85,33 @@ function deepMerge<T extends object>(base: T, override: Partial<T>): T {
   const result = { ...base };
   for (const key of Object.keys(override) as (keyof T)[]) {
     const val = override[key];
-    if (val !== undefined) {
-      if (
-        val !== null &&
-        typeof val === "object" &&
-        !Array.isArray(val) &&
-        typeof result[key] === "object" &&
-        result[key] !== null &&
-        !Array.isArray(result[key])
-      ) {
-        result[key] = deepMerge(
-          result[key] as object,
-          val as object
-        ) as T[keyof T];
-      } else {
-        result[key] = val as T[keyof T];
-      }
+    // null / undefined: keep the default. A corrupted sync payload containing
+    // nulls (e.g. engineToggles: null) must not null out required fields —
+    // that would crash every consumer that reads prefs.engineToggles[...].
+    if (val === undefined || val === null) continue;
+    const current = result[key];
+    // Type-mismatch guard: only accept an override when its shape matches the
+    // default's shape (object←object, array←array, scalar←scalar). A
+    // non-array over an array (or an object over a scalar) is corruption.
+    if (
+      val !== null &&
+      typeof val === "object" &&
+      !Array.isArray(val) &&
+      typeof current === "object" &&
+      current !== null &&
+      !Array.isArray(current)
+    ) {
+      result[key] = deepMerge(
+        current as object,
+        val as object
+      ) as T[keyof T];
+    } else if (
+      Array.isArray(val) === Array.isArray(current) &&
+      typeof val === typeof current
+    ) {
+      result[key] = val as T[keyof T];
     }
+    // else: shape mismatch — keep the default value.
   }
   return result;
 }

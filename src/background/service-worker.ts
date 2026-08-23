@@ -95,7 +95,7 @@ browser.runtime.onMessage.addListener(
     }
 
     const msg = message as ExtMessage;
-    return handleMessage(msg);
+    return handleMessage(msg, sender.tab?.id);
   }
 );
 
@@ -103,7 +103,7 @@ browser.tabs.onRemoved.addListener((tabId) => {
   activeTabIds.delete(tabId);
 });
 
-async function handleMessage(msg: ExtMessage): Promise<unknown> {
+async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unknown> {
   switch (msg.type) {
     case "GET_LIST": {
       const entries = await getEntries();
@@ -116,7 +116,10 @@ async function handleMessage(msg: ExtMessage): Promise<unknown> {
       const result = addEntry(entries, msg.domain, msg.mode, prefs.addPosition);
       if (result.added) {
         await persistEntries(result.entries);
-        if (result.added) await saveUndoEntry(result.added);
+        await saveUndoEntry(result.added);
+        // Other tabs must re-process so the new domain hides there too.
+        // The sender already updated its own local state.
+        void broadcastToContentScripts({ type: "LIST_UPDATED" }, senderTabId);
       }
       return { entry: result.added, duplicate: result.duplicate };
     }
@@ -127,6 +130,7 @@ async function handleMessage(msg: ExtMessage): Promise<unknown> {
       if (result.removed) {
         await persistEntries(result.entries);
         await saveUndoEntry(result.removed);
+        void broadcastToContentScripts({ type: "LIST_UPDATED" }, senderTabId);
       }
       return { removed: result.removed };
     }
@@ -135,6 +139,7 @@ async function handleMessage(msg: ExtMessage): Promise<unknown> {
       const entries = await getEntries();
       const updated = updateEntry(entries, msg.domain, msg.patch);
       await persistEntries(updated);
+      void broadcastToContentScripts({ type: "LIST_UPDATED" }, senderTabId);
       return { ok: true };
     }
 
@@ -205,17 +210,27 @@ async function handleMessage(msg: ExtMessage): Promise<unknown> {
 // Broadcast to all tabs that have the content script running
 // ============================================================
 
-async function broadcastToContentScripts(message: object): Promise<void> {
+async function broadcastToContentScripts(
+  message: object,
+  exceptTabId?: number
+): Promise<void> {
+  const send = async (tabId: number): Promise<boolean> => {
+    if (tabId === exceptTabId) return true;
+    try {
+      await browser.tabs.sendMessage(tabId, message);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   if (activeTabIds.size === 0) {
     // Fallback: no registered tabs yet, query all tabs (first-run scenario)
     try {
       const tabs = await browser.tabs.query({});
       for (const tab of tabs) {
         if (tab.id !== undefined) {
-          try {
-            await browser.tabs.sendMessage(tab.id, message);
-            activeTabIds.add(tab.id);
-          } catch { /* Tab has no content script — ignore */ }
+          if (await send(tab.id)) activeTabIds.add(tab.id);
         }
       }
     } catch { /* tabs API unavailable */ }
@@ -224,11 +239,7 @@ async function broadcastToContentScripts(message: object): Promise<void> {
 
   const deadTabs: number[] = [];
   for (const tabId of activeTabIds) {
-    try {
-      await browser.tabs.sendMessage(tabId, message);
-    } catch {
-      deadTabs.push(tabId);
-    }
+    if (!(await send(tabId))) deadTabs.push(tabId);
   }
   // Clean up dead tabs
   for (const tabId of deadTabs) {

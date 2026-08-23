@@ -81,15 +81,23 @@
   // ── 1. Read the synchronous cache ────────────────────────────────────────
   let domains: string[] = [];
   let wildcard = true;
+  let paused = false;
 
   try {
     const raw = localStorage.getItem("_shh_cache");
     if (raw) {
-      const c = JSON.parse(raw) as { domains?: string[]; wildcard?: boolean };
+      const c = JSON.parse(raw) as { domains?: string[]; wildcard?: boolean; paused?: boolean };
       domains = Array.isArray(c.domains) ? c.domains : [];
       wildcard = c.wildcard !== false;
+      paused = c.paused === true;
     }
   } catch { /* localStorage unavailable or JSON corrupted */ }
+
+  // Pause / engine-disable must stop ALL preload hiding. The main content
+  // script writes this flag whenever blocking is suspended for this engine;
+  // without it, paused users see results vanish with no placeholder or way
+  // to show them (the main script also skips processing when paused).
+  if (paused) domains = [];
 
   // ── 2. Google detection (needed before adoptedStyleSheets setup) ──────────
   const isGoogle = (
@@ -240,7 +248,29 @@
   if (domains.length === 0) return;
 
   // ── 5. Build a fast in-memory matcher ────────────────────────────────────
-  const lc = domains.map(d => d.toLowerCase().replace(/^www\./, ""));
+  // Convert every entry to ASCII (punycode) form — hostnames parsed from
+  // page URLs are always ASCII, so a unicode entry would never match — and
+  // drop anything that still contains characters outside the hostname-safe
+  // set. Junk entries (hand-edited or imported lists) containing quotes or
+  // braces would otherwise break out of the CSS attribute selectors below
+  // and could invalidate an entire :is() rule batch.
+  const HOSTNAME_SAFE = /^[a-z0-9.-]+$/;
+  function sanitizeDomains(list: string[]): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of list) {
+      let d = raw.trim().toLowerCase();
+      if (d.startsWith("www.")) d = d.slice(4);
+      try {
+        d = new URL("https://" + d).hostname;
+      } catch { /* unparseable — the safety check below rejects it */ }
+      if (!d || !HOSTNAME_SAFE.test(d) || seen.has(d)) continue;
+      seen.add(d);
+      out.push(d);
+    }
+    return out;
+  }
+  const lc = sanitizeDomains(domains);
 
   function hostMatches(host: string): boolean {
     const h = host.toLowerCase().replace(/^www\./, "");
@@ -400,8 +430,7 @@
   // keep the rules in sync when the block list changes at runtime.
   (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
     .__shhUpdateHas = (newDomains: string[], newWildcard: boolean): void => {
-    const newLc = newDomains.map(d => d.toLowerCase().replace(/^www\./, ""));
-    buildHasRules(newLc, newWildcard);
+    buildHasRules(sanitizeDomains(newDomains), newWildcard);
   };
 
   // ── 7. Reveal helper ──────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import type { BlockEntry, BlockMode } from "./types";
-import { normalizeDomain } from "./domain-utils";
+import { isValidDomain, normalizeDomain } from "./domain-utils";
 import { deduplicateEntries } from "./list-utils";
 
 // ============================================================
@@ -23,7 +23,7 @@ export function parseUserscriptFormat(raw: string): BlockEntry[] {
     const flag = part.slice(colonIdx + 1).trim().toLowerCase();
 
     const normalized = normalizeDomain(domain);
-    if (!normalized || normalized.length < 2) continue;
+    if (!isValidDomain(normalized)) continue;
 
     const mode: BlockMode = flag === "p" ? "pban" : "block";
     entries.push({
@@ -68,7 +68,7 @@ export function parsePlainList(raw: string, mode: BlockMode = "block"): BlockEnt
 
     if (!domainPart) continue;
     const normalized = normalizeDomain(domainPart);
-    if (!normalized || normalized.length < 2) continue;
+    if (!isValidDomain(normalized)) continue;
     entries.push({ domain: normalized, mode: entryMode, enabled: true, createdAt: now });
   }
 
@@ -90,7 +90,7 @@ export function parseJSONBackup(raw: string): BlockEntry[] {
     return deduplicateEntries(
       parsed
         .filter(isBlockEntryLike)
-        .map((e) => normalizeImportedEntry(e))
+        .map((e) => normalizeImportedEntry(e)).filter((e): e is BlockEntry => e !== null)
     );
   }
 
@@ -101,7 +101,7 @@ export function parseJSONBackup(raw: string): BlockEntry[] {
       return deduplicateEntries(
         obj.entries
           .filter(isBlockEntryLike)
-          .map((e) => normalizeImportedEntry(e))
+          .map((e) => normalizeImportedEntry(e)).filter((e): e is BlockEntry => e !== null)
       );
     }
   }
@@ -175,8 +175,9 @@ function isBlockEntryLike(v: unknown): v is Record<string, unknown> {
   );
 }
 
-function normalizeImportedEntry(raw: Record<string, unknown>): BlockEntry {
+function normalizeImportedEntry(raw: Record<string, unknown>): BlockEntry | null {
   const domain = normalizeDomain(String(raw["domain"] ?? ""));
+  if (!isValidDomain(domain)) return null;
   const mode: BlockMode =
     raw["mode"] === "pban" ? "pban" : "block";
   const enabled = raw["enabled"] !== false;

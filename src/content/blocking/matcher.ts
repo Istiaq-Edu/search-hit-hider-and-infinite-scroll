@@ -29,7 +29,10 @@ export class DomainMatcher {
     this.cache.clear();
     for (const entry of entries) {
       if (!entry.enabled) continue;
-      const key = normalizeDomain(entry.domain);
+      // Store keys in ASCII (punycode) form: hostnames extracted from URLs are
+      // always ASCII, so a unicode-typed entry (münchen.de) would otherwise
+      // never match its punycode form (xn--mnchen-3ya.de).
+      const key = toASCIIDomain(normalizeDomain(entry.domain));
       if (entry.mode === "pban") {
         this.pbanSet.set(key, entry);
       } else {

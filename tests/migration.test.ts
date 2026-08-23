@@ -372,8 +372,16 @@ describe("autoDetectAndParse", () => {
   });
 
   it("detects userscript format with :t or :p anywhere", () => {
-    const entries = autoDetectAndParse("a.com:t|b.com:p");
+    const entries = autoDetectAndParse("a.com:t|b.com:p|");
     expect(entries.length).toBeGreaterThan(0);
+  });
+
+  it("rejects malformed userscript-like garbage (no valid domains)", () => {
+    // "a.com:t|b.com:p" has no trailing pipe, so it is not detected as
+    // userscript format; as a plain-list line it is not a valid hostname
+    // and must be rejected instead of stored as a junk entry.
+    const entries = autoDetectAndParse("a.com:t|b.com:p");
+    expect(entries).toHaveLength(0);
   });
 
   it("detects plain domain list", () => {

@@ -119,10 +119,43 @@ export function normalizeDomain(domain: string, stripWww = true): string {
       d = d.slice(0, colonIdx);
     }
   }
+  // Strip a trailing root-zone dot ("example.com." → "example.com") — hostnames
+  // parsed from URLs never carry it, so keeping it would never match.
+  while (d.endsWith(".")) {
+    d = d.slice(0, -1);
+  }
   if (stripWww && d.startsWith("www.")) {
     d = d.slice(4);
   }
   return d;
+}
+
+// Hostname-safe characters after lowercase: ASCII letters, digits, dots,
+// hyphens, and underscores. Anything else (spaces, quotes, braces, slashes,
+// angle brackets, …) can never appear in a real hostname and — critically —
+// quotes/braces would break out of the CSS attribute selectors the preload
+// builds from block-list entries.
+const DOMAIN_CHARS = /^[a-z0-9._-]+$/;
+
+/**
+ * Whether a (normalized) string can plausibly be stored and later
+ * interpolated into CSS selectors / URL matching. Non-ASCII is allowed here;
+ * callers that feed CSS generation must additionally punycode-convert
+ * (see preload's sanitizeDomains).
+ */
+export function isValidDomain(domain: string): boolean {
+  if (!domain || domain.length < 2) return false;
+  // Search results never link to dotless hosts, and a bare TLD like "com"
+  // with subdomain wildcard would hide every .com site — require a dot.
+  if (!domain.includes(".")) return false;
+  // At least one label containing a non-dot character
+  if (!/[a-z0-9]/.test(domain)) return false;
+  // ASCII-only fast path; otherwise allow unicode letters (IDN) but reject
+  // characters that are neither hostname-safe ASCII nor non-ASCII letters.
+  if (DOMAIN_CHARS.test(domain)) return true;
+  // Unicode (IDN) path: allow letters/marks/digits of any script, plus dots
+  // and hyphens; reject anything else.
+  return /^[\p{L}\p{N}.-]+$/u.test(domain);
 }
 
 /**

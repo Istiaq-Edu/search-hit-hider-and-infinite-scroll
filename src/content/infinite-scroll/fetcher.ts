@@ -34,6 +34,18 @@ export async function fetchPage(
     const html = await response.text();
     const doc = new DOMParser().parseFromString(html, "text/html");
 
+    // Google (and sometimes Bing) serve CAPTCHA/"sorry" interstitials with
+    // HTTP 200.  Treating them as a results page yields zero results and can
+    // derail pagination — report them as failures so the manager backs off
+    // (3 consecutive errors stop infinite scroll, native pagination remains).
+    const finalUrl = response.url || url;
+    const looksLikeCaptcha =
+      finalUrl.includes("/sorry/") ||
+      doc.getElementById("captcha") !== null ||
+      doc.querySelector("form[action*='/sorry']") !== null ||
+      doc.querySelector(".g-recaptcha") !== null;
+    if (looksLikeCaptcha) return null;
+
     // Inject a <base> tag so relative URLs resolve against the fetched URL.
     // Without this, links like "/search?p=2" resolve to "about:blank/search?p=2"
     // and pagination detection fails on subsequent fetches.

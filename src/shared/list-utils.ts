@@ -1,5 +1,5 @@
 import type { BlockEntry, BlockMode, BulkOperation } from "./types";
-import { normalizeDomain, stripWww } from "./domain-utils";
+import { isValidDomain, normalizeDomain, stripWww } from "./domain-utils";
 
 // ============================================================
 // List manipulation utilities
@@ -7,6 +7,8 @@ import { normalizeDomain, stripWww } from "./domain-utils";
 
 /**
  * Add a new entry to the list. Returns updated list and whether it was a duplicate.
+ * Rejects strings that cannot be real hostnames — junk entries would otherwise
+ * be stored and later interpolated into CSS selectors by the preload.
  */
 export function addEntry(
   entries: BlockEntry[],
@@ -15,7 +17,7 @@ export function addEntry(
   position: "end" | "top" | "sort" = "end"
 ): { entries: BlockEntry[]; added: BlockEntry | null; duplicate: boolean } {
   const normalized = normalizeDomain(domain);
-  if (!normalized || normalized.length < 2) {
+  if (!isValidDomain(normalized)) {
     return { entries, added: null, duplicate: false };
   }
 
@@ -128,12 +130,15 @@ export function applyBulkOp(
 
 /**
  * Remove duplicate domains, keeping the first occurrence.
+ * Comparison is case-insensitive and www-insensitive so "X.com" and "x.com"
+ * (or "www.x.com" left over from older imports) collapse into one entry.
  */
 export function deduplicateEntries(entries: BlockEntry[]): BlockEntry[] {
   const seen = new Set<string>();
   return entries.filter((e) => {
-    if (seen.has(e.domain)) return false;
-    seen.add(e.domain);
+    const key = normalizeDomain(e.domain);
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
 }

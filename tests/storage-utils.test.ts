@@ -7,24 +7,30 @@ import { DEFAULT_PREFS } from "../src/shared/types";
 // by re-implementing it here and testing it in isolation.
 // ============================================================
 
+// Mirrors the hardened deepMerge in src/shared/storage.ts: null and
+// type-mismatched values are rejected so a corrupted sync payload cannot
+// null out required prefs fields or crash their consumers.
 function deepMerge<T extends object>(base: T, override: Partial<T>): T {
   const result = { ...base };
   for (const key of Object.keys(override) as (keyof T)[]) {
     const val = override[key];
-    if (val !== undefined) {
-      if (
-        val !== null &&
-        typeof val === "object" &&
-        !Array.isArray(val) &&
-        typeof result[key] === "object" &&
-        result[key] !== null &&
-        !Array.isArray(result[key])
-      ) {
-        result[key] = deepMerge(result[key] as object, val as object) as T[keyof T];
-      } else {
-        result[key] = val as T[keyof T];
-      }
+    if (val === undefined || val === null) continue;
+    const current = result[key];
+    if (
+      typeof val === "object" &&
+      !Array.isArray(val) &&
+      typeof current === "object" &&
+      current !== null &&
+      !Array.isArray(current)
+    ) {
+      result[key] = deepMerge(current as object, val as object) as T[keyof T];
+    } else if (
+      Array.isArray(val) === Array.isArray(current) &&
+      typeof val === typeof current
+    ) {
+      result[key] = val as T[keyof T];
     }
+    // else: shape mismatch — keep the default value.
   }
   return result;
 }
@@ -97,5 +103,28 @@ describe("deepMerge (prefs merge logic)", () => {
     const result = deepMerge(DEFAULT_PREFS, override);
     expect(result.showOnHover).toBe(true);
     expect(result.buttonStyle).toBe(DEFAULT_PREFS.buttonStyle);
+  });
+
+  it("keeps defaults when override values are null", () => {
+    const override = { showNotices: null, engineToggles: null } as unknown as Partial<typeof DEFAULT_PREFS>;
+    const result = deepMerge(DEFAULT_PREFS, override);
+    expect(result.showNotices).toBe(DEFAULT_PREFS.showNotices);
+    expect(result.engineToggles).toEqual(DEFAULT_PREFS.engineToggles);
+  });
+
+  it("rejects shape-mismatched values (object over array, scalar over object)", () => {
+    const override = {
+      pausedEngines: { google: true },
+      engineToggles: "yes",
+    } as unknown as Partial<typeof DEFAULT_PREFS>;
+    const result = deepMerge(DEFAULT_PREFS, override);
+    expect(Array.isArray(result.pausedEngines)).toBe(true);
+    expect(typeof result.engineToggles).toBe("object");
+  });
+
+  it("drops unknown keys not present in defaults", () => {
+    const override = { bogusKey: "EVIL" } as unknown as Partial<typeof DEFAULT_PREFS>;
+    const result = deepMerge(DEFAULT_PREFS, override);
+    expect((result as unknown as Record<string, unknown>)["bogusKey"]).toBeUndefined();
   });
 });
