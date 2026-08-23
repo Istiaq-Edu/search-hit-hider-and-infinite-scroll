@@ -601,6 +601,55 @@ describe("InfiniteScrollManager fetched-style porting", () => {
     }
   });
 
+  it("repaints already-appended blank chips when late hydration lands (timer path)", () => {
+    vi.useFakeTimers();
+    let live: HTMLElement | null = null;
+    try {
+      const doc = parseHTML('<div id="results"></div>');
+      const container = doc.querySelector("#results")!;
+      const engine = {
+        ...stubEngine(null),
+        getResultUrl: (n: Element) =>
+          n.getAttribute("data-k") === "a" ? "https://livesite.example/" : null,
+      } as unknown as EngineAdapter;
+      const manager = new InfiniteScrollManager(
+        engine, container, () => {}, { maxPages: 5, portFetchedStyles: true }
+      );
+
+      // Append fires BEFORE hydration: intel capture comes back empty and
+      // schedules a timed retry.
+      const early = doc.createElement("div");
+      early.setAttribute("data-k", "a");
+      early.innerHTML =
+        '<span class="favicon-container">L</span><a href="https://livesite.example/">t</a>';
+      callAppend(manager, [early], parseHTML("<html><head></head></html>"));
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const earlyChip = page.querySelector(".favicon-container") as HTMLElement;
+      expect(earlyChip.style.backgroundImage).toBe(""); // blind pass
+
+      // React #423-style LATE hydration paints page-1.
+      live = document.createElement("div");
+      live.innerHTML =
+        '<span class="favicon-container" style="background-image:url(https://www.startpage.com/sp/cdn/favicons/favicon?h=livesite.example)"></span>' +
+        '<a href="https://livesite.example/">t</a>';
+      document.body.appendChild(live);
+
+      // Production stamps the CLONE (inside the page container) during
+      // processing; mimic that so the repaint walk finds it.
+      const cloneNode = page.querySelector("[data-k='a']") as HTMLElement;
+      cloneNode.setAttribute("data-shh-result", "");
+
+      // The user never scrolls again — only the TIMER can save these chips.
+      vi.advanceTimersByTime(1600);
+
+      expect(earlyChip.style.backgroundImage).toContain("startpage.com");
+      expect(earlyChip.style.backgroundImage).toContain("livesite.example");
+    } finally {
+      vi.useRealTimers();
+      live?.remove();
+    }
+  });
+
   it("recaptures page-1 favicon intel when the first snapshot was EMPTY (late hydration)", () => {
     const doc = parseHTML('<div id="results"></div>');
     const container = doc.querySelector("#results")!;

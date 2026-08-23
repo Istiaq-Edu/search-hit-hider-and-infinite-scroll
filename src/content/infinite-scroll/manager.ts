@@ -173,6 +173,10 @@ export class InfiniteScrollManager {
       clearTimeout(this.scrollSaveTimer);
       this.scrollSaveTimer = null;
     }
+    if (this.faviconRetryTimer) {
+      clearTimeout(this.faviconRetryTimer);
+      this.faviconRetryTimer = null;
+    }
     window.removeEventListener("scroll", this.onScroll);
     window.removeEventListener("beforeunload", this.saveScrollStateInternal);
     window.removeEventListener("pagehide", this.saveScrollStateInternal);
@@ -192,6 +196,9 @@ export class InfiniteScrollManager {
     this.isLoading = false;
     this.currentPage = 1;
     this.pageContainers.clear();
+    // New search = new result domains: page-1 icon intel is stale by
+    // definition and must be recaptured on the next append.
+    this.faviconIntel = null;
     this.init();
   }
 
@@ -749,6 +756,9 @@ export class InfiniteScrollManager {
    */
   private faviconIntel: { map: Map<string, string>; pattern: string | null } | null = null;
 
+  /** Pending empty-intel retry (hydration may land late — React #423). */
+  private faviconRetryTimer: number | null = null;
+
   /**
    * First computed text color found in the LIVE document for any of these
    * role selectors — excluding anything inside auto-loaded page containers
@@ -1074,22 +1084,9 @@ export class InfiniteScrollManager {
   private ensureCloneFavicons(appended: Element[]): void {
     try {
       if (appended.length === 0) return;
-      // Page-1 intel is immutable ONCE HYDRATED — cache it across appends.
-      // But hydration may paint page-1 AFTER our first append fires, so a
-      // completely empty capture (no map entries AND no pattern) must be
-      // RETRIED on later appends, never frozen. Freezing an empty snapshot
-      // blinded every subsequent page for the whole session (blank chips).
-      if (
-        !this.faviconIntel ||
-        (this.faviconIntel.map.size === 0 && !this.faviconIntel.pattern)
-      ) {
-        this.faviconIntel = {
-          map: this.buildLiveFaviconMap(),
-          pattern: this.learnLiveFaviconPattern(),
-        };
-      }
-      const liveIcons = this.faviconIntel.map;
-      const pattern = this.faviconIntel.pattern;
+      this.loadFaviconIntel(false);
+      const liveIcons = this.faviconIntel!.map;
+      const pattern = this.faviconIntel!.pattern;
       let filled = 0;
       for (const node of appended) {
         try {
@@ -1133,6 +1130,83 @@ export class InfiniteScrollManager {
       }
       this.log("favicon fallback filled:", String(filled));
     } catch { /* favicon assignment is cosmetic — never fail the append */ }
+  }
+
+  /**
+   * Capture page-1 favicon intel (host->icon map + learned URL pattern).
+   * Page-1 is immutable ONCE HYDRATED — but hydration can land LONG after
+   * our first append (observed live: React #423 recovers by re-rendering
+   * the whole root), and the user may never trigger a second append. So an
+   * EMPTY capture must be retried on a timer, not just on the next scroll,
+   * and already-appended blank chips repainted when intel finally arrives.
+   *
+   * `repaint` (timer path): walk ALL appended pages and fill any chip the
+   * earlier blind pass skipped. Populated snapshots are never re-captured,
+   * so steady-state cost stays at zero extra sweeps.
+   */
+  private loadFaviconIntel(repaint: boolean): void {
+    try {
+      const wasEmpty =
+        !this.faviconIntel ||
+        (this.faviconIntel.map.size === 0 && !this.faviconIntel.pattern);
+      if (!wasEmpty) return;
+      this.faviconIntel = {
+        map: this.buildLiveFaviconMap(),
+        pattern: this.learnLiveFaviconPattern(),
+      };
+      const nowFilled =
+        this.faviconIntel.map.size > 0 || !!this.faviconIntel.pattern;
+      this.log(
+        "favicon intel captured:",
+        `${this.faviconIntel.map.size} hosts, pattern: ${this.faviconIntel.pattern ? "yes" : "none"}`
+      );
+      if (!nowFilled) {
+        if (this.faviconRetryTimer) clearTimeout(this.faviconRetryTimer);
+        if (!this.destroyed) {
+          this.faviconRetryTimer = window.setTimeout(() => {
+            this.faviconRetryTimer = null;
+            if (!this.destroyed) this.loadFaviconIntel(true);
+          }, 1500);
+        }
+        return;
+      }
+      if (!repaint) return;
+      // Intel just arrived — repaint chips appended while we were blind.
+      for (const container of Array.from(this.pageContainers.values())) {
+        for (const node of Array.from(container.querySelectorAll("[data-shh-result]"))) {
+          try { this.paintResultIcons(node); } catch { /* per-node isolation */ }
+        }
+      }
+    } catch { /* cosmetic — never fail the append */ }
+  }
+
+  /** Paint every unpainted favicon chip on ONE result node (pure DOM). */
+  private paintResultIcons(node: Element): void {
+    const dest = this.engine.getResultUrl(node);
+    if (!dest) return;
+    let host: string;
+    try { host = new URL(dest).hostname.replace(/^www\./, ""); } catch { return; }
+    const liveIcons = this.faviconIntel?.map ?? new Map<string, string>();
+    const pattern = this.faviconIntel?.pattern ?? null;
+    for (const icon of this.getFaviconIconEls(node)) {
+      const cur = icon.style.backgroundImage;
+      if (cur && cur !== "none") continue;
+      const url =
+        liveIcons.get(host) ??
+        (pattern && pattern.includes("{domain}")
+          ? pattern.replace("{domain}", host)
+          : null) ??
+        (this.config.allowThirdPartyIcons
+          ? `https://icons.duckduckgo.com/ip3/${host}.ico`
+          : null);
+      if (!url) continue;
+      if (Array.from(icon.children).length > 0) continue;
+      icon.textContent = "";
+      icon.style.backgroundImage = `url("${url}")`;
+      icon.style.backgroundSize = "contain";
+      icon.style.backgroundPosition = "center";
+      icon.style.backgroundRepeat = "no-repeat";
+    }
   }
 
   /**
