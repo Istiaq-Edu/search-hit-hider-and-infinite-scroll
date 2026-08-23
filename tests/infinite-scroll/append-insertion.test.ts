@@ -601,6 +601,54 @@ describe("InfiniteScrollManager fetched-style porting", () => {
     }
   });
 
+  it("recaptures page-1 favicon intel when the first snapshot was EMPTY (late hydration)", () => {
+    const doc = parseHTML('<div id="results"></div>');
+    const container = doc.querySelector("#results")!;
+    const engine = {
+      ...stubEngine(null),
+      getResultUrl: (n: Element) =>
+        n.getAttribute("data-k") === "a" ? "https://livesite.example/" : null,
+    } as unknown as EngineAdapter;
+    const manager = new InfiniteScrollManager(
+      engine, container, () => {}, { maxPages: 5, portFetchedStyles: true }
+    );
+
+    // Append #1: page-1 has NO painted chips yet (hydration hasn't run).
+    const early = doc.createElement("div");
+    early.setAttribute("data-k", "a");
+    early.innerHTML =
+      '<span class="favicon-container">L</span><a href="https://livesite.example/">t</a>';
+    callAppend(manager, [early], parseHTML("<html><head></head></html>"));
+    const page1 = container.querySelector("[data-inf-page]") as HTMLElement;
+    const earlyChip = page1.querySelector(".favicon-container") as HTMLElement;
+    // Empty intel must NOT be frozen into a broken paint...
+    expect(earlyChip.style.backgroundImage).toBe("");
+
+    // ...hydration then paints page-1 (first-party endpoint).
+    const live = document.createElement("div");
+    live.innerHTML =
+      '<span class="favicon-container" style="background-image:url(https://www.startpage.com/sp/cdn/favicons/favicon?h=livesite.example)"></span>' +
+      '<a href="https://livesite.example/">t</a>';
+    document.body.appendChild(live);
+
+    // Append #2: empty snapshot must be RETRIED and the domain stolen.
+    const later = doc.createElement("div");
+    later.setAttribute("data-k", "a");
+    later.innerHTML =
+      '<span class="favicon-container">L</span><a href="https://livesite.example/">t</a>';
+    callAppend(manager, [later], parseHTML("<html><head></head></html>"));
+
+    try {
+      const pages = container.querySelectorAll("[data-inf-page]");
+      const laterChip = pages[1]!.querySelector(".favicon-container") as HTMLElement;
+      // Same-domain page-1 artwork stolen — the frozen-empty bug left this blank.
+      expect(laterChip.style.backgroundImage).toContain("startpage.com");
+      expect(laterChip.style.backgroundImage).toContain("livesite.example");
+    } finally {
+      live.remove();
+    }
+  });
+
   it("paints ONLY the innermost favicon layer — never wipes nested chip markup", () => {
     const doc = parseHTML('<div id="results"></div>');
     const container = doc.querySelector("#results")!;

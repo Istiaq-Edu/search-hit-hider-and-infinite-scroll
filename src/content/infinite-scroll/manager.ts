@@ -1074,12 +1074,15 @@ export class InfiniteScrollManager {
   private ensureCloneFavicons(appended: Element[]): void {
     try {
       if (appended.length === 0) return;
-      // Live page-1 intel is immutable once rendered — compute ONCE and
-      // reuse across appends. Rebuilding per append re-ran two full
-      // document-wide scans + ~500 getComputedStyle reads against a DOM
-      // growing past 10k nodes, and went BLIND after discardOldPages
-      // removed page-1 (~page 7+): later appends painted blank chips.
-      if (!this.faviconIntel) {
+      // Page-1 intel is immutable ONCE HYDRATED — cache it across appends.
+      // But hydration may paint page-1 AFTER our first append fires, so a
+      // completely empty capture (no map entries AND no pattern) must be
+      // RETRIED on later appends, never frozen. Freezing an empty snapshot
+      // blinded every subsequent page for the whole session (blank chips).
+      if (
+        !this.faviconIntel ||
+        (this.faviconIntel.map.size === 0 && !this.faviconIntel.pattern)
+      ) {
         this.faviconIntel = {
           map: this.buildLiveFaviconMap(),
           pattern: this.learnLiveFaviconPattern(),
@@ -1196,13 +1199,18 @@ export class InfiniteScrollManager {
           // e.g. https://www.startpage.com/.../favicon?h=<site>&...
           const candidate = u.replace(/([?&](?:h|domain|host|url)=)[^&"]+/i, "$1{domain}");
           if (candidate === u) return null; // no param matched — nothing learned
-          // Round-trip validation: substituting the OBSERVED chip's own host
-          // must reproduce the observed URL. A base64/path-encoded value
-          // would fail this and poison every later substitution with 404s.
-          const ownHost = window.location.hostname.replace(/^www\./, "");
-          const roundTrip = candidate.replace("{domain}", encodeURIComponent(ownHost));
-          const normalized = roundTrip.replace(encodeURIComponent(ownHost), ownHost);
-          if (normalized !== u) return null;
+          // Round-trip validation: the templatized segment must hold a
+          // HOSTNAME-shaped value (the observed chip's own destination,
+          // e.g. h=efset.org). A base64/path/opaque value would fail this
+          // and poison every later substitution with 404s — reject it.
+          // (Validating against startpage.com's own host can NEVER pass:
+          // the param carries the RESULT's domain, not ours.)
+          const rawValue = u.slice(q + 1).match(/(?:^|&)(?:h|domain|host|url)=([^&"]+)/i);
+          const val = rawValue?.[1] ?? "";
+          let decoded = "";
+          try { decoded = decodeURIComponent(val); } catch { decoded = val; }
+          const hostShape = /^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?\/?$/i.test(decoded);
+          if (!hostShape) return null;
           return candidate;
         }
         return null; // path-based patterns vary per build — too risky to guess
