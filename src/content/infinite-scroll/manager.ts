@@ -758,6 +758,8 @@ export class InfiniteScrollManager {
 
   /** Pending empty-intel retry (hydration may land late — React #423). */
   private faviconRetryTimer: number | null = null;
+  /** Empty-intel retry attempts so far (cap the loop; then self-diagnose). */
+  private faviconRetryCount = 0;
 
   /**
    * First computed text color found in the LIVE document for any of these
@@ -1161,13 +1163,28 @@ export class InfiniteScrollManager {
         `${this.faviconIntel.map.size} hosts, pattern: ${this.faviconIntel.pattern ? "yes" : "none"}`
       );
       if (!nowFilled) {
-        if (this.faviconRetryTimer) clearTimeout(this.faviconRetryTimer);
-        if (!this.destroyed) {
-          this.faviconRetryTimer = window.setTimeout(() => {
-            this.faviconRetryTimer = null;
-            if (!this.destroyed) this.loadFaviconIntel(true);
-          }, 1500);
+        this.faviconRetryCount++;
+        if (this.faviconRetryCount <= 6) {
+          if (this.faviconRetryTimer) clearTimeout(this.faviconRetryTimer);
+          if (!this.destroyed) {
+            this.faviconRetryTimer = window.setTimeout(() => {
+              this.faviconRetryTimer = null;
+              if (!this.destroyed) this.loadFaviconIntel(true);
+            }, 1500);
+          }
+          return;
         }
+        // Retries exhausted and page-1 still shows nothing we can read —
+        // the markup generation changed. Dump raw chip evidence so the
+        // next console log pins the new anatomy exactly.
+        try {
+          const sample = document.querySelector<HTMLElement>('[class*="favicon" i]');
+          const chipHtml =
+            sample
+              ? (sample.closest("a") ?? sample).outerHTML.slice(0, 1200)
+              : "(no [class*=favicon] element found at all)";
+          this.log("favicon intel UNAVAILABLE after retries; chip snapshot:", chipHtml);
+        } catch { /* diagnostics only */ }
         return;
       }
       if (!repaint) return;
@@ -1212,20 +1229,36 @@ export class InfiniteScrollManager {
   /**
    * Map destination hostname -> rendered icon URL, harvested from LIVE
    * page-1 favicon chips (never from our own appended containers).
+   * LAYER-TOLERANT: the icon may sit on ANY favicon-classed element
+   * (innermost .favicon in the 2025 build, possibly the container in a
+   * later one) or arrive as an <img> inside the chip subtree — harvest
+   * whichever layer actually carries it.
    */
   private buildLiveFaviconMap(): Map<string, string> {
     const map = new Map<string, string>();
     try {
-      for (const el of this.getFaviconIconEls(document)) {
-        if (el.closest("[data-inf-page]")) continue;
-        const bg = window.getComputedStyle(el).backgroundImage;
-        const m = /url\(["']?([^"')]+)["']?\)/.exec(bg);
-        if (!m?.[1]) continue;
+      const els = Array.from(document.querySelectorAll<HTMLElement>('[class*="favicon" i]'))
+        .filter((el) => !el.closest("[data-inf-page]"));
+      for (const el of els) {
         const host = this.hostOfChipResult(el);
-        if (host && !map.has(host)) map.set(host, m[1]);
+        if (!host || map.has(host)) continue;
+        const url = this.iconUrlOfChip(el);
+        if (url) map.set(host, url);
       }
     } catch { /* ignore */ }
     return map;
+  }
+
+  /** Icon URL carried by a chip at any layer: CSS background or inner <img>. */
+  private iconUrlOfChip(chip: HTMLElement): string | null {
+    const m = /url\((["']?)([^"')]+)\1\)/.exec(
+      window.getComputedStyle(chip).backgroundImage
+    );
+    if (m?.[2]) return m[2];
+    const img = chip.matches("img")
+      ? (chip as HTMLImageElement)
+      : chip.querySelector<HTMLImageElement>("img[src]");
+    return img?.src || null;
   }
 
   /** Destination host of the result a favicon chip belongs to. */
@@ -1260,19 +1293,19 @@ export class InfiniteScrollManager {
    */
   private learnLiveFaviconPattern(): string | null {
     try {
-      for (const el of this.getFaviconIconEls(document)) {
-        if (el.closest("[data-inf-page]")) continue;
-        const img = window.getComputedStyle(el).backgroundImage;
-        const m = /url\(["']?([^"')]+)["']?\)/.exec(img);
-        if (!m?.[1] || !/startpage\.com/i.test(m[1])) continue;
+      const els = Array.from(document.querySelectorAll<HTMLElement>('[class*="favicon" i]'))
+        .filter((el) => !el.closest("[data-inf-page]"));
+      for (const el of els) {
+        const url = this.iconUrlOfChip(el);
+        if (!url || !/startpage\.com/i.test(url)) continue;
         // The icon endpoint carries the target site in its query/path —
         // templatize any parameter-looking segment.
-        const u = m[1];
+        const u = url;
         const q = u.indexOf("?");
         if (q !== -1) {
           // e.g. https://www.startpage.com/.../favicon?h=<site>&...
           const candidate = u.replace(/([?&](?:h|domain|host|url)=)[^&"]+/i, "$1{domain}");
-          if (candidate === u) return null; // no param matched — nothing learned
+          if (candidate === u) continue; // no param matched — try next chip
           // Round-trip validation: the templatized segment must hold a
           // HOSTNAME-shaped value (the observed chip's own destination,
           // e.g. h=efset.org). A base64/path/opaque value would fail this
@@ -1284,10 +1317,11 @@ export class InfiniteScrollManager {
           let decoded = "";
           try { decoded = decodeURIComponent(val); } catch { decoded = val; }
           const hostShape = /^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?\/?$/i.test(decoded);
-          if (!hostShape) return null;
+          if (!hostShape) continue; // opaque value — try the next chip
           return candidate;
         }
-        return null; // path-based patterns vary per build — too risky to guess
+        // Path-based patterns vary per build — too risky to guess.
+        continue;
       }
     } catch { /* ignore */ }
     return null;
