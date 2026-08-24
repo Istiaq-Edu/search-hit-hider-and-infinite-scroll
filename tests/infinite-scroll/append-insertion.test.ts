@@ -8,8 +8,11 @@ function parseHTML(html: string): Document {
 
 function stubEngine(anchor: Element | null): EngineAdapter {
   return {
-    id: "yandex",
-    name: "Yandex",
+    // Neutral id: "yandex" would trigger the Yandex first-party favicon
+    // fallback and hijack every generic DDG-tier test in this file. The
+    // cast through unknown bypasses EngineId narrowing for the stub.
+    id: "stub" as unknown as EngineAdapter["id"],
+    name: "Stub",
     matches: () => true,
     getResultNodes: () => [],
     getResultUrl: () => null,

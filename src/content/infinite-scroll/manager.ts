@@ -1203,6 +1203,15 @@ export class InfiniteScrollManager {
               (pattern && pattern.includes("{domain}")
                 ? pattern.replace("{domain}", host)
                 : null) ??
+              // Engine-level first-party fallback: a KNOWN public endpoint
+              // of the engine's own icon service, used as an explicit
+              // allowlist entry (not learned — Yandex routes its chips
+              // through opaque token proxies that cannot be templatized).
+              // Same disclosure argument as the allowlist above: the engine
+              // already sends every destination to this service on page 1.
+              (this.engine.id === "yandex"
+                ? `https://favicon.yandex.net/favicon/v2/https://${host}?size=16`
+                : null) ??
               // Third-party fallback is OPT-IN (default off): it would tell
               // DuckDuckGo every auto-loaded destination via the URL. It is
               // also force-disabled on Startpage regardless of config: its
@@ -1461,6 +1470,10 @@ export class InfiniteScrollManager {
         liveIcons.get(host) ??
         (pattern && pattern.includes("{domain}")
           ? pattern.replace("{domain}", host)
+          : null) ??
+        // Engine-level first-party fallback (mirrors ensureCloneFavicons).
+        (this.engine.id === "yandex"
+          ? `https://favicon.yandex.net/favicon/v2/https://${host}?size=16`
           : null) ??
         (this.config.allowThirdPartyIcons && this.engine.id !== "startpage"
           ? `https://icons.duckduckgo.com/ip3/${host}.ico`
