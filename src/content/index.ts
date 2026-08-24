@@ -382,7 +382,10 @@ function tryStartInfiniteScroll(retriesLeft = 25): void {
         maxPages: prefs.infiniteScrollMaxPages,
         persist: prefs.infiniteScrollPersist,
         freshnessMinutes: 30,
-        fetchDelay: 1500,
+        // Anti-bot sleep before each fetch, per engine (±50% jitter on top):
+        // Startpage is captcha-prone and keeps the cautious 1500ms; the
+        // other engines tolerate ~600ms without tripping detection.
+        fetchDelay: engine.id === "startpage" ? 1500 : 600,
         debugMode: prefs.debugMode,
         // Startpage's fetched SSR markup uses class names the live
         // client-rendered stylesheet never defines.
@@ -714,7 +717,8 @@ async function refreshPrefs(): Promise<void> {
             maxPages: prefs.infiniteScrollMaxPages,
             persist: prefs.infiniteScrollPersist,
             freshnessMinutes: 30,
-            fetchDelay: 1500,
+            // See tryStartInfiniteScroll: per-engine anti-bot delay.
+            fetchDelay: engine.id === "startpage" ? 1500 : 600,
             debugMode: prefs.debugMode,
             // Startpage's fetched SSR markup uses class names the live
             // client-rendered stylesheet never defines.
