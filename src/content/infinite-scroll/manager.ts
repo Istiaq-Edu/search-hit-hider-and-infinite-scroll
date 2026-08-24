@@ -689,17 +689,21 @@ export class InfiniteScrollManager {
     // Report the individual result nodes (not the wrapper) so the blocking
     // pipeline keeps per-result hiding granularity.
     const appended = Array.from(resultHost.children) as Element[];
-    // Re-skin clones with the LIVE page's theme before anything renders.
+    // Re-skin clones with the LIVE page's theme before anything renders
+    // (Startpage only — other engines' fetched markup carries its own CSS).
     if (this.config.portFetchedStyles && sourceDoc && appended.length > 0) {
       // Fill the URL-line slot Startpage's hydration normally writes
       // (clones are never hydrated) BEFORE tinting, so the filled span
       // gets the live theme color in the same pass.
       this.hydrateDisplayUrls(appended);
       this.reSkinClones(appended);
-      // Current-generation Startpage SSR carries NO favicon URLs in chip
-      // markup — icons ride inline in the SSR JSON state ("faviconData")
-      // and hydration copies them on; clones are never hydrated, so we
-      // parse the blob ourselves (see favicon-data.ts) and paint tier 0.
+    }
+    // Favicon provisioning runs for EVERY engine (field evidence Aug 24:
+    // Yandex/Bing fetched pages ship favicon chips but no icon art — their
+    // hydration never touches our clones). Guards inside keep it safe:
+    // tier-0 blob parsing is engine-gated, CSP filtering is engine-gated,
+    // and monograms preserve never-blank.
+    if (appended.length > 0) {
       this.ensureCloneFavicons(appended, sourceDoc);
     }
     if (this.config.debugMode) {
@@ -1580,17 +1584,29 @@ export class InfiniteScrollManager {
   }
 
   /**
-   * Extract the icon-URL template from live page-1 favicon chips: find a
-   * first-party startpage.com URL and replace the hostname segment with a
-   * {domain} placeholder. Returns null when no usable pattern exists.
+   * Extract the icon-URL template from live page-1 favicon chips.
+   *
+   * Two accepted shapes, both validated by round-trip (the templatized
+   * segment must hold the chip result's own hostname):
+   * 1. Query-parameter shape — first-party URL with ?h=<site> / ?url=<site>
+   *    etc. (Startpage's endpoint). Restricted to startpage.com hosts.
+   * 2. Path-embedded shape — favicon service URLs that embed the RESULT
+   *    DESTINATION in the path, e.g. Yandex's
+   *    https://favicon.yandex.net/favicon/v2/https://<site>?size=16 .
+   *    The destination is a full URL there; the host segment is replaced
+   *    with {domain}. Only favicon.* hosts of the CURRENT ENGINE are
+   *    trusted (first-party services that already receive every
+   *    destination as part of rendering the page — using them adds zero
+   *    new disclosure; third-party services stay opt-in/off).
    */
   private learnLiveFaviconPattern(): string | null {
     try {
       const els = Array.from(document.querySelectorAll<HTMLElement>('[class*="favicon" i]'))
         .filter((el) => !el.closest("[data-inf-page]"));
+      const engineHost = window.location.hostname;
       for (const el of els) {
         const url = this.iconUrlOfChip(el);
-        if (!url || !/startpage\.com/i.test(url)) continue;
+        if (!url) continue;
         // The icon endpoint carries the target site in its query/path —
         // templatize any parameter-looking segment.
         const u = url;
@@ -1598,26 +1614,57 @@ export class InfiniteScrollManager {
         if (q !== -1) {
           // e.g. https://www.startpage.com/.../favicon?h=<site>&...
           const candidate = u.replace(/([?&](?:h|domain|host|url)=)[^&"]+/i, "$1{domain}");
-          if (candidate === u) continue; // no param matched — try next chip
-          // Round-trip validation: the templatized segment must hold a
-          // HOSTNAME-shaped value (the observed chip's own destination,
-          // e.g. h=efset.org). A base64/path/opaque value would fail this
-          // and poison every later substitution with 404s — reject it.
-          // (Validating against startpage.com's own host can NEVER pass:
-          // the param carries the RESULT's domain, not ours.)
-          const rawValue = u.slice(q + 1).match(/(?:^|&)(?:h|domain|host|url)=([^&"]+)/i);
-          const val = rawValue?.[1] ?? "";
-          let decoded = "";
-          try { decoded = decodeURIComponent(val); } catch { decoded = val; }
-          const hostShape = /^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?\/?$/i.test(decoded);
-          if (!hostShape) continue; // opaque value — try the next chip
-          return candidate;
+          if (candidate !== u && this.patternRoundTripValid(el, u)) {
+            return candidate;
+          }
+          // Path-embedded full-URL destinations:
+          //   https://favicon.yandex.net/favicon/v2/https://<site>?size=16
+          // First-party only: the service must belong to the engine we are
+          // browsing (it already sees every destination when painting page
+          // 1 — reusing it discloses nothing new).
+          const pm = /^(https:\/\/favicon\.[a-z0-9.-]+\/(?:[^?"']*\/)*)(https?:\/\/[^/"']+)\?(.*)$/i.exec(u);
+          if (pm && pm[2]) {
+            try {
+              const svcHost = new URL(u).hostname;
+              const sameParty =
+                svcHost === engineHost || svcHost.endsWith("." + engineHost.replace(/^www\./, ""));
+              const destHost = new URL(pm[2]).hostname.replace(/^www\./, "");
+              const ownResult = destHost === this.hostOfChipResult(el);
+              if (
+                sameParty &&
+                ownResult &&
+                /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(destHost)
+              ) {
+                // candidate: prefix + {domain} + rest-of-path?query
+                return `${pm[1]}{domain}?${pm[3]}`;
+              }
+            } catch { /* malformed service or destination URL */ }
+          }
         }
-        // Path-based patterns vary per build — too risky to guess.
-        continue;
       }
     } catch { /* ignore */ }
     return null;
+  }
+
+  /**
+   * Round-trip check for query-shaped patterns: the templatized segment
+   * must hold a HOSTNAME-shaped value equal to (or an apex/suffix of) the
+   * observed chip's own destination. Opaque values (base64, tokens) fail
+   * and poison every later substitution with 404s.
+   */
+  private patternRoundTripValid(chip: HTMLElement, originalUrl: string): boolean {
+    const q = originalUrl.indexOf("?");
+    if (q === -1) return false;
+    const rawValue = originalUrl.slice(q + 1).match(/(?:^|&)(?:h|domain|host|url)=([^&"]+)/i);
+    const val = rawValue?.[1] ?? "";
+    let decoded = "";
+    try { decoded = decodeURIComponent(val); } catch { decoded = val; }
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?\/?$/i.test(decoded)) return false;
+    // The value must match the chip's actual destination (apex-tolerant).
+    const dest = this.hostOfChipResult(chip);
+    if (!dest) return true; // no anchor available — accept host-shape only
+    const d = decoded.replace(/^www\./, "").replace(/\/$/, "").toLowerCase();
+    return d === dest || d.endsWith("." + dest) || dest.endsWith("." + d);
   }
 
   /** Remove pages above the viewport to keep the DOM lean (keep ~5 pages). */
