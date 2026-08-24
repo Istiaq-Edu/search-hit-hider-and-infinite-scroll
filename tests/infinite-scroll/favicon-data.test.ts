@@ -102,6 +102,31 @@ describe("extractFaviconData", () => {
     expect(r.via).toBe("plain");
     expect(r.map.size).toBe(2);
   });
+
+  it("parses the LIVE Aug-24 shape: displayUrl key, no url key, no sourceIndex", () => {
+    // Verbatim anatomy from the user's field log (tier0 EMPTY sample):
+    // "…delivered as a service.","displayUrl":"https://test.io/",
+    // "siteLinks":[],"faviconData":"data:image/png;base64,iVBORw0KGgo…" —
+    // the destination key is displayUrl and sourceIndex is absent.
+    const liveShape =
+      '{"results":[{"title":"Pen Testing","snippet":"IoT <b>testing</b>, delivered as a service.",' +
+      '"displayUrl":"https://test.io/","siteLinks":[],' +
+      '"faviconData":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA"}]}';
+    const map = extractFaviconData(liveShape);
+    expect(map.get("test.io")).toBe("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA");
+  });
+
+  it("displayUrl wins over a populated siteLinks url in the same segment", () => {
+    const blob =
+      '{"results":[{"title":"A","displayUrl":"https://real.example/","siteLinks":[' +
+      '{"url":"https://sub.example/x"}],"faviconData":"data:image/png;base64,REAL"},' +
+      '{"url":"https://legacy.example/y","sourceIndex":1,' +
+      '"faviconData":"data:image/png;base64,LEGACY"}]}';
+    const map = extractFaviconData(blob);
+    expect(map.get("real.example")).toBe("data:image/png;base64,REAL");
+    expect(map.has("sub.example")).toBe(false);
+    expect(map.get("legacy.example")).toBe("data:image/png;base64,LEGACY");
+  });
 });
 
 describe("manager integration: tier-0 inline art paints clone chips", () => {

@@ -23,7 +23,13 @@
  */
 
 const FAVICON_DATA_RE = /"faviconData"\s*:\s*("(?:[^"\\]|\\.)*")/g;
-const URL_VALUE_RE = /"(?:url|link|href)"\s*:\s*("(?:[^"\\]|\\.)*")/g;
+// Field-verified Aug 24 (user console sample): current generations name the
+// destination key "displayUrl" — older ones "url". Both listed; see
+// hostOfSegment for the precedence rules.
+const URL_VALUE_RE = /"(?:displayUrl|url|link|href)"\s*:\s*("(?:[^"\\]|\\.)*")/g;
+// displayUrl is the RESULT's own address in the new shape — trusted outright
+// (the last one in the segment), never displaced by siteLink url keys.
+const DISPLAY_URL_RE = /"displayUrl"\s*:\s*("(?:[^"\\]|\\.)*")/g;
 const SOURCE_INDEX_RE = /"sourceIndex"/g;
 
 /** Upper bound on extracted entries per page — defensive, payloads are ~10. */
@@ -47,28 +53,41 @@ function decodeJsonString(token: string): string | null {
 }
 
 /**
- * Destination hostname for one record. Prefers the "url" nearest BEFORE the
- * record's "sourceIndex" marker (the result's own URL); falls back to the
- * nearest preceding "url" anywhere in the segment when the marker is absent
- * (schema drift tolerance).
+ * Destination hostname for one record.
+ *
+ * Precedence:
+ * 1. "displayUrl" — the new-shape result address (field-verified Aug 24
+ *    sample). Trusted outright: take the LAST one in the segment, since it
+ *    sits nearest the record's faviconData. Site-link entries in the same
+ *    segment cannot displace it (they use "url", never "displayUrl").
+ * 2. Legacy shape: the "url"/"link"/"href" value nearest BEFORE the record's
+ *    "sourceIndex" marker; falls back to the nearest preceding url anywhere
+ *    in the segment when the marker is absent (schema drift tolerance).
  */
 function hostOfSegment(segment: string): string | null {
-  SOURCE_INDEX_RE.lastIndex = 0;
-  let anchor = segment.length;
+  DISPLAY_URL_RE.lastIndex = 0;
+  let displayToken: string | null = null;
   let m: RegExpExecArray | null;
-  // Nearest sourceIndex in the segment (records carry exactly one; take the
-  // last match before the faviconData we segmented at).
-  while ((m = SOURCE_INDEX_RE.exec(segment)) !== null) anchor = m.index;
-
-  URL_VALUE_RE.lastIndex = 0;
-  let best: string | null = null;
-  while ((m = URL_VALUE_RE.exec(segment)) !== null) {
-    if (m.index >= anchor) break;
+  while ((m = DISPLAY_URL_RE.exec(segment)) !== null) {
     const captured = m[1];
-    if (typeof captured === "string") best = captured;
+    if (typeof captured === "string") displayToken = captured;
   }
-  if (!best) return null;
-  const raw = decodeJsonString(best);
+  if (!displayToken) {
+    SOURCE_INDEX_RE.lastIndex = 0;
+    let anchor = segment.length;
+    // Nearest sourceIndex in the segment (records carry exactly one; take
+    // the last match before the faviconData we segmented at).
+    while ((m = SOURCE_INDEX_RE.exec(segment)) !== null) anchor = m.index;
+
+    URL_VALUE_RE.lastIndex = 0;
+    while ((m = URL_VALUE_RE.exec(segment)) !== null) {
+      if (m.index >= anchor) break;
+      const captured = m[1];
+      if (typeof captured === "string") displayToken = captured;
+    }
+  }
+  if (!displayToken) return null;
+  const raw = decodeJsonString(displayToken);
   if (!raw) return null;
   // Archive snapshots wrap destinations in /web/<timestamp>/<real url>;
   // live pages never do. Strip when present.
