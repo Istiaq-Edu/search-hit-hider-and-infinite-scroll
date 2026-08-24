@@ -5,6 +5,19 @@ import { fetchPage } from "./fetcher";
 import { extractFaviconDataAny } from "./favicon-data";
 import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type ScrollState } from "./persist";
 
+/**
+ * First-party favicon services, per engine. These are hosts the ENGINE
+ * ITSELF requests with every result destination when painting page 1 —
+ * reusing them for clone chips discloses nothing the engine doesn't
+ * already receive. Anything outside this list is treated as third-party
+ * (opt-in only). Keyed by engine id; regex-matched against full URLs.
+ */
+const FIRST_PARTY_FAVICON_SERVICES: Record<string, RegExp[]> = {
+  yandex: [/^https:\/\/favicon\.yandex\.(?:com|net|ru)\/favicon\/v2\//i],
+  // Bing/Google/DDG/Brave/Baidu: no known first-party favicon endpoint
+  // reachable from fetched pages — left empty until field-verified.
+};
+
 // Inline CSS properties that truncate text in server-rendered HTML from SPAs.
 // Stripped from fetched nodes before appending to the live DOM.
 const TRUNCATION_PROPS = [
@@ -1606,7 +1619,6 @@ export class InfiniteScrollManager {
     try {
       const els = Array.from(document.querySelectorAll<HTMLElement>('[class*="favicon" i]'))
         .filter((el) => !el.closest("[data-inf-page]"));
-      const engineHost = window.location.hostname;
       for (const el of els) {
         const url = this.iconUrlOfChip(el);
         if (!url) continue;
@@ -1622,23 +1634,21 @@ export class InfiniteScrollManager {
           }
           // Path-embedded full-URL destinations:
           //   https://favicon.yandex.net/favicon/v2/https://<site>?size=16
-          // First-party only: the service must belong to the engine we are
-          // browsing (it already receives every destination when painting
-          // page 1 — reusing it discloses nothing new). Matched against an
-          // allowlist of first-party favicon-service hosts per engine TLD,
-          // because services live on sibling domains (favicon.yandex.net vs
-          // yandex.com) that a strict same-host check wrongly rejects.
+          // First-party only, via an explicit per-engine allowlist of known
+          // favicon services. These services sit on sibling domains
+          // (favicon.yandex.net vs yandex.com) that suffix matching cannot
+          // bridge — and they're first-party because the ENGINE ITSELF sends
+          // every destination there when painting page 1, so reusing them
+          // discloses nothing new. Anything not on the list stays opt-in/off.
           const pm = /^(https:\/\/favicon\.[a-z0-9.-]+\/(?:[^?"']*\/)*)(https?:\/\/[^/"']+)\?(.*)$/i.exec(u);
           if (pm && pm[2]) {
             try {
-              const svcHost = new URL(u).hostname;
-              const engineApex = engineHost.replace(/^www\./, "").replace(/^[a-z]+\./i, "");
-              const sameParty =
-                svcHost.endsWith("." + engineApex) || svcHost === engineHost;
+              const allowed = FIRST_PARTY_FAVICON_SERVICES[this.engine.id] ?? [];
+              const firstParty = allowed.some((re) => re.test(u));
               const destHost = new URL(pm[2]).hostname.replace(/^www\./, "");
               const ownResult = destHost === this.hostOfChipResult(el);
               if (
-                sameParty &&
+                firstParty &&
                 ownResult &&
                 /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(destHost)
               ) {
