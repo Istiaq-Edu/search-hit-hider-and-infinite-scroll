@@ -766,6 +766,9 @@ export class InfiniteScrollManager {
    */
   private faviconInline: Map<string, string> = new Map();
 
+  /** One-shot guard for the tier-0 empty-sample diagnostic. */
+  private tier0SampleLogged = false;
+
   /** Pending empty-intel retry (hydration may land late — React #423). */
   private faviconRetryTimer: number | null = null;
   /** Empty-intel retry attempts so far (cap the loop; then self-diagnose). */
@@ -1117,12 +1120,27 @@ export class InfiniteScrollManager {
       ) {
         try {
           let blobScripts = 0;
+          const before = this.faviconInline.size;
           for (const el of Array.from(sourceDoc.querySelectorAll("script"))) {
             const txt = el.textContent ?? "";
             if (txt.indexOf("faviconData") === -1 || txt.length >= 3_000_000) continue;
             blobScripts++;
             for (const [h, u] of extractFaviconData(txt)) {
               if (!this.faviconInline.has(h)) this.faviconInline.set(h, u);
+            }
+            // Diagnostic: blob present but nothing extracted means the
+            // payload SHAPE drifted (nulls, renamed keys). Dump a bounded
+            // sample so the next console log pins it without guessing.
+            if (this.faviconInline.size === before && !this.tier0SampleLogged) {
+              this.tier0SampleLogged = true;
+              const idx = txt.indexOf("faviconData");
+              const occ = (txt.match(/faviconData/g) ?? []).length;
+              const datas = (txt.match(/data:image/g) ?? []).length;
+              const sample = txt.slice(Math.max(0, idx - 100), idx + 240);
+              this.log(
+                "tier0 EMPTY sample:",
+                `occ=${occ} dataImgs=${datas} …${sample.replace(/\s+/g, " ")}…`
+              );
             }
           }
           // Diagnostic: do fetched snapshots still carry the SSR blob at
@@ -1299,6 +1317,17 @@ export class InfiniteScrollManager {
           if (!this.faviconIntel.map.has(h)) this.faviconIntel.map.set(h, u);
         }
       }
+      // CSP safety net: a URL the page's policy blocks renders as an
+      // INVISIBLE failure (no <img> error event for backgrounds), which is
+      // exactly how blank chips looked "painted" in earlier rounds. On
+      // Startpage only self/data/blob sources may paint (verified header:
+      // img-src 'self' blob: data: *.startpage.com); drop anything else
+      // from the paint maps and let monograms keep never-blank instead.
+      if (this.engine.id === "startpage") {
+        for (const [h, u] of Array.from(this.faviconIntel.map)) {
+          if (!this.isCspSafeFaviconUrl(u)) this.faviconIntel.map.delete(h);
+        }
+      }
       const nowFilled =
         this.faviconIntel.map.size > 0 || !!this.faviconIntel.pattern;
       this.log(
@@ -1427,6 +1456,25 @@ export class InfiniteScrollManager {
         return true;
       }
       return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * CSP paint-safety for Startpage (img-src 'self' blob: data:
+   * *.startpage.com — header verified live Aug 2026). data:/blob: always
+   * pass; http(s) must be startpage-hosted. Everything else would render
+   * as an invisible failure on this engine.
+   */
+  private isCspSafeFaviconUrl(raw: string): boolean {
+    if (/^data:/i.test(raw) || /^blob:/i.test(raw)) return true;
+    try {
+      const u = new URL(raw, window.location.href);
+      return (
+        /^https?:$/i.test(u.protocol) &&
+        /(^|\.)startpage\.com$/i.test(u.hostname)
+      );
     } catch {
       return false;
     }
