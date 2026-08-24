@@ -1121,7 +1121,8 @@ export class InfiniteScrollManager {
         try {
           let blobScripts = 0;
           const before = this.faviconInline.size;
-          for (const el of Array.from(sourceDoc.querySelectorAll("script"))) {
+          const scriptEls = Array.from(sourceDoc.querySelectorAll("script"));
+          for (const el of scriptEls) {
             const txt = el.textContent ?? "";
             if (txt.indexOf("faviconData") === -1 || txt.length >= 3_000_000) continue;
             blobScripts++;
@@ -1130,12 +1131,21 @@ export class InfiniteScrollManager {
               if (!this.faviconInline.has(h)) this.faviconInline.set(h, u);
             }
             if (r.via === "escaped") {
-              this.log("tier0 lenient:", `escaped-blob parsed, +${r.map.size} entries`);
+              this.log(
+                "tier0 lenient:",
+                `escaped-blob parsed, ${r.map.size} entries (${this.faviconInline.size - before} new after dedupe)`
+              );
             }
             // Diagnostic: blob present but nothing extracted means the
             // payload SHAPE drifted (nulls, renamed keys). Dump a bounded
             // sample so the next console log pins it without guessing.
-            if (this.faviconInline.size === before && !this.tier0SampleLogged) {
+            // Deferred to after the loop: an earlier script may parse fine,
+            // and a premature EMPTY dump would mislabel the page.
+            if (
+              this.faviconInline.size === before &&
+              !this.tier0SampleLogged &&
+              el === scriptEls[scriptEls.length - 1]
+            ) {
               this.tier0SampleLogged = true;
               const idx = txt.indexOf("faviconData");
               const occ = txt.split("faviconData").length - 1;
@@ -1341,7 +1351,8 @@ export class InfiniteScrollManager {
         this.faviconIntel.map.size > 0 || !!this.faviconIntel.pattern;
       this.log(
         "favicon intel captured:",
-        `${this.faviconIntel.map.size} hosts, pattern: ${this.faviconIntel.pattern ? "yes" : "none"}, inline: ${this.faviconInline.size}`
+        `${this.faviconIntel.map.size} hosts, pattern: ${this.faviconIntel.pattern ? "yes" : "none"}, inline: ${this.faviconInline.size}` +
+          (inlineVia === "escaped" ? " (escaped blob)" : "")
       );
       if (!nowFilled) {
         this.faviconRetryCount++;
