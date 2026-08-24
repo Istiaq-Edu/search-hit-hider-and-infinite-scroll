@@ -705,6 +705,14 @@ describe("InfiniteScrollManager fetched-style porting", () => {
     node.innerHTML =
       '<span class="favicon-container"><img src="https://cdn.example/real.png" alt=""></span>' +
       '<a href="https://somesite.example/page">t</a>';
+    // The painter now requires PROVEN pixels before honoring an <img>
+    // (dead images from Startpage's failing CDN must be replaceable).
+    // jsdom never loads images, so make ALL images report loaded at the
+    // PROTOTYPE level — appendNodes clones nodes via importNode, which
+    // copies attributes but not instance expandos. restoreAllMocks in the
+    // finally block undoes it.
+    vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
+    vi.spyOn(HTMLImageElement.prototype, "naturalWidth", "get").mockReturnValue(32);
     callAppend(manager, [node], parseHTML("<html><head></head></html>"));
 
     try {

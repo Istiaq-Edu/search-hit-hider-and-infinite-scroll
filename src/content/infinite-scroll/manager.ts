@@ -1197,12 +1197,15 @@ export class InfiniteScrollManager {
                 ? `https://icons.duckduckgo.com/ip3/${host}.ico`
                 : null);
             if (url) {
-              // Only REAL media children (<img>/<svg>/…) are icons worth
-              // preserving. Empty slot elements (<span/> placeholders the
-              // SSR ships inside the chip) are NOT icons — treating them
-              // as sacred made the guard bail on EVERY chip and paint
-              // nothing while the counter lied "filled".
-              if (this.hasRealMediaChild(icon)) {
+              // Only REAL art is worth preserving: vector/canvas media, or
+              // an <img> with proven pixels. A DEAD <img> (field evidence:
+              // Startpage's own CDN 403s) is removable garbage — clearing
+              // it before painting was the missing piece that made the
+              // painter skip every chip while counting success.
+              if (
+                this.hasRealMediaChild(icon) ||
+                this.hasLoadedImgChild(icon)
+              ) {
                 urlFilled++;
                 continue;
               }
@@ -1251,7 +1254,14 @@ export class InfiniteScrollManager {
     const bg = `hsl(${hue}, 62%, 42%)`;
     const fg = "hsl(0, 0%, 100%)";
     const label = (host.replace(/^www\./, "").split(".")[0] ?? "?").charAt(0).toUpperCase();
-    if (this.hasRealMediaChild(icon)) return; // real child markup wins
+    // Dead OR still-loading <img>s are removed: their src points at
+    // Startpage's own failing CDN endpoints (field evidence: AccessDenied),
+    // so waiting cannot recover them. Proven-pixel images / vector media
+    // still win over monograms.
+    for (const img of Array.from(icon.querySelectorAll("img"))) {
+      if (!(img.complete && img.naturalWidth > 0)) img.remove();
+    }
+    if (this.hasRealMediaChild(icon) || this.hasLoadedImgChild(icon)) return;
     icon.textContent = label;
     icon.style.backgroundColor = bg;
     icon.style.color = fg;
@@ -1272,7 +1282,26 @@ export class InfiniteScrollManager {
    * child as "already an icon" made the paint guard skip every chip.
    */
   private hasRealMediaChild(icon: HTMLElement): boolean {
-    return icon.querySelector("img, svg, canvas, video") !== null;
+    return icon.querySelector("svg, canvas, video") !== null;
+  }
+
+  /**
+   * Does this chip contain an <img> with PROVEN pixels?
+   *
+   * Field evidence (Aug 24 logs): current-generation chips ship an <img>
+   * whose load FAILS (page-1 error{target:img} events; Startpage's own CDN
+   * answers AccessDenied). Treating any <img> as "already real art" made
+   * the painter skip dead images and count them as painted — outcome said
+   * N urls while faviconsPainted stayed 0 and the chip rendered blank.
+   * Only complete, dimension-bearing images count now; a broken <img> is
+   * removable garbage, not art.
+   */
+  private hasLoadedImgChild(icon: HTMLElement): boolean {
+    const imgs = icon.querySelectorAll("img");
+    for (const img of Array.from(imgs)) {
+      if (img.complete && img.naturalWidth > 0) return true;
+    }
+    return false;
   }
 
   /**
@@ -1417,7 +1446,14 @@ export class InfiniteScrollManager {
           ? `https://icons.duckduckgo.com/ip3/${host}.ico`
           : null);
       if (url) {
-        if (this.hasRealMediaChild(icon)) continue;
+        // Proven pixels only — a dead <img> is garbage to clear, not art
+        // (mirrors the append-time painter; see hasLoadedImgChild).
+        if (
+          this.hasRealMediaChild(icon) ||
+          this.hasLoadedImgChild(icon)
+        ) {
+          continue;
+        }
         icon.textContent = "";
         icon.style.backgroundImage = `url("${url}")`;
         icon.style.backgroundSize = "contain";

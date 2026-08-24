@@ -259,4 +259,42 @@ describe("manager integration: tier-0 inline art paints clone chips", () => {
       container.remove();
     }
   });
+
+  it("a DEAD <img> child does not count as painted art — cleared and replaced (Aug 24 outcome-lie #3)", () => {
+    const doc = parseHTML('<div id="results"></div>');
+    const container = doc.querySelector("#results")!;
+    // Field anatomy: current chips ship an <img> whose src fails
+    // (error{target:img} on page 1; CDN AccessDenied). jsdom never loads
+    // images, so naturalWidth stays 0 — exactly the dead-image state.
+    const manager = new InfiniteScrollManager(
+      startpageEngine({ a: "https://de.wikipedia.org/wiki/Test" }),
+      container, () => {}, { maxPages: 5, portFetchedStyles: true }
+    );
+    vi.spyOn(
+      manager as unknown as { learnLiveFaviconPattern(): string | null },
+      "learnLiveFaviconPattern"
+    ).mockReturnValue(null);
+    const fetched = parseHTML(
+      "<html><head></head><body>" +
+        '<div class="result" data-k="a">' +
+        '<a class="favicon-link" href="https://de.wikipedia.org/wiki/Test">' +
+        '<span class="favicon-container"><div class="favicon">' +
+        '<img src="https://www.startpage.com/sp/cdn/favicons/favicon?h=dead.example" alt=""></div></span></a>' +
+        "</div>" +
+        "<script>" + SSR_BLOB.replace(/<\//g, "<\\/") + "</script>" +
+        "</body></html>"
+    );
+    (manager as unknown as { appendNodes(n: Element[], d?: Document): void })
+      .appendNodes(Array.from(fetched.querySelectorAll("div.result")), fetched);
+
+    try {
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const icon = page.querySelector(".result .favicon") as HTMLElement;
+      // Dead image gone, real art painted in its place.
+      expect(icon.querySelector("img")).toBeNull();
+      expect(icon.style.backgroundImage).toContain("data:image/png;base64,WIKI");
+    } finally {
+      container.remove();
+    }
+  });
 });
