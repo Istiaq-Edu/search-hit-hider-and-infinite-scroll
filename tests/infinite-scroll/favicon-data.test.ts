@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { extractFaviconData } from "../../src/content/infinite-scroll/favicon-data";
 import { InfiniteScrollManager } from "../../src/content/infinite-scroll/manager";
 import type { EngineAdapter } from "../../src/content/engines/base";
@@ -169,6 +169,43 @@ describe("manager integration: tier-0 inline art paints clone chips", () => {
       expect(pages.length).toBe(2);
       expect((pages[0] as HTMLElement).style.backgroundImage).toContain("FIRST");
       expect((pages[1] as HTMLElement).style.backgroundImage).toContain("FIRST");
+    } finally {
+      container.remove();
+    }
+  });
+
+  it("placeholder chip backgrounds are NOT counted as painted (outcome-counter lie, Aug 24 logs)", () => {
+    const doc = parseHTML('<div id="results"></div>');
+    const container = doc.querySelector("#results")!;
+    // Live anatomy: fetched chips ship with an emotion rule painting the
+    // search page's OWN url as their background. Inline style mirrors what
+    // the preserved stylesheet computes to.
+    const manager = new InfiniteScrollManager(
+      startpageEngine({ a: "https://de.wikipedia.org/wiki/Test" }),
+      container, () => {}, { maxPages: 5, portFetchedStyles: true }
+    );
+    vi.spyOn(
+      manager as unknown as { learnLiveFaviconPattern(): string | null },
+      "learnLiveFaviconPattern"
+    ).mockReturnValue(null);
+    const fetched = parseHTML(
+      "<html><head></head><body>" +
+        '<div class="result" data-k="a">' +
+        '<a class="favicon-link" href="https://de.wikipedia.org/wiki/Test">' +
+        '<span class="favicon-container"><div class="favicon" style="background-image:url(\'https://www.startpage.com/sp/search?query=test\')"></div></span></a>' +
+        "</div>" +
+        "<script>" + SSR_BLOB.replace(/<\//g, "<\\/") + "</script>" +
+        "</body></html>"
+    );
+    (manager as unknown as { appendNodes(n: Element[], d?: Document): void })
+      .appendNodes(Array.from(fetched.querySelectorAll("div.result")), fetched);
+
+    try {
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const icon = page.querySelector(".result .favicon") as HTMLElement;
+      // The placeholder must be REPLACED by the record's real art — not
+      // honored as "already painted".
+      expect(icon.style.backgroundImage).toContain("data:image/png;base64,WIKI");
     } finally {
       container.remove();
     }

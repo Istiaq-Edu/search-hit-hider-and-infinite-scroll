@@ -1116,13 +1116,18 @@ export class InfiniteScrollManager {
         this.engine.id === "startpage"
       ) {
         try {
+          let blobScripts = 0;
           for (const el of Array.from(sourceDoc.querySelectorAll("script"))) {
             const txt = el.textContent ?? "";
             if (txt.indexOf("faviconData") === -1 || txt.length >= 3_000_000) continue;
+            blobScripts++;
             for (const [h, u] of extractFaviconData(txt)) {
               if (!this.faviconInline.has(h)) this.faviconInline.set(h, u);
             }
           }
+          // Diagnostic: do fetched snapshots still carry the SSR blob at
+          // all? (Live page 1 stopped carrying it — inline:0 in field logs.)
+          this.log("tier0 scan:", `${blobScripts} fetched scripts contain faviconData, map now ${this.faviconInline.size}`);
         } catch { /* cosmetic — tier simply stays empty */ }
       }
       for (const node of appended) {
@@ -1132,9 +1137,14 @@ export class InfiniteScrollManager {
           let host: string;
           try { host = new URL(dest).hostname.replace(/^www\./, ""); } catch { continue; }
           for (const icon of this.getFaviconIconEls(node)) {
-            // Harvested inline icon (per-result emotion rules) — done.
+            // Already REALLY painted? (Placeholder backgrounds — the SSR's
+            // self-referential search-page URL — do NOT count: they look
+            // painted to a naive check while rendering as garbage.)
             const cur = icon.style.backgroundImage;
-            if (cur && cur !== "none") {
+            const curUrl = cur && cur !== "none"
+              ? (/url\((["']?)([^"')]+)\1\)/.exec(cur)?.[2] ?? null)
+              : null;
+            if (curUrl && !this.isSelfReferentialIconUrl(curUrl)) {
               urlFilled++;
               continue;
             }
@@ -1145,8 +1155,13 @@ export class InfiniteScrollManager {
                 ? pattern.replace("{domain}", host)
                 : null) ??
               // Third-party fallback is OPT-IN (default off): it would tell
-              // DuckDuckGo every auto-loaded destination via the URL.
-              (this.config.allowThirdPartyIcons
+              // DuckDuckGo every auto-loaded destination via the URL. It is
+              // also force-disabled on Startpage regardless of config: its
+              // CSP (img-src 'self' blob: data: *.startpage.com — verified
+              // live Aug 2026) blocks the request, and a blocked <img>-less
+              // background just renders as an empty chip, silently breaking
+              // the never-blank guarantee this painter exists for.
+              (this.config.allowThirdPartyIcons && this.engine.id !== "startpage"
                 ? `https://icons.duckduckgo.com/ip3/${host}.ico`
                 : null);
             if (url) {
@@ -1174,7 +1189,20 @@ export class InfiniteScrollManager {
       }
       this.log(
         "favicon paint outcome:",
-        `${urlFilled} urls, ${monograms} monograms`
+        `${urlFilled} urls, ${monograms} monograms — ` +
+          // Post-paint chip state: catches any pipeline stage that clears
+          // inline styles after we paint (the outcome counter lies when the
+          // paint is later wiped — faviconsPainted:0 in field logs).
+          (() => {
+            try {
+              const first = appended
+                .map((n) => this.getFaviconIconEls(n)[0])
+                .find(Boolean);
+              if (!first) return "chip: none";
+              const cs = window.getComputedStyle(first);
+              return `chip: bg=${cs.backgroundImage.slice(0, 60)} size=${cs.width}x${cs.height} visible=${cs.display !== "none" && cs.visibility !== "hidden"}`;
+            } catch { return "chip: ?"; }
+          })()
       );
     } catch { /* favicon assignment is cosmetic — never fail the append */ }
   }
@@ -1318,17 +1346,25 @@ export class InfiniteScrollManager {
     if (!dest) return;
     let host: string;
     try { host = new URL(dest).hostname.replace(/^www\./, ""); } catch { return; }
-    const liveIcons = this.faviconIntel?.map ?? new Map<string, string>();
+    const liveIcons = new Map(this.faviconInline);
+    for (const [h, u] of this.faviconIntel?.map ?? []) {
+      if (!liveIcons.has(h)) liveIcons.set(h, u);
+    }
     const pattern = this.faviconIntel?.pattern ?? null;
     for (const icon of this.getFaviconIconEls(node)) {
+      // Placeholder backgrounds don't count as painted — same rule as the
+      // append-time painter (see ensureCloneFavicons).
       const cur = icon.style.backgroundImage;
-      if (cur && cur !== "none") continue;
+      const curUrl = cur && cur !== "none"
+        ? (/url\((["']?)([^"')]+)\1\)/.exec(cur)?.[2] ?? null)
+        : null;
+      if (curUrl && !this.isSelfReferentialIconUrl(curUrl)) continue;
       const url =
         liveIcons.get(host) ??
         (pattern && pattern.includes("{domain}")
           ? pattern.replace("{domain}", host)
           : null) ??
-        (this.config.allowThirdPartyIcons
+        (this.config.allowThirdPartyIcons && this.engine.id !== "startpage"
           ? `https://icons.duckduckgo.com/ip3/${host}.ico`
           : null);
       if (url) {
@@ -1362,10 +1398,38 @@ export class InfiniteScrollManager {
         const host = this.hostOfChipResult(el);
         if (!host || map.has(host)) continue;
         const url = this.iconUrlOfChip(el);
-        if (url) map.set(host, url);
+        if (url && !this.isSelfReferentialIconUrl(url)) map.set(host, url);
       }
     } catch { /* ignore */ }
     return map;
+  }
+
+  /**
+   * Placeholder guard. Unhydrated chips carry the SSR's PLACEHOLDER
+   * background — the search page's OWN url (verified in the shipped emotion
+   * rule: .css-srotke{background-image:url(<the /sp/search document
+   * itself>)}). Harvesting it filled the intel map with 10 hosts of garbage
+   * and painted every clone with a stretched search-page image that reads
+   * exactly like "no favicon" while the counter said success. A chip URL is
+   * self-referential when it resolves to this document's own path (query /
+   * hash ignored), or is Startpage's search endpoint on ANY startpage
+   * domain (live markup ships it in absolute form).
+   */
+  private isSelfReferentialIconUrl(raw: string): boolean {
+    try {
+      const u = new URL(raw, window.location.href);
+      const here = new URL(window.location.href);
+      if (u.origin === here.origin && u.pathname === here.pathname) return true;
+      if (
+        /(^|\.)startpage\.com$/i.test(u.hostname) &&
+        /\/sp\/search/i.test(u.pathname)
+      ) {
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   /** Icon URL carried by a chip at any layer: CSS background or inner <img>. */
