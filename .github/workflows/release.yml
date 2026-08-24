@@ -1,0 +1,213 @@
+name: Release
+
+# The ONE workflow for this repo. Replaces deploy-website.yml and
+# manual-package.yml.
+#
+# Two modes, both MANUAL (Actions tab → Release → Run workflow):
+#
+#   1. release  — version bump → typecheck/tests/build/lint → extension
+#                 zip + AMO source zip → auto-generated changelog →
+#                 git tag + GitHub Release with both zips attached
+#   2. website  — deploy docs/site to GitHub Pages (no Jekyll anywhere)
+#
+# REQUIREMENT: repo Settings → Pages → Source must be "GitHub Actions".
+# The legacy "Deploy from branch" builder (Jekyll) is what broke CI in
+# Aug 2026 and must not be re-enabled.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        type: choice
+        required: true
+        default: "website"
+        options:
+          - website
+          - release
+      version:
+        description: "Release version (release mode only), e.g. 1.8.1"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------
+  # Mode: website — publish docs/site statically (no Jekyll)
+  # ---------------------------------------------------------------
+  website:
+    name: Deploy website
+    if: inputs.mode == 'website'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload static site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # ---------------------------------------------------------------
+  # Mode: release — gates, packages, changelog, GitHub Release
+  # ---------------------------------------------------------------
+  release:
+    name: Build and publish release
+    if: inputs.mode == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate version input
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$'; then
+            echo "::error::Invalid or missing version '$VERSION' — expected e.g. 1.8.1"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Apply version bump
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.VERSION;
+          for (const file of ['package.json', 'manifest.json']) {
+            const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+            json.version = version;
+            fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+          }
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          lock.version = version;
+          if (lock.packages && lock.packages['']) lock.packages[''].version = version;
+          fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
+          console.log('version ->', version);
+          NODE
+        env:
+          VERSION: ${{ env.VERSION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run lint:ts
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint extension package
+        run: npm run webext:lint
+
+      - name: Package extension zip
+        run: |
+          mkdir -p artifacts
+          (cd dist && zip -r "../artifacts/search-hit-hider-and-infinite-scroll-${VERSION}.zip" .)
+          unzip -l "artifacts/search-hit-hider-and-infinite-scroll-${VERSION}.zip" | grep -q manifest.json \
+            || { echo "::error::manifest.json missing from extension zip"; exit 1; }
+        env:
+          VERSION: ${{ env.VERSION }}
+
+      # AMO source submission: full repo (no .git/node_modules/dist) plus
+      # SOURCE-README.md explaining the esbuild bundle mapping.
+      - name: Package source-review zip
+        run: |
+          mkdir -p srcstage
+          git archive HEAD | tar -x -C srcstage
+          rm -rf srcstage/.github
+          cp SOURCE-README.md srcstage/SOURCE-README.txt
+          mkdir -p artifacts
+          (cd srcstage && zip -qr "../artifacts/shh-${VERSION}-source.zip" .)
+        env:
+          VERSION: ${{ env.VERSION }}
+
+      # Changelog from conventional commits since the previous tag
+      # (falls back to full history on first release).
+      - name: Generate release notes
+        run: |
+          PREV=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$PREV" ]; then RANGE="$PREV..HEAD"; SCOPE="Changes since $PREV";
+          else RANGE="HEAD"; SCOPE="Full history"; fi
+          echo "RANGE=$RANGE" >> "$GITHUB_ENV"
+          subjects() { git log "$RANGE" --format='%s' | grep -E "^$1" | sed -E "s/^$1(\\([^)]*\\))?!?: */- /" | sort -u; }
+          {
+            echo "**$SCOPE**"
+            FEATS=$(subjects 'feat');  FIXES=$(subjects 'fix')
+            PERF=$(subjects 'perf|Performance'); OTHER=$(subjects 'docs|chore|refactor')
+            [ -n "$FEATS" ] && { printf '\n### New\n%s\n' "$FEATS"; }
+            [ -n "$FIXES" ] && { printf '\n### Fixed\n%s\n' "$FIXES"; }
+            [ -n "$PERF" ] && { printf '\n### Performance\n%s\n' "$PERF"; }
+            [ -n "$OTHER" ] && { printf '\n### Other\n%s\n' "$OTHER"; }
+          } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json manifest.json
+          if git diff --cached --quiet; then
+            echo "::notice::Version files already at $VERSION"
+          else
+            git commit -m "release: v${VERSION}"
+            git push origin HEAD:"${GITHUB_REF_NAME}"
+          fi
+        env:
+          VERSION: ${{ env.VERSION }}
+
+      - name: Create and push tag
+        run: |
+          TAG="v${VERSION}"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
+            echo "::error::Tag $TAG already exists on origin"
+            exit 1
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+        env:
+          VERSION: ${{ env.VERSION }}
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          body_path: RELEASE_NOTES.md
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/search-hit-hider-and-infinite-scroll-${{ env.VERSION }}.zip
+            artifacts/shh-${{ env.VERSION }}-source.zip
+
+      - name: Upload artifacts to the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-v${{ env.VERSION }}
+          path: artifacts/*
+          if-no-files-found: error
