@@ -76,6 +76,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history + tags: the changelog generator runs
+          # `git describe --tags`; a shallow clone sees no tags and would
+          # silently fall back to "full history" notes on EVERY release.
+          fetch-depth: 0
 
       - name: Validate version input
         run: |
@@ -126,41 +131,27 @@ jobs:
       - name: Lint extension package
         run: npm run webext:lint
 
-      - name: Package extension zip
-        run: |
-          mkdir -p artifacts
-          (cd dist && zip -r "../artifacts/search-hit-hider-and-infinite-scroll-${VERSION}.zip" .)
-          unzip -l "artifacts/search-hit-hider-and-infinite-scroll-${VERSION}.zip" | grep -q manifest.json \
-            || { echo "::error::manifest.json missing from extension zip"; exit 1; }
-        env:
-          VERSION: ${{ env.VERSION }}
-
-      # AMO source submission: full repo (no .git/node_modules/dist) plus
-      # SOURCE-README.md explaining the esbuild bundle mapping.
-      - name: Package source-review zip
-        run: |
-          mkdir -p srcstage
-          git archive HEAD | tar -x -C srcstage
-          rm -rf srcstage/.github
-          cp SOURCE-README.md srcstage/SOURCE-README.txt
-          mkdir -p artifacts
-          (cd srcstage && zip -qr "../artifacts/shh-${VERSION}-source.zip" .)
-        env:
-          VERSION: ${{ env.VERSION }}
-
       # Changelog from conventional commits since the previous tag
-      # (falls back to full history on first release).
+      # (falls back to full history on first release). Runs BEFORE the
+      # bump commit so the range is computed on the pre-release HEAD;
+      # the bump commit itself ("release: vX") would otherwise pollute it.
       - name: Generate release notes
         run: |
           PREV=$(git describe --tags --abbrev=0 2>/dev/null || true)
           if [ -n "$PREV" ]; then RANGE="$PREV..HEAD"; SCOPE="Changes since $PREV";
-          else RANGE="HEAD"; SCOPE="Full history"; fi
+          else RANGE="--all"; SCOPE="Full history"; fi
           echo "RANGE=$RANGE" >> "$GITHUB_ENV"
-          subjects() { git log "$RANGE" --format='%s' | grep -E "^$1" | sed -E "s/^$1(\\([^)]*\\))?!?: */- /" | sort -u; }
+          # Anchored alternation — unanchored groups match INSIDE words
+          # (e.g. "engine-anchored" contains "chore") and corrupt output.
+          subjects() {
+            git log $RANGE --format='%s' \
+              | grep -E "^($1)(\([^)]*\))?(!?:)" \
+              | sed -E "s/^($1)(\([^)]*\))?!?: */- /" | sort -u
+          }
           {
             echo "**$SCOPE**"
             FEATS=$(subjects 'feat');  FIXES=$(subjects 'fix')
-            PERF=$(subjects 'perf|Performance'); OTHER=$(subjects 'docs|chore|refactor')
+            PERF=$(subjects 'perf|[Pp]erformance'); OTHER=$(subjects 'docs|chore|refactor')
             [ -n "$FEATS" ] && { printf '\n### New\n%s\n' "$FEATS"; }
             [ -n "$FIXES" ] && { printf '\n### Fixed\n%s\n' "$FIXES"; }
             [ -n "$PERF" ] && { printf '\n### Performance\n%s\n' "$PERF"; }
@@ -179,6 +170,28 @@ jobs:
             git commit -m "release: v${VERSION}"
             git push origin HEAD:"${GITHUB_REF_NAME}"
           fi
+        env:
+          VERSION: ${{ env.VERSION }}
+
+      # AFTER the bump commit, so manifest/package versions inside the
+      # source zip match the addon zip. A mismatch here is exactly what
+      # AMO reviewers flag.
+      - name: Package source-review zip
+        run: |
+          mkdir -p srcstage artifacts
+          git archive HEAD | tar -x -C srcstage
+          rm -rf srcstage/.github
+          cp SOURCE-README.md srcstage/SOURCE-README.txt
+          (cd srcstage && zip -qr "../artifacts/shh-${VERSION}-source.zip" .)
+        env:
+          VERSION: ${{ env.VERSION }}
+
+      - name: Package extension zip
+        run: |
+          mkdir -p artifacts
+          (cd dist && zip -r "../artifacts/search-hit-hider-and-infinite-scroll-${VERSION}.zip" .)
+          unzip -l "artifacts/search-hit-hider-and-infinite-scroll-${VERSION}.zip" | grep -q manifest.json \
+            || { echo "::error::manifest.json missing from extension zip"; exit 1; }
         env:
           VERSION: ${{ env.VERSION }}
 

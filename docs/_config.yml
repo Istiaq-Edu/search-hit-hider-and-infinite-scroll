@@ -5,7 +5,7 @@
 # code fences and chokes on them (Liquid::SyntaxError, Aug 2026). They are
 # working notes, not site content — keep them out of the build entirely.
 #
-# The real site lives in docs/site/ and is deployed by
-# .github/workflows/deploy-website.yml (no Jekyll involved).
+# The real site lives in docs/site/ and is deployed by the 'website'
+# mode of .github/workflows/release.yml (no Jekyll involved).
 exclude:
   - plans
