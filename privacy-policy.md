@@ -13,9 +13,9 @@ Search-Hit-Hider does not collect, transmit, or share any personal data. Everyth
 
 ## Data Transmission
 
-- This extension **never contacts any external server**.
-- There is **no telemetry**, no analytics, no error reporting, no update checks beyond Firefox's standard extension update mechanism.
+- This extension makes **no requests to any server operated by us** and has **no telemetry, analytics, error reporting, or update checks** beyond Firefox's standard extension update mechanism.
 - No remote code is ever fetched or executed.
+- **Favicon images**: on some search engines (e.g. Yandex), automatically loaded results may display site icons fetched from that search engine's **own first-party icon service** (`favicon.yandex.net`). These are the exact same requests the search engine itself makes when rendering page 1 — the extension adds no third-party requests and discloses nothing to anyone the engine doesn't already see. On engines without a first-party service, icons fall back to locally generated letter monograms; no image requests leave the engine's ecosystem.
 
 ## Permissions
 
@@ -24,7 +24,7 @@ Search-Hit-Hider does not collect, transmit, or share any personal data. Everyth
 
 ## Third Parties
 
-None. This extension has no third-party dependencies at runtime that communicate externally.
+None. The extension never communicates with any party other than the search engine whose page you are browsing — and only via that engine's own existing endpoints.
 
 ## Contact
 

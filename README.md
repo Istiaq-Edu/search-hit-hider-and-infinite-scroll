@@ -64,7 +64,7 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 - **MutationObserver** — catches results added by infinite scroll and AJAX pagination
 - **Preload script** — hides known domains before the first paint (zero flicker)
 - **Firefox Sync** — preferences sync across devices; block lists stay local
-- **No telemetry** — zero external requests, zero data collection
+- **No telemetry** — no data collection, no servers of our own; favicon art comes only from each engine's own icon service
 
 ### Infinite Scroll
 - **Auto-load more results** — scroll to the bottom and the next page loads automatically
@@ -182,7 +182,7 @@ npm run webext:lint   # AMO linter (addons-linter)
 
 - Block list stored in `browser.storage.local` (device-local, never synced)
 - Preferences stored in `browser.storage.sync` (synced via Firefox Sync if enabled)
-- Zero external network requests at runtime
+- No requests to any server operated by us at runtime (engine-native favicon endpoints excepted — see privacy-policy.md)
 - No analytics, no crash reporting, no telemetry of any kind
 - Source is fully auditable — no minified blobs, no remote scripts
 
