@@ -1258,12 +1258,15 @@ export class InfiniteScrollManager {
     const bg = `hsl(${hue}, 62%, 42%)`;
     const fg = "hsl(0, 0%, 100%)";
     const label = (host.replace(/^www\./, "").split(".")[0] ?? "?").charAt(0).toUpperCase();
-    // Dead OR still-loading <img>s are removed: their src points at
-    // Startpage's own failing CDN endpoints (field evidence: AccessDenied),
-    // so waiting cannot recover them. Proven-pixel images / vector media
-    // still win over monograms.
+    // Remove only CONFIRMED-BROKEN images (complete && naturalWidth === 0 —
+    // their src failed; on Startpage that's the CDN AccessDenied class).
+    // Still-LOADING images are kept: the letter + background paint
+    // underneath, and whichever finishes wins — deleting a pending image
+    // destroyed art that was about to arrive (field evidence: Yandex page-2
+    // icons load a beat after append). Proven-pixel images / vector media
+    // then suppress the visible letter.
     for (const img of Array.from(icon.querySelectorAll("img"))) {
-      if (!(img.complete && img.naturalWidth > 0)) img.remove();
+      if (img.complete && img.naturalWidth === 0) img.remove();
     }
     if (this.hasRealMediaChild(icon) || this.hasLoadedImgChild(icon)) return;
     icon.textContent = label;
@@ -1620,14 +1623,18 @@ export class InfiniteScrollManager {
           // Path-embedded full-URL destinations:
           //   https://favicon.yandex.net/favicon/v2/https://<site>?size=16
           // First-party only: the service must belong to the engine we are
-          // browsing (it already sees every destination when painting page
-          // 1 — reusing it discloses nothing new).
+          // browsing (it already receives every destination when painting
+          // page 1 — reusing it discloses nothing new). Matched against an
+          // allowlist of first-party favicon-service hosts per engine TLD,
+          // because services live on sibling domains (favicon.yandex.net vs
+          // yandex.com) that a strict same-host check wrongly rejects.
           const pm = /^(https:\/\/favicon\.[a-z0-9.-]+\/(?:[^?"']*\/)*)(https?:\/\/[^/"']+)\?(.*)$/i.exec(u);
           if (pm && pm[2]) {
             try {
               const svcHost = new URL(u).hostname;
+              const engineApex = engineHost.replace(/^www\./, "").replace(/^[a-z]+\./i, "");
               const sameParty =
-                svcHost === engineHost || svcHost.endsWith("." + engineHost.replace(/^www\./, ""));
+                svcHost.endsWith("." + engineApex) || svcHost === engineHost;
               const destHost = new URL(pm[2]).hostname.replace(/^www\./, "");
               const ownResult = destHost === this.hostOfChipResult(el);
               if (
