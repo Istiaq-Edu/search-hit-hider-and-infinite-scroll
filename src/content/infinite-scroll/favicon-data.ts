@@ -113,3 +113,50 @@ export function extractFaviconData(jsonText: string): Map<string, string> {
   }
   return map;
 }
+
+/**
+ * Single-pass unescape of JSON-style escapes in a larger text blob. Unlike
+ * String.replace chains, pair boundaries survive (\\" does not become a
+ * bare quote half-way through a \\\\ sequence).
+ */
+function unescapeJsonish(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\" && i + 1 < text.length) {
+      const next = text[i + 1];
+      i++;
+      if (next === '"') out += '"';
+      else if (next === "/") out += "/";
+      else if (next === "\\") out += "\\";
+      else out += ch + next; // unknown escape: keep verbatim
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/** Where a successful extraction came from — diagnostics. */
+export type ExtractVia = "plain" | "escaped" | "none";
+
+/**
+ * Lenient front door: try the plain parser first; when the blob mentions
+ * faviconData but yields NOTHING, retry once on an unescaped copy. Live
+ * generations increasingly double-encode the state blob
+ * (\"faviconData\":\"data:image/…\") — the plain regex cannot match across
+ * escape backslashes, which showed up in the field as
+ * "tier0 scan: 1 … map now 0".
+ */
+export function extractFaviconDataAny(
+  jsonText: string
+): { map: Map<string, string>; via: ExtractVia } {
+  const plain = extractFaviconData(jsonText);
+  if (plain.size > 0) return { map: plain, via: "plain" };
+  if (!jsonText || jsonText.indexOf("faviconData") === -1) {
+    return { map: plain, via: "none" };
+  }
+  const loose = extractFaviconData(unescapeJsonish(jsonText));
+  if (loose.size > 0) return { map: loose, via: "escaped" };
+  return { map: loose, via: "none" };
+}

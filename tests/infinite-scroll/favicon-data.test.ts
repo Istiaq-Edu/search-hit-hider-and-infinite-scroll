@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractFaviconData } from "../../src/content/infinite-scroll/favicon-data";
+import {
+  extractFaviconData,
+  extractFaviconDataAny,
+} from "../../src/content/infinite-scroll/favicon-data";
 import { InfiniteScrollManager } from "../../src/content/infinite-scroll/manager";
 import type { EngineAdapter } from "../../src/content/engines/base";
 
@@ -77,6 +80,27 @@ describe("extractFaviconData", () => {
       '{"results":[{"url":"http://web.archive.org/web/20250429215101/https://www.test.de/",' +
       '"sourceIndex":0,"faviconData":"data:image/png;base64,ARC"}]}';
     expect(extractFaviconData(blob).get("test.de")).toBe("data:image/png;base64,ARC");
+  });
+
+  it("extractFaviconDataAny: parses DOUBLE-ENCODED blobs via the lenient pass", () => {
+    // Field signature Aug 24: tier0 scan found faviconData but map stayed 0.
+    // Newer builds can ship the state JSON as an escaped string inside a
+    // script; the plain regex cannot match across \\" sequences.
+    const inner =
+      '{"results":[{"url":"https://de.wikipedia.org/wiki/Test","sourceIndex":0,' +
+      '"faviconData":"data:image/png;base64,WIKI"}]}';
+    const doubleEncoded = inner.replace(/"/g, '\\"');
+    const plain = extractFaviconData(doubleEncoded);
+    expect(plain.size).toBe(0); // strict parser must fail here…
+    const r = extractFaviconDataAny(doubleEncoded);
+    expect(r.via).toBe("escaped");
+    expect(r.map.get("de.wikipedia.org")).toBe("data:image/png;base64,WIKI");
+  });
+
+  it("extractFaviconDataAny: plain blobs short-circuit without the loose pass", () => {
+    const r = extractFaviconDataAny(SSR_BLOB);
+    expect(r.via).toBe("plain");
+    expect(r.map.size).toBe(2);
   });
 });
 

@@ -2,7 +2,7 @@ import type { EngineAdapter } from "../engines/base";
 import { Sentinel } from "./sentinel";
 import { Deduper, unwrapProxyDestination } from "./deduper";
 import { fetchPage } from "./fetcher";
-import { extractFaviconData } from "./favicon-data";
+import { extractFaviconDataAny } from "./favicon-data";
 import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type ScrollState } from "./persist";
 
 // Inline CSS properties that truncate text in server-rendered HTML from SPAs.
@@ -1125,8 +1125,12 @@ export class InfiniteScrollManager {
             const txt = el.textContent ?? "";
             if (txt.indexOf("faviconData") === -1 || txt.length >= 3_000_000) continue;
             blobScripts++;
-            for (const [h, u] of extractFaviconData(txt)) {
+            const r = extractFaviconDataAny(txt);
+            for (const [h, u] of r.map) {
               if (!this.faviconInline.has(h)) this.faviconInline.set(h, u);
+            }
+            if (r.via === "escaped") {
+              this.log("tier0 lenient:", `escaped-blob parsed, +${r.map.size} entries`);
             }
             // Diagnostic: blob present but nothing extracted means the
             // payload SHAPE drifted (nulls, renamed keys). Dump a bounded
@@ -1134,8 +1138,8 @@ export class InfiniteScrollManager {
             if (this.faviconInline.size === before && !this.tier0SampleLogged) {
               this.tier0SampleLogged = true;
               const idx = txt.indexOf("faviconData");
-              const occ = (txt.match(/faviconData/g) ?? []).length;
-              const datas = (txt.match(/data:image/g) ?? []).length;
+              const occ = txt.split("faviconData").length - 1;
+              const datas = txt.split("data:image").length - 1;
               const sample = txt.slice(Math.max(0, idx - 100), idx + 240);
               this.log(
                 "tier0 EMPTY sample:",
@@ -1289,14 +1293,19 @@ export class InfiniteScrollManager {
         (this.faviconIntel.map.size === 0 && !this.faviconIntel.pattern);
       if (!wasEmpty) return;
       let inlineMap = new Map<string, string>();
+      let inlineVia: "plain" | "escaped" | "none" = "none";
       try {
         // Live document first (covers page-1 results even when their chips
         // never got painted); fetched snapshots merge in per append.
         for (const el of Array.from(document.querySelectorAll("script"))) {
           const txt = el.textContent ?? "";
           if (txt.indexOf("faviconData") !== -1 && txt.length < 3_000_000) {
-            inlineMap = extractFaviconData(txt);
-            if (inlineMap.size > 0) break;
+            const r = extractFaviconDataAny(txt);
+            if (r.map.size > 0) {
+              inlineMap = r.map;
+              inlineVia = r.via;
+              break;
+            }
           }
         }
       } catch { /* cosmetic — fall through to chip harvesting */ }
