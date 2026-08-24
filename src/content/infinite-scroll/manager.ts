@@ -1542,10 +1542,16 @@ export class InfiniteScrollManager {
       window.getComputedStyle(chip).backgroundImage
     );
     if (m?.[2]) return m[2];
-    const img = chip.matches("img")
-      ? (chip as HTMLImageElement)
-      : chip.querySelector<HTMLImageElement>("img[src]");
-    return img?.src || null;
+    // Proven pixels only: a dead <img> (Startpage's CDN 403s) must not
+    // seed intel with URLs that would paint invisible failures onto
+    // clones — the same disease hasLoadedImgChild cures at paint time.
+    const imgs = chip.matches("img")
+      ? [chip as HTMLImageElement]
+      : Array.from(chip.querySelectorAll<HTMLImageElement>("img[src]"));
+    for (const img of imgs) {
+      if (img.complete && img.naturalWidth > 0 && img.src) return img.src;
+    }
+    return null;
   }
 
   /** Destination host of the result a favicon chip belongs to. */

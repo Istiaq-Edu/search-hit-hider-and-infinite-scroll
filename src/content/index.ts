@@ -387,13 +387,14 @@ function tryStartInfiniteScroll(retriesLeft = 25): void {
         // Startpage's fetched SSR markup uses class names the live
         // client-rendered stylesheet never defines.
         portFetchedStyles: engine.id === "startpage",
-        // Third-party icon service ON: page-2+ domains differ from page-1,
-        // so the same-domain map misses most chips; the learned pattern is
-        // dead in the current build (pattern: none in live logs). Without
-        // this tier, users get monograms instead of real icons. Startpage's
-        // CSP (img-src *.startpage.com) blocks the request there anyway —
-        // no new disclosure on this engine, real icons everywhere else.
-        allowThirdPartyIcons: true,
+        // Third-party icon service OFF: it would disclose every auto-loaded
+        // destination to icons.duckduckgo.com via the URL path, violating
+        // README "zero external network requests", privacy-policy.md, and
+        // the AMO data_collection:none declaration. Startpage — the engine
+        // that needs favicons most — is force-off regardless (its CSP
+        // blocks the request); other engines fall back to monograms, which
+        // 1.6.2 shipped happily. Revisit only with a user-facing toggle.
+        allowThirdPartyIcons: false,
       }
     );
     infiniteScrollManager.init();
@@ -718,9 +719,9 @@ async function refreshPrefs(): Promise<void> {
             // Startpage's fetched SSR markup uses class names the live
             // client-rendered stylesheet never defines.
             portFetchedStyles: engine.id === "startpage",
-            // See tryStartInfiniteScroll: third-party tier on for real
-            // icons (CSP-blocked on Startpage itself; useful elsewhere).
-            allowThirdPartyIcons: true,
+            // See tryStartInfiniteScroll: third-party tier stays off to
+            // honor the zero-external-requests privacy promise.
+            allowThirdPartyIcons: false,
           }
         );
         infiniteScrollManager.init();
