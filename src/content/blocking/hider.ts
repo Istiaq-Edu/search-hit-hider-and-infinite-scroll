@@ -181,6 +181,15 @@ export function restoreResult(node: Element): void {
   // Remove the preload marker so the preload CSS rule
   // ([data-shh-preloaded="true"]{display:none!important}) stops applying.
   node.removeAttribute("data-shh-preloaded");
+  // ...and INNER preload marks too (A2 F2a): when the adapter offered the
+  // wrapper while the preload hid an inner node, unblocking must lift every
+  // preload hide in the subtree — the Show path (showOnce) already does;
+  // without this, Unblock left the result visible but hollow.
+  node.querySelectorAll("[data-shh-preloaded]").forEach((inner) => {
+    (inner as HTMLElement).style.removeProperty("display");
+    inner.removeAttribute("data-shh-preloaded");
+    inner.classList.remove("shh-hidden");
+  });
   node.classList.remove(CLASS_HIDDEN, CLASS_PBAN, CLASS_SHOWN_RESULT);
 }
 
