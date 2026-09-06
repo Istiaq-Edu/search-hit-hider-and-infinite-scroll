@@ -397,6 +397,13 @@ import {
   //     blocked domain hide an entire section.
   //   • The JS path CAN tell, via looksLikeGoogleSection(), so it is safe here.
   function structuralResults(): Element[] {
+    // Google-only (A2 F6): the Google stream IDs (#rso/#search/#res/
+    // #center_col) are resolved for EVERY engine here while the observer
+    // gates the same resolution by isGoogle. A non-Google page that
+    // coincidentally carries one of those ids would feed its children to
+    // tryHide WITHOUT the Google-only section/aggregate fail-open guards —
+    // a blocked first link could hide a whole multi-result wrapper.
+    if (!isGoogle) return [];
     const stream = resolveGoogleStream(document);
     if (!stream) return [];
     const out: Element[] = [];
@@ -860,7 +867,16 @@ import {
     // the existing Case D code walks up to the nearest result container and
     // re-calls tryHide() — which re-evaluates the node and re-sets the
     // attribute if the domain is still blocked.
-    attributeFilter: ["href", "data-href", "data-shh-preloaded"],
+    //
+    // data-shh-ok is watched for the same reason (A1 finding 2, 2026-09-06
+    // review): the reveal stamp that keeps APPENDED pages visible is exactly
+    // this attribute. If Google's reconciliation ever strips it from an
+    // appended node, the cover CSS (opacity:0) re-applies and — without this
+    // watch — no reveal net exists post-insert: the page would go invisible
+    // forever. Case D's walk-up + tryHide() re-derives the domain and
+    // re-stamps either ok (unblocked) or preloaded+hidden (blocked), the
+    // same self-heal loop that already covers data-shh-preloaded.
+    attributeFilter: ["href", "data-href", "data-shh-preloaded", "data-shh-ok"],
   });
 
 })();

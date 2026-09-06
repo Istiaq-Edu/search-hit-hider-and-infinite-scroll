@@ -121,7 +121,13 @@ export function extractFaviconData(jsonText: string): Map<string, string> {
     segStart = match.index + match[0].length;
 
     const iconRaw = decodeJsonString(match[1] ?? "");
-    if (!iconRaw || !/^data:image\//i.test(iconRaw)) continue;
+    // Charset-hardened (2026-09-06 security review, A4 Q2): the old
+    // /^data:image\//i prefix check let a value like
+    //   data:image/png;base64,AAA"), url("https://attacker/pixel
+    // through — decoded, that closes the url("...") we wrap it in and adds a
+    // second background layer = a silent beacon. The full-shape regex admits
+    // only base64 image payloads with no quote/paren/comma characters.
+    if (!iconRaw || !/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]*$/i.test(iconRaw)) continue;
 
     const host = hostOfSegment(segment);
     if (!host) continue;

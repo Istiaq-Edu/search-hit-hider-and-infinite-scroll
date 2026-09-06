@@ -42,7 +42,13 @@ const PALETTE_PROPS =
 // Values that smuggle paint in through otherwise-innocent properties
 // (e.g. `-webkit-text-fill`, gradients on `background-image` are already
 // caught by the property list; this catches color-bearing values elsewhere).
-const PALETTE_VALUES = /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(|\bcolor-scheme\b|gradient\(/i;
+// url( added 2026-09-06 (A4 Q3): a fetched inline style like
+// cursor:url(https://attacker/pixel),auto passed BOTH gates (cursor is not a
+// palette property; the value has no hex/rgb/gradient) and was ported onto
+// clones — a no-consent tracking beacon on hover. The favicon-subtree
+// exception in sanitizeInlineStyles/harvestRule still lets legitimate
+// url(data:) icon art through.
+const PALETTE_VALUES = /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(|\bcolor-scheme\b|gradient\(|\burl\(/i;
 
 // Pure-geometry exceptions inside palette-named families: these carry no
 // paint and must survive (favicon chips are circles via border-radius).
@@ -199,8 +205,27 @@ export class InfiniteScrollManager {
     window.removeEventListener("scroll", this.onScroll);
     window.removeEventListener("beforeunload", this.saveScrollStateInternal);
     window.removeEventListener("pagehide", this.saveScrollStateInternal);
+    // Navigation listeners too (A1 7b): without this, a leaked closure fired
+    // on the next popstate/hashchange would call handleNavigation() on this
+    // DESTROYED manager — re-initializing infinite scroll the user had just
+    // toggled off — and after a later toggle-on, TWO managers would race the
+    // same DOM (duplicate sentinels, duplicate appends).
+    this.removeNavigationListeners();
     this.removePaginationListeners();
+    // Hand the native pager back (S2): destroy() runs on toggle-off and on
+    // SPA re-search — in both cases the engine's own pager must reappear so
+    // the user can paginate manually. handleNavigation() re-hides it on the
+    // fresh results page.
+    this.restorePagination();
     this.pageContainers.clear();
+  }
+
+  private removeNavigationListeners(): void {
+    if (this.onNavigate) {
+      window.removeEventListener("popstate", this.onNavigate);
+      window.removeEventListener("hashchange", this.onNavigate);
+      this.onNavigate = null;
+    }
   }
 
   handleNavigation(): void {
@@ -214,6 +239,10 @@ export class InfiniteScrollManager {
     this.hasMore = true;
     this.isLoading = false;
     this.currentPage = 1;
+    // A3 F2: a fresh SERP can have favicon chips even when the previous
+    // search's captures exhausted the retry budget — without this reset,
+    // intel stayed permanently dead for the whole SPA session.
+    this.faviconRetryCount = 0;
     this.pageContainers.clear();
     // New search = new result domains: page-1 icon intel is stale by
     // definition and must be recaptured on the next append.
@@ -232,15 +261,33 @@ export class InfiniteScrollManager {
     }
   }
 
+  /** Elements the native pager was hiding on — remembered so it can be
+   *  restored (S2, 2026-09-06 review): nothing ever un-hid the pager, so
+   *  toggling infinite scroll off mid-session (or reaching maxPages) left
+   *  the user with NO way to paginate manually until a full reload. */
+  private hiddenPagerEls: HTMLElement[] = [];
+
   private hidePagination(): void {
     const selectors = this.engine.getPaginationSelectors?.();
     if (!selectors) return;
+    this.hiddenPagerEls = [];
     for (const sel of selectors) {
       const els = document.querySelectorAll(sel);
       for (const el of els) {
-        (el as HTMLElement).style.display = "none";
+        const html = el as HTMLElement;
+        this.hiddenPagerEls.push(html);
+        html.style.display = "none";
       }
     }
+  }
+
+  /** Restore the native pager (display reversal). Safe when nothing was
+   *  hidden — the elements are only cleared by hidePagination itself. */
+  private restorePagination(): void {
+    for (const el of this.hiddenPagerEls) {
+      try { el.style.removeProperty("display"); } catch { /* detached */ }
+    }
+    this.hiddenPagerEls = [];
   }
 
   /**
@@ -298,14 +345,24 @@ export class InfiniteScrollManager {
     }
   }
 
+  /** Navigation listener retained so destroy() can remove it (A1 finding 7b:
+   *  leaked popstate/hashchange closures resurrected infinite scroll after
+   *  the user toggled it off and pressed Back — handleNavigation() on a
+   *  destroyed manager re-inits it against the user's pref). */
+  private onNavigate: (() => void) | null = null;
+
   private startNavigationDetection(): void {
-    const onNavigate = () => {
+    // Remove any pair a previous init() on this instance registered —
+    // handleNavigation() destroys and re-inits on the SAME object, so a
+    // fresh init must never stack a second listener pair.
+    this.removeNavigationListeners();
+    this.onNavigate = () => {
       if (window.location.href !== this.currentUrl) {
         this.handleNavigation();
       }
     };
-    window.addEventListener("popstate", onNavigate);
-    window.addEventListener("hashchange", onNavigate);
+    window.addEventListener("popstate", this.onNavigate);
+    window.addEventListener("hashchange", this.onNavigate);
     // Fallback polling for engines that use history.pushState without popstate
     this.urlCheckInterval = setInterval(() => {
       if (window.location.href !== this.currentUrl) {
@@ -320,6 +377,9 @@ export class InfiniteScrollManager {
     if (this.currentPage >= this.config.maxPages) {
       this.hasMore = false;
       this.sentinel?.setState("done");
+      // Release the native pager (S2): at maxPages the auto-loader stops by
+      // design — the user must be able to continue manually from here.
+      this.restorePagination();
       return;
     }
 
@@ -461,6 +521,9 @@ export class InfiniteScrollManager {
       }
 
       this.sentinel?.setState(this.hasMore ? "idle" : "done");
+      // Session over (genuine end / 2 empties / 3 strikes) → hand pagination
+      // back to the engine's native pager (S2).
+      if (!this.hasMore) this.restorePagination();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (this.destroyed) return;
@@ -596,12 +659,16 @@ export class InfiniteScrollManager {
             : `@supports ${rule.conditionText}`;
           out.push(`${condition}{${inner.join("\n")}}`);
         }
-      } else if (
-        rule instanceof CSSKeyframesRule || rule instanceof CSSFontFaceRule
-      ) {
-        // Global by design — animations and font definitions have no selectors
-        // to scope and are safe (or required) outside the container.
+      } else if (rule instanceof CSSKeyframesRule) {
+        // Global by design — animations have no selectors to scope and are
+        // safe outside the container.
         out.push(rule.cssText);
+      } else if (rule instanceof CSSFontFaceRule) {
+        // @font-face DROPPED (A4 Q3, 2026-09-06): it is global with no
+        // selector to scope, and its src:url(...) is a fetch of
+        // attacker-controllable origin when the fetched page is hostile.
+        // Glyph data could also redraw displayed text. The palette gates
+        // exist precisely to keep fetched resources off the live page.
       } else {
         // Anything else (@import, @charset, @namespace, unknown at-rules):
         // DROP. These act document-globally — an @import would fetch remote
@@ -1304,7 +1371,12 @@ export class InfiniteScrollManager {
             // as background-image spans like Startpage. A loaded img or
             // data: art is already painted; a blank/dead one gets re-pointed
             // at Google's first-party s2 endpoint. Never blank.
-            if (icon.tagName === "IMG") {
+            // ENGINE-GATED (A2 F1): Brave's chips are ALSO favicon-classed
+            // <img>s (imgs.search.brave.com) — un-gated, this branch
+            // re-pointed every page-2+ Brave destination at google.com/s2
+            // (privacy leak; CSP-blocked renders blank). Other engines fall
+            // through to the background/monogram paths.
+            if (icon.tagName === "IMG" && this.engine.id === "google") {
               const img = icon as HTMLImageElement;
               if (img.complete && img.naturalWidth > 0) { urlFilled++; continue; }
               const src = img.src || "";
@@ -1321,6 +1393,10 @@ export class InfiniteScrollManager {
               urlFilled++;
               continue;
             }
+            // Non-Google <img> chips (Brave, others): the img IS the engine's
+            // own art — leave the src alone (re-pointing would leak the
+            // destination to a third party). Count as painted.
+            if (icon.tagName === "IMG") { urlFilled++; continue; }
             // Already REALLY painted? (Placeholder backgrounds — the SSR's
             // self-referential search-page URL — do NOT count: they look
             // painted to a naive check while rendering as garbage.)
@@ -1607,7 +1683,8 @@ export class InfiniteScrollManager {
     const pattern = this.faviconIntel?.pattern ?? null;
     for (const icon of this.getFaviconIconEls(node)) {
       // ── Google: chip is an <img> — re-point src, never background ──────
-      if (icon.tagName === "IMG") {
+      // ENGINE-GATED like the append-time painter (A2 F1).
+      if (icon.tagName === "IMG" && this.engine.id === "google") {
         const img = icon as HTMLImageElement;
         if (img.complete && img.naturalWidth > 0) continue;
         const src = img.src || "";
@@ -1619,6 +1696,8 @@ export class InfiniteScrollManager {
         if (src !== s2) img.src = s2;
         continue;
       }
+      // Non-Google <img> chips: engine's own art — never re-point.
+      if (icon.tagName === "IMG") continue;
       // Placeholder backgrounds don't count as painted — same rule as the
       // append-time painter (see ensureCloneFavicons).
       const cur = icon.style.backgroundImage;

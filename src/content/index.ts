@@ -6,7 +6,7 @@ import type { MatchResult } from "./blocking/matcher";
 import { DomainMatcher } from "./blocking/matcher";
 import { hideResult, showOnce, rehideResult, restoreByDomain, getHiddenNodes, convertHiddenToPermaban, restoreResult } from "./blocking/hider";
 import { ResultObserver } from "./blocking/observer";
-import { containsProcessed, looksLikeResultList, overlapsProcessed } from "./blocking/dedupe";
+import { containsProcessed, isInsideProcessedTerritory, looksLikeResultList, overlapsProcessed } from "./blocking/dedupe";
 import { injectBaseStyles } from "./ui/styles";
 import { injectBlockButton } from "./ui/block-button";
 import { showBlockDialog } from "./ui/block-dialog";
@@ -550,6 +550,13 @@ function processResults(nodes: Element[]): void {
   if (!matcher || !prefs || !engine) return;
 
   for (const node of nodes) {
+    // Per-node isolation (A1 finding 8, 2026-09-06 review): one throwing
+    // node (adapter bug, hostile markup edge) must not abandon the rest of
+    // the batch — the observer hands nodes in microtask batches, and
+    // without this a throw surfaced as an unhandled rejection while
+    // nodes N+1..end silently lost their buttons until the next mutation.
+    // Mirrors the preload observer's per-node try/catch.
+    try {
     // Skip nodes we have already stamped
     if (node.getAttribute("data-shh-result")) continue;
 
@@ -573,17 +580,10 @@ function processResults(nodes: Element[]): void {
     // outer box exposed a second "hidden" box on the same result (the
     // double-collapse report). Hidden since it only surfaces once pages
     // are VISIBLE (the opacity-cover bug masked it until 1.8.8).
-    let ancestor: Element | null = node.parentElement;
-    while (ancestor) {
-      if (
-        ancestor.hasAttribute("data-shh-result") ||
-        ancestor.hasAttribute("data-shh-preloaded")
-      ) {
-        break; // inside handled territory — skip this node
-      }
-      ancestor = ancestor.parentElement;
-    }
-    if (ancestor) continue;
+    // Live in dedupe.ts as isInsideProcessedTerritory so tests bind to the
+    // SHIPPED guard, not a mirror (A5 R1: the mirror-only test survived a
+    // full revert of this guard with 514/514 green).
+    if (isInsideProcessedTerritory(node)) continue;
 
     const url = engine.getResultUrl(node);
 
@@ -611,6 +611,7 @@ function processResults(nodes: Element[]): void {
       }
       injectButtonForResult(node, url);
     }
+    } catch { /* one bad node must not stop the rest of the batch */ }
   }
 }
 

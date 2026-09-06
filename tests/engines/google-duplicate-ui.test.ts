@@ -5,6 +5,7 @@ import { collectGoogleResults } from "../../src/content/engines/google-dom";
 import {
   overlapsProcessed,
   containsProcessed,
+  isInsideProcessedTerritory,
   looksLikeResultList,
 } from "../../src/content/blocking/dedupe";
 import { injectBlockButton } from "../../src/content/ui/block-button";
@@ -313,6 +314,14 @@ describe("observer path: an appended page wrapper must not become a result", () 
     // as processed — the content script still has to stamp it (or REVEAL it
     // when the preload acted on a stale cache). Only ANCESTOR and DESCENDANT
     // relationships count.
+    //
+    // REVISED after A2 F2 (2026-09-06 deep review): a wrapper around a
+    // preloaded-only node must NOT be skipped EITHER. The preload's mark
+    // carries no content-script UI — the wrapper is the node the adapter
+    // offers, so skipping it left blocked results hidden with no box and
+    // no unblock control (Yandex li.serp-item, Google MjjYud>div.g). Only
+    // UI markers (result/btn/placeholder) make a wrapper a container;
+    // preloaded ANCESTORS still guard inner nodes via the ancestor walk.
     const doc = docOf(`<div id="rso">${organic("a.com")}</div>`);
     const adapter = adapterFor(doc);
     const result = adapter.getResultNodes(doc)[0]!;
@@ -327,12 +336,16 @@ describe("observer path: an appended page wrapper must not become a result", () 
     const inner = result.querySelector(".yuRUbf")!;
     expect(overlapsProcessed(inner)).toBe(true);
 
-    // A WRAPPER around the preloaded result → container, not a result.
+    // A WRAPPER around the preloaded result → NOT processed (A2 F2): the
+    // wrapper is the result the adapter offers; it must reach hideResult
+    // to gain the placeholder box and Show/Unblock controls.
     const wrapper = doc.createElement("div");
     wrapper.setAttribute("data-inf-page", "2");
     result.parentElement!.insertBefore(wrapper, result);
     wrapper.appendChild(result);
-    expect(overlapsProcessed(wrapper)).toBe(true);
-    expect(containsProcessed(wrapper)).toBe(true);
+    expect(overlapsProcessed(wrapper)).toBe(false);
+    expect(containsProcessed(wrapper)).toBe(false);
+    // ...while the ANCESTOR guard still recognizes the preloaded subtree.
+    expect(isInsideProcessedTerritory(inner)).toBe(true);
   });
 });

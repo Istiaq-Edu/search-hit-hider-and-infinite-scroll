@@ -108,6 +108,15 @@ export function showOnce(
   (node as HTMLElement).style.setProperty("display", "block", "important");
   // Release the preload attribute-based CSS rule too.
   node.removeAttribute("data-shh-preloaded");
+  // ...and any INNER preload marks (A2 F2 companion): when the adapter
+  // offered the wrapper (outer level) while the preload hid an inner node,
+  // hideResult stamped the WRAPPER as the result — revealing it must also
+  // lift the inner preload hides, or the shown result renders with holes.
+  node.querySelectorAll("[data-shh-preloaded]").forEach((inner) => {
+    (inner as HTMLElement).style.removeProperty("display");
+    inner.removeAttribute("data-shh-preloaded");
+    inner.classList.remove("shh-hidden");
+  });
   node.classList.remove(CLASS_HIDDEN);
   node.classList.add(CLASS_SHOWN_RESULT);
   // Google-specific cover CSS sets opacity:0!important and pointer-events:none!important

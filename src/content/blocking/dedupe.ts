@@ -31,15 +31,26 @@
 export const RESULT_HEADING_SELECTOR = 'h3, h2, [role="heading"]';
 
 /**
- * Marks a node we have already dealt with.
+ * Markers that mean "content-script UI already exists in this subtree".
  *
- *  • data-shh-result      — hidden (hider.ts)
- *  • data-shh-btn         — carries a block button (ui/block-button.ts)
- *  • data-shh-placeholder — one of our own placeholder boxes (hider.ts)
- *  • data-shh-preloaded   — pre-hidden by the document_start preload
+ * data-shh-preloaded is DELIBERATELY ABSENT (A2 F2, 2026-09-06 review): it
+ * means the PRELOAD hid a node — no placeholder, no button, no reveal path
+ * exists yet. Counting it here made processResults skip the wrapper the
+ * adapter offered (Yandex li.serp-item around a preloaded div.Organic; a
+ * Google MjjYud around a preloaded div.g), leaving blocked results hidden
+ * with NO box and NO unblock control — worse than the double-UI it tried to
+ * prevent. UI markers only; the preload mark is handled directionally:
+ *
+ *   data-shh-result/btn/placeholder on a DESCENDANT → real UI inside →
+ *     wrapper is a container (containsProcessed = true).
+ *   data-shh-preloaded on an ANCESTOR → whole subtree display:none →
+ *     inner nodes are skipped by isInsideProcessedTerritory instead.
+ *   data-shh-preloaded on a DESCENDANT → the wrapper must still be
+ *     processed (it becomes the UI-bearing result); showOnce clears the
+ *     inner preload marks when the user reveals the result.
  */
 export const SELECTOR_PROCESSED =
-  '[data-shh-result], [data-shh-btn], [data-shh-placeholder], [data-shh-preloaded]';
+  '[data-shh-result], [data-shh-btn], [data-shh-placeholder]';
 
 /** Markers that mean "this node already has content-script UI on it". */
 const SELECTOR_STAMPED =
@@ -75,6 +86,31 @@ export function overlapsProcessed(el: Element): boolean {
     if (preloadedAncestor && preloadedAncestor !== el) return true; // inside one
   } catch { /* selector unsupported — fall through */ }
   return containsProcessed(el);
+}
+
+/**
+ * True when `el` sits INSIDE a result we have already handled (an ancestor
+ * carries data-shh-result / data-shh-preloaded) — it must not be stamped
+ * again.
+ *
+ * The mirror of containsProcessed: that one rejects wrappers that CONTAIN
+ * handled results; this one rejects nodes that live INSIDE one. Both
+ * directions are needed because Google's two extraction passes run at
+ * different DOM levels (the append path stamps whole-document results at
+ * MjjYud level; the observer's subtree pass offers the inner tF2Cxc of the
+ * same result) — without this guard the inner node got its own placeholder
+ * box inside the hidden outer one ("click Show twice", field 2026-09-06).
+ */
+export function isInsideProcessedTerritory(el: Element): boolean {
+  for (let cur: Element | null = el.parentElement; cur; cur = cur.parentElement) {
+    if (
+      cur.hasAttribute("data-shh-result") ||
+      cur.hasAttribute("data-shh-preloaded")
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
