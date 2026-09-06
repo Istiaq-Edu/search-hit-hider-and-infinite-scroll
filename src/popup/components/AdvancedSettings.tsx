@@ -33,7 +33,7 @@ export function AdvancedSettings({ prefs, onUpdatePrefs }: Props) {
 
       <Row
         label="Debug mode"
-        hint="Show diagnostic info when engine detection fails"
+        hint="Verbose console diagnostics + built-in __shhDiag() report"
       >
         <Toggle label="Debug mode" checked={prefs.debugMode}
           onChange={() => void onUpdatePrefs({ debugMode: !prefs.debugMode })}
@@ -70,7 +70,10 @@ export function AdvancedSettings({ prefs, onUpdatePrefs }: Props) {
           color: "var(--text-2)",
           fontFamily: "monospace",
         }}>
-          Debug mode active — open browser DevTools console on a search page to see SHH diagnostics.
+          Debug mode active — open DevTools on a search page. Verbose diagnostics are
+          logged there; run{" "}
+          <code style={{ color: "var(--text)" }}>copy(__shhDiag())</code> to copy a full
+          report (build version, domains, results found, link encoding, markup sample).
         </div>
       )}
 
