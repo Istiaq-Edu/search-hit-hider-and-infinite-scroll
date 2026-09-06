@@ -14,7 +14,12 @@ import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type 
  */
 const FIRST_PARTY_FAVICON_SERVICES: Record<string, RegExp[]> = {
   yandex: [/^https:\/\/favicon\.yandex\.(?:com|net|ru)\/favicon\/v2\//i],
-  // Bing/Google/DDG/Brave/Baidu: no known first-party favicon endpoint
+  // Google's own icon service: every page-1 result chip already requests
+  // gstatic s2 favicons for each destination, so reusing the endpoint for
+  // auto-loaded clones discloses nothing the engine doesn't already
+  // receive (same argument as Yandex above).
+  google: [/^https:\/\/www\.gstatic\.com\/s2\/favicons/i, /^https:\/\/www\.google\.com\/s2\/favicons/i],
+  // Bing/DDG/Brave/Baidu: no known first-party favicon endpoint
   // reachable from fetched pages — left empty until field-verified.
 };
 
@@ -361,10 +366,24 @@ export class InfiniteScrollManager {
     this.abortController = new AbortController();
 
     try {
+      // ── Back off after a soft block ────────────────────────────────────
+      // Google serves soft blocks as HTTP 200 with a full-size body, so the
+      // normal cadence looks like a healthy fetch to the caller and we kept
+      // re-requesting immediately — which re-triggers the block. That is why
+      // auto-loading stalled instead of recovering (field report 2026-08-30:
+      // first fetch came back with no stream at all, the retry succeeded).
+      const backoffMs =
+        this.consecutiveErrors > 0
+          ? this.config.fetchDelay * Math.pow(3, this.consecutiveErrors)
+          : this.config.fetchDelay;
+      if (backoffMs !== this.config.fetchDelay) {
+        this.log(`backing off ${Math.round(backoffMs)}ms after ${this.consecutiveErrors} error(s)`);
+      }
+
       const result = await fetchPage(
         this.nextUrl!,
         this.abortController.signal,
-        this.config.fetchDelay,
+        backoffMs,
         this.nextPageRequest?.init
       );
       if (this.destroyed) return;
@@ -382,7 +401,8 @@ export class InfiniteScrollManager {
       }
       this.consecutiveErrors = 0;
 
-      const newNodes = this.extractNewNodes(result.doc);
+      const newNodes = this.filterResults(this.engine.getResultNodes(result.doc));
+      const rawCount = newNodes.length;
       const deduped = newNodes.filter((n) => !this.deduper.isDuplicate(n, this.engine));
 
       // Increment BEFORE appending and building the next request: the page
@@ -401,7 +421,13 @@ export class InfiniteScrollManager {
         // hydration payload). Stop after two empties instead of hammering
         // the engine with pointless requests.
         this.consecutiveEmptyPages++;
-        this.log("Fetched page yielded no result nodes", this.consecutiveEmptyPages);
+        // Discriminators (field-log 2026-09-06): "0 extracted" and
+        // "all duplicates" are OPPOSITE diagnoses — markup drift vs genuine
+        // end / clamped pagination — but the old single message hid which.
+        this.log(
+          `Fetched page yielded no result nodes (${this.consecutiveEmptyPages}) — ` +
+            `extracted=${newNodes.length} of raw=${rawCount}, kept-after-dedupe=0`
+        );
       }
 
       const fetchedReq = this.buildNextPageRequest(result.doc);
@@ -409,8 +435,25 @@ export class InfiniteScrollManager {
         this.nextPageRequest = fetchedReq;
         this.nextUrl = fetchedReq.url;
       } else {
-        this.nextUrl = this.engine.getNextPageUrl?.(result.doc) ?? null;
-        this.nextPageRequest = null;
+        const fetchedNext = this.engine.getNextPageUrl?.(result.doc) ?? null;
+        // An empty-but-shaped page (transient response, or a client-hydrated
+        // page whose raw HTML carries no pager) must NOT end the session
+        // here: overwriting a known-good nextUrl with null on one bad page
+        // permanently killed pagination after a single hiccup (field log
+        // 2026-09-06: one "no result nodes" page → hasMore=false forever).
+        // Only advance when the fetched doc actually yields a pager.
+        if (fetchedNext) {
+          this.nextUrl = fetchedNext;
+          this.nextPageRequest = null;
+        } else if (deduped.length === 0) {
+          this.log(
+            "empty page carried no pager — keeping previous next URL (transient?)"
+          );
+        } else {
+          // Real results but no pager on the fetched page: genuine end.
+          this.nextUrl = null;
+          this.nextPageRequest = null;
+        }
       }
       this.hasMore = !!(this.nextPageRequest || this.nextUrl);
       if (this.consecutiveEmptyPages >= 2) {
@@ -587,8 +630,8 @@ export class InfiniteScrollManager {
     void this.fetchNextPage();
   }
 
-  private extractNewNodes(doc: Document): Element[] {
-    const results = this.engine.getResultNodes(doc);
+  /** Drop pagination elements from an already-resolved result list. */
+  private filterResults(results: Element[]): Element[] {
     const paginationSelectors = this.engine.getPaginationSelectors?.() ?? [];
     return results.filter((n) => {
       const id = n.id || "";
@@ -721,10 +764,22 @@ export class InfiniteScrollManager {
     }
     if (this.config.debugMode) {
       const page = appended[0]?.closest("[data-inf-page]") as HTMLElement | null;
-      const chips = page?.querySelectorAll('[class*="favicon" i]').length ?? 0;
-      const painted = page?.querySelectorAll(
-        '[class*="favicon" i][style*="background-image"], [class*="favicon" i] [style*="background-image"]'
-      ).length ?? 0;
+      // Engine-aware chip probe: Google's chips are <img>s (s2/favicons or
+      // data: art), not [class*=favicon] elements — the old counter read 0
+      // on every Google append and looked like total failure.
+      const chipSel =
+        this.engine.id === "google"
+          ? 'img[src*="favicons" i], img[src^="data:image"], img[src="about:blank"], img:not([src])'
+          : '[class*="favicon" i]';
+      const chips = page?.querySelectorAll(chipSel).length ?? 0;
+      const painted =
+        this.engine.id === "google"
+          ? Array.from(page?.querySelectorAll<HTMLImageElement>(chipSel) ?? [])
+              .filter((img) => img.complete && img.naturalWidth > 0 || /^data:/i.test(img.src))
+              .length
+          : page?.querySelectorAll(
+              '[class*="favicon" i][style*="background-image"], [class*="favicon" i] [style*="background-image"]'
+            ).length ?? 0;
       const tinted = page
         ? page.querySelectorAll(
             "a.result-title[style], [class*='display-url'][style], [class*='link-text'][style], p.description[style]"
@@ -739,6 +794,38 @@ export class InfiniteScrollManager {
       }));
     }
     this.onNewNodes(appended);
+
+    // ── Reveal safety-net for appended pages (Google) ────────────────────
+    // The preload's anti-flicker cover (opacity:0) matches div.g / div.tF2Cxc
+    // that carry no marker. tryHide() deliberately leaves section-shaped
+    // wrappers (>=2 headings) unstamped — fail-open for HIDING — but that
+    // means a fetched page whose results ship inside a tF2Cxc section (the
+    // 2026-09-06 q=porn SERP) lands ENTIRELY under the cover. Page 1 has two
+    // reveal nets (2s timeout + __shhRevealGoogle); appended pages had NONE:
+    // whole pages rendered at opacity:0 forever, sized and painted but
+    // invisible (field log 2026-09-06, v1.8.7).
+    //
+    // Runs AFTER onNewNodes so blocked results already carry data-shh-result
+    // (hideResult) and are skipped — only genuinely-unhandled nodes get the
+    // ok stamp. Stale-cache directions are safe both ways: the content
+    // script's list is authoritative and has already run.
+    if (this.engine.id === "google") {
+      try {
+        const coverCandidates = pageContainer.querySelectorAll(
+          "div.g:not(.g .g), div.tF2Cxc:not(.tF2Cxc .tF2Cxc)"
+        );
+        for (const el of Array.from(coverCandidates)) {
+          if (
+            !el.hasAttribute("data-shh-ok") &&
+            !el.hasAttribute("data-shh-preloaded") &&
+            !el.hasAttribute("data-shh-result")
+          ) {
+            el.setAttribute("data-shh-ok", "true");
+          }
+        }
+      } catch { /* cosmetic — never fail the append */ }
+    }
+
     this.interceptPagination();
     // Track page container for efficient discard
     this.pageContainers.set(this.currentPage, pageContainer);
@@ -1049,10 +1136,29 @@ export class InfiniteScrollManager {
    * bug): elements whose class mentions "favicon" and which contain NO
    * other such element — the .favicon icon layer, never the a.favicon-
    * link wrapper whose clearing deleted whole chips.
+   *
+   * ENGINE-AWARE: Google's SERP never uses "favicon" in a class name — its
+   * chips are <img> elements (s2/favicons URLs or inline data: art) with
+   * rotating hash classes. On Google, the <img> IS the icon layer; when it
+   * is missing or dead on a clone, we synthesize a replacement <img> inside
+   * the chip's slot so the painter has a target to paint.
    */
   private getFaviconIconEls(root: ParentNode): HTMLElement[] {
     const all = Array.from(root.querySelectorAll<HTMLElement>('[class*="favicon" i]'));
-    return all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
+    const innermost = all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
+    if (this.engine.id !== "google") return innermost;
+
+    // Google: favicon <img>s are the icon layer — first-party s2 URLs,
+    // inline data: art, or a blank src (about:blank / none) when the result
+    // has no icon. All three are paint targets; discovery is src-shape
+    // based, immune to class rotation (XNo5Ab today, hash-du-jour later).
+    const imgs = Array.from(root.querySelectorAll<HTMLImageElement>(
+      'img[src*="favicons" i], img[src^="data:image"], img[src="about:blank"], img:not([src])'
+    ));
+    for (const img of imgs) {
+      if (!innermost.includes(img)) innermost.push(img);
+    }
+    return innermost;
   }
 
   /**
@@ -1086,6 +1192,13 @@ export class InfiniteScrollManager {
   private isWithinFavicon(el: Element): boolean {
     for (let cur: Element | null = el; cur; cur = cur.parentElement) {
       if (/favicon/i.test(cur.className || "")) return true;
+      // Google chips: the <img> itself is the favicon (s2/favicons or
+      // data: art) — no class marker exists.
+      if (
+        this.engine.id === "google" &&
+        cur.tagName === "IMG" &&
+        /s2\/favicons/i.test((cur as HTMLImageElement).src || "")
+      ) return true;
       // Stop at the page-container boundary.
       if (cur.hasAttribute("data-inf-page")) break;
     }
@@ -1186,6 +1299,28 @@ export class InfiniteScrollManager {
           let host: string;
           try { host = new URL(dest).hostname.replace(/^www\./, ""); } catch { continue; }
           for (const icon of this.getFaviconIconEls(node)) {
+            // ── Google: the chip IS an <img> ─────────────────────────────
+            // Google ships favicon art as <img> (s2/favicons or data:), not
+            // as background-image spans like Startpage. A loaded img or
+            // data: art is already painted; a blank/dead one gets re-pointed
+            // at Google's first-party s2 endpoint. Never blank.
+            if (icon.tagName === "IMG") {
+              const img = icon as HTMLImageElement;
+              if (img.complete && img.naturalWidth > 0) { urlFilled++; continue; }
+              const src = img.src || "";
+              if (/^data:/i.test(src)) { urlFilled++; continue; }
+              // Already pointed at an icon service (gstatic s2, google s2)?
+              // Keep Google's own URL exactly — its params (sz, chl) are
+              // Google's, and rewriting them is pointless churn.
+              if (/\/s2\/favicons/i.test(src)) { urlFilled++; continue; }
+              const s2 =
+                this.faviconInline.get(host) ??
+                liveIcons.get(host) ??
+                `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`;
+              if (src !== s2) img.src = s2;
+              urlFilled++;
+              continue;
+            }
             // Already REALLY painted? (Placeholder backgrounds — the SSR's
             // self-referential search-page URL — do NOT count: they look
             // painted to a naive check while rendering as garbage.)
@@ -1261,7 +1396,19 @@ export class InfiniteScrollManager {
                 .find(Boolean);
               if (!first) return "chip: none";
               const cs = window.getComputedStyle(first);
-              return `chip: bg=${cs.backgroundImage.slice(0, 60)} size=${cs.width}x${cs.height} visible=${cs.display !== "none" && cs.visibility !== "hidden"}`;
+              // Ancestor-opacity check: the chip itself can be display:block
+              // while a cover (opacity:0) ancestor makes the whole page
+              // invisible — the field probe that lied with visible=true on
+              // 2026-09-06. Walk up to the page container boundary.
+              let coveredByAncestor = false;
+              for (let cur: Element | null = first; cur && !cur.hasAttribute("data-inf-page"); cur = cur.parentElement) {
+                const a = window.getComputedStyle(cur);
+                if (a.opacity === "0" || a.visibility === "hidden" || a.display === "none") {
+                  coveredByAncestor = true;
+                  break;
+                }
+              }
+              return `chip: bg=${cs.backgroundImage.slice(0, 60)} size=${cs.width}x${cs.height} visible=${cs.display !== "none" && cs.visibility !== "hidden" && !coveredByAncestor}`;
             } catch { return "chip: ?"; }
           })()
       );
@@ -1459,6 +1606,19 @@ export class InfiniteScrollManager {
     }
     const pattern = this.faviconIntel?.pattern ?? null;
     for (const icon of this.getFaviconIconEls(node)) {
+      // ── Google: chip is an <img> — re-point src, never background ──────
+      if (icon.tagName === "IMG") {
+        const img = icon as HTMLImageElement;
+        if (img.complete && img.naturalWidth > 0) continue;
+        const src = img.src || "";
+        if (/^data:/i.test(src)) continue;
+        if (/\/s2\/favicons/i.test(src)) continue;
+        const s2 =
+          liveIcons.get(host) ??
+          `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`;
+        if (src !== s2) img.src = s2;
+        continue;
+      }
       // Placeholder backgrounds don't count as painted — same rule as the
       // append-time painter (see ensureCloneFavicons).
       const cur = icon.style.backgroundImage;
@@ -1512,6 +1672,19 @@ export class InfiniteScrollManager {
     try {
       const els = Array.from(document.querySelectorAll<HTMLElement>('[class*="favicon" i]'))
         .filter((el) => !el.closest("[data-inf-page]"));
+      // Google's chips are favicon <img>s with hash classes — no class
+      // mentions "favicon". Harvest them the same way (first-party s2
+      // URLs or inline data: art), so appended clones can reuse page-1
+      // intel exactly like Startpage.
+      if (this.engine.id === "google") {
+        els.push(
+          ...Array.from(
+            document.querySelectorAll<HTMLImageElement>(
+              'img[src*="favicons" i], img[src^="data:image"]'
+            )
+          ).filter((el) => !el.closest("[data-inf-page]"))
+        );
+      }
       for (const el of els) {
         const host = this.hostOfChipResult(el);
         if (!host || map.has(host)) continue;
