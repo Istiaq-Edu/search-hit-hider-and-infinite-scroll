@@ -19,7 +19,7 @@ export class DuckDuckGoAdapter implements EngineAdapter {
     );
   }
 
-  getResultNodes(doc: Document): Element[] {
+  getResultNodes(doc: Document | Element): Element[] {
     // Prioritize broad organic-result selectors (React DDG 2025+)
     const candidates = [
       'ol.react-results--main > li[data-layout="organic"]',

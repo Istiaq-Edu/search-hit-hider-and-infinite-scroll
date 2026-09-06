@@ -28,7 +28,7 @@ export class YandexAdapter implements EngineAdapter {
     );
   }
 
-  getResultNodes(doc: Document): Element[] {
+  getResultNodes(doc: Document | Element): Element[] {
     // Modern Yandex organic result containers
     const selectors = [
       "li.serp-item",

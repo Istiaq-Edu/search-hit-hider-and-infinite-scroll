@@ -55,6 +55,14 @@ export function hideResult(
   // data-shh-preloaded intentionally NOT removed — see pban comment above.
 
   if (showNotices) {
+    // Never stack boxes. A re-processing pass that reaches this node without
+    // clearing the stamp first (races with the observer, or a container that
+    // slipped past the guards) would otherwise leave a second placeholder
+    // beside the one already sitting here — the "double box" half of the
+    // 2026-08-30 Google report.
+    const stale = node.previousElementSibling;
+    if (stale?.getAttribute(ATTR_SHH_PLACEHOLDER)) stale.remove();
+
     const placeholder = buildPlaceholder(
       result.domain,
       () => onShowOnce(node),

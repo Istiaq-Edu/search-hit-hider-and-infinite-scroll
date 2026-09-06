@@ -12,10 +12,17 @@ export interface EngineAdapter {
   matches(url: URL): boolean;
 
   /**
-   * Return all result container elements on the current page.
+   * Return all result container elements.
    * Each element is the top-level node that will be hidden/shown.
+   *
+   * `doc` is a Document on the full-page scan but an ELEMENT on the observer
+   * path, which hands us the raw node that was just added. The type says so
+   * instead of casting at the call site: an adapter must be able to answer
+   * "which results are in here?" for a subtree, and an adapter that resolves
+   * its stream by ID (Google: #rso) simply cannot — which is exactly why the
+   * caller needs the container guards in blocking/dedupe.ts.
    */
-  getResultNodes(doc: Document): Element[];
+  getResultNodes(doc: Document | Element): Element[];
 
   /**
    * Extract the destination URL from a result container.

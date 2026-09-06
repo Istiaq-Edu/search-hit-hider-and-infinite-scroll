@@ -28,7 +28,7 @@ export class BraveAdapter implements EngineAdapter {
     return BRAVE_HOSTS.has(url.hostname);
   }
 
-  getResultNodes(doc: Document): Element[] {
+  getResultNodes(doc: Document | Element): Element[] {
     const selectors = [
       '#results > .snippet',
       'div.snippet[data-type="web"]',

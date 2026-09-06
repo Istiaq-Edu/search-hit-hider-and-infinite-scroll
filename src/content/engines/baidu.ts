@@ -13,7 +13,7 @@ export class BaiduAdapter implements EngineAdapter {
     return url.hostname === "www.baidu.com";
   }
 
-  getResultNodes(doc: Document): Element[] {
+  getResultNodes(doc: Document | Element): Element[] {
     // Regular results
     const regular = Array.from(
       doc.querySelectorAll(

@@ -13,7 +13,7 @@ export class BingAdapter implements EngineAdapter {
     return url.hostname === "www.bing.com";
   }
 
-  getResultNodes(doc: Document): Element[] {
+  getResultNodes(doc: Document | Element): Element[] {
     return Array.from(
       doc.querySelectorAll("#b_content ol#b_results > li.b_algo")
     );

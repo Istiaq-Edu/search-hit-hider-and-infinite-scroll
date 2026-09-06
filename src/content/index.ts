@@ -6,12 +6,14 @@ import type { MatchResult } from "./blocking/matcher";
 import { DomainMatcher } from "./blocking/matcher";
 import { hideResult, showOnce, rehideResult, restoreByDomain, getHiddenNodes, convertHiddenToPermaban, restoreResult } from "./blocking/hider";
 import { ResultObserver } from "./blocking/observer";
+import { containsProcessed, looksLikeResultList, overlapsProcessed } from "./blocking/dedupe";
 import { injectBaseStyles } from "./ui/styles";
 import { injectBlockButton } from "./ui/block-button";
 import { showBlockDialog } from "./ui/block-dialog";
 import { showToast } from "./ui/toast";
 import { getList, getPrefs, addEntry, removeEntry, updateEntry, undoLast } from "./messaging";
 import { InfiniteScrollManager } from "./infinite-scroll/manager";
+import { setDebugMode, isDebugMode, seedDebugFromCache, collectDiagnostics } from "./debug";
 
 // ============================================================
 // Content script entry point
@@ -128,6 +130,21 @@ function shhLog(msg: string, data?: unknown): void {
   } catch { /* detached document — ignore */ }
 }
 
+// ── Debug gate ─────────────────────────────────────────────────────────
+// Seed synchronously from the preload's localStorage cache so the flag is
+// already correct for the FIRST result scan — that scan can happen before
+// the async prefs load resolves, and a late flag would silence exactly the
+// load we are trying to diagnose. The authoritative pref value is applied
+// in init() / refreshPrefs().
+seedDebugFromCache();
+
+// Expose the built-in field diagnostic on the page. Deliberately installed
+// before engine detection so it is available even on pages we do not
+// recognise — "engine not detected" is itself a diagnosis.
+//
+// Usage from DevTools:  copy(__shhDiag())
+(window as Window & { __shhDiag?: () => unknown }).__shhDiag = () => collectDiagnostics();
+
 const currentUrl = new URL(location.href);
 const engine = detectEngine(currentUrl);
 
@@ -161,6 +178,7 @@ async function init(): Promise<void> {
 
   try {
     [entries, prefs] = await withTimeout(Promise.all([getList(), getPrefs()]), 2500);
+    if (prefs) setDebugMode(prefs.debugMode);
   } catch {
     // A cold MV3 event page can HANG the first response for seconds (a hang,
     // not a rejection — retries do not help). Race-bounded retries cover fast
@@ -171,6 +189,7 @@ async function init(): Promise<void> {
       await sleep(400);
       try {
         [entries, prefs] = await withTimeout(Promise.all([getList(), getPrefs()]), 2500);
+        if (prefs) setDebugMode(prefs.debugMode);
         recoveredMsg = true;
       } catch { /* keep retrying */ }
     }
@@ -183,6 +202,7 @@ async function init(): Promise<void> {
       if (!fromCache) return;
       entries = fromCache.entries;
       prefs = fromCache.prefs;
+      setDebugMode(prefs.debugMode);
       degradedStart = true;
     } else {
       shhLog(`state loaded (entries=${entries.length})`);
@@ -331,6 +351,7 @@ async function reviveFromBackground(): Promise<void> {
       );
       entries = realEntries;
       prefs = realPrefs;
+      setDebugMode(prefs.debugMode);
       refreshMatcher();
       updateCache();
       updateHasRules();
@@ -419,7 +440,9 @@ function recoverStateFromCache(): { entries: BlockEntry[]; prefs: Prefs } | null
   try {
     const raw = localStorage.getItem("_shh_cache");
     if (raw) {
-      const cache = JSON.parse(raw) as { domains?: string[]; wildcard?: boolean; paused?: boolean };
+      const cache = JSON.parse(raw) as {
+        domains?: string[]; wildcard?: boolean; paused?: boolean; debug?: boolean;
+      };
       if (cache.paused === true) return null;
       const domains = Array.isArray(cache.domains) ? cache.domains : [];
       return {
@@ -429,6 +452,10 @@ function recoverStateFromCache(): { entries: BlockEntry[]; prefs: Prefs } | null
         prefs: {
           ...DEFAULT_PREFS,
           subdomainWildcard: cache.wildcard !== false,
+          // Without this, a cold-start (degraded) load would silently turn
+          // Debug mode off even though the user enabled it — and a cold
+          // start is one of the situations most worth diagnosing.
+          debugMode: cache.debug === true,
         },
       };
     }
@@ -478,14 +505,41 @@ function invalidateNodeCache(): void {
 
 function processResultNodes(nodes: Element[]): void {
   const resultNodes: Element[] = [];
+  let skippedContainers = 0;
   for (const node of nodes) {
-    const engineNodes = engine!.getResultNodes(node as unknown as Document);
+    const engineNodes = engine!.getResultNodes(node);
     if (engineNodes.length > 0) {
       resultNodes.push(...engineNodes);
-    } else {
-      const url = engine!.getResultUrl(node);
-      if (url) resultNodes.push(node);
+      continue;
     }
+
+    // ── Fallback: the added node is itself one result ────────────────────
+    // Reached when the adapter found no results INSIDE the node. On Google
+    // that is the normal case for any container the page adds, because the
+    // stream is resolved by ID and an ID can never be matched from inside a
+    // subtree — including the `<div data-inf-page="N">` wrapper infinite
+    // scroll appends as a single operation.
+    //
+    // Unguarded, that wrapper was pushed in as a second result: it resolves to
+    // the same <h3> as the first real result inside it, so the heading got two
+    // block buttons, and hideResult() on it added a second placeholder box.
+    // Both symptoms were reported 2026-08-30, Google only.
+    if (overlapsProcessed(node) || looksLikeResultList(node)) {
+      skippedContainers++;
+      continue;
+    }
+
+    const url = engine!.getResultUrl(node);
+    if (url) resultNodes.push(node);
+  }
+  // Field-verifiable: confirms the guard is doing the work. Run
+  // copy(__shhDiag()) and check effect.buttons / effect.headingsWithTwoButtons.
+  if (skippedContainers > 0 && isDebugMode()) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[SHH] duplicate-UI guard: skipped ${skippedContainers} container node(s) ` +
+        `from ${nodes.length} added node(s)`
+    );
   }
   if (resultNodes.length > 0) {
     processResults(resultNodes);
@@ -498,6 +552,38 @@ function processResults(nodes: Element[]): void {
   for (const node of nodes) {
     // Skip nodes we have already stamped
     if (node.getAttribute("data-shh-result")) continue;
+
+    // *** CONTAINER GUARD ***
+    // A node that WRAPS results we have already handled is a container, not a
+    // result. Processing it stacks a second block button on the first result
+    // inside it and a second placeholder box beside the ones already there.
+    // Checked on every path into processResults(), not just the observer's, so
+    // a container can never reach hideResult() however it got here.
+    if (containsProcessed(node)) continue;
+
+    // *** ANCESTOR GUARD (2026-09-06 "click Show twice" field bug) ***
+    // The mirror image of the container guard: a node that sits INSIDE an
+    // already-stamped result must not be stamped again. Google makes this
+    // reachable: the append path extracts whole-document results at MjjYud
+    // level, while the observer's subtree pass (which cannot resolve the
+    // stream by ID) falls back to legacy selectors and offers the inner
+    // tF2Cxc section of the SAME result. Self and descendant checks both
+    // pass — only the ancestor walk was missing. Result: the inner node got
+    // its own placeholder box INSIDE the hidden outer one, so revealing the
+    // outer box exposed a second "hidden" box on the same result (the
+    // double-collapse report). Hidden since it only surfaces once pages
+    // are VISIBLE (the opacity-cover bug masked it until 1.8.8).
+    let ancestor: Element | null = node.parentElement;
+    while (ancestor) {
+      if (
+        ancestor.hasAttribute("data-shh-result") ||
+        ancestor.hasAttribute("data-shh-preloaded")
+      ) {
+        break; // inside handled territory — skip this node
+      }
+      ancestor = ancestor.parentElement;
+    }
+    if (ancestor) continue;
 
     const url = engine.getResultUrl(node);
 
@@ -661,6 +747,8 @@ async function refreshPrefs(): Promise<void> {
   const wasActive = engineActive;
   prefs = await getPrefs();
   if (!prefs || !engine) return;
+  // Debug mode may have been toggled while this page was open.
+  setDebugMode(prefs.debugMode);
 
   if (prefs.showOnHover) {
     document.documentElement.classList.add("shh-hover-mode");
@@ -907,8 +995,20 @@ function updateCache(): void {
       domains: paused ? [] : entries.filter((e) => e.enabled).map((e) => e.domain),
       wildcard: prefs.subdomainWildcard,
       paused,
+      // Persisted so the NEXT page load can seed the debug gate
+      // synchronously, before the async prefs round-trip resolves.
+      debug: prefs.debugMode,
     }));
-  } catch { /* localStorage may be unavailable in some browser configs */ }
+  } catch (err) {
+    // Silent until now, which made a blocked-storage environment
+    // indistinguishable from an empty block list: the preload logs
+    // `domains=0` in both cases. Surfaced under Debug mode so the two can
+    // be told apart from a console paste.
+    if (isDebugMode()) {
+      console.warn("[SHH] could not write _shh_cache — pre-paint hiding will be inert", err);
+    }
+    /* localStorage may be unavailable in some browser configs */
+  }
 }
 
 function sleep(ms: number): Promise<void> {

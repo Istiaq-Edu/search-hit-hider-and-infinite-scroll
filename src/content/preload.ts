@@ -1,3 +1,11 @@
+import {
+  resolveGoogleStream,
+  isGoogleNonResult,
+  looksLikeGoogleSection,
+  looksLikeGoogleAggregate,
+  googleDisplayDomain,
+} from "./engines/google-dom";
+
 // ============================================================
 // Anti-FOUC preload — registered at document_start.
 //
@@ -288,8 +296,15 @@
   // Resolve the real destination host for a link.
   // Google wraps result URLs in /url?q= redirects; Startpage's "anonymous
   // view" proxies wrap them in a u= param — unwrap both.
+  //
+  // Returns "" when the destination is NOT recoverable from the href. That
+  // includes Google's current /goto?url=<opaque blob> form (2026-08-30): the
+  // token is a protobuf wrapper around an encrypted payload, so callers must
+  // fall back to the result's display URL instead of trusting this host.
   function resolveHost(a: HTMLAnchorElement): string {
     const raw = a.getAttribute("href") ?? "";
+    // Opaque redirect — the destination is not in the URL at all.
+    if (raw.includes("/goto?url=")) return "";
     if (raw.includes("/url?") || raw.includes("google.com/url")) {
       try {
         const qs = raw.slice(raw.indexOf("?") + 1);
@@ -365,6 +380,75 @@
     'div.snippet[data-type="news"]',
     'div.snippet[data-type="videos"]',
   ].join(",");
+
+  // ── 6a. Structural result discovery (class-name independent) ──────────────
+  //
+  // The class-based SELS above only work while Google keeps shipping div.g /
+  // div.tF2Cxc. When it rotates them, the CSS layers below stop matching and
+  // this preload silently does nothing — the user sees blocked results flash in
+  // until the content script hides them at document_idle.
+  //
+  // These helpers resolve the results stream by id and take its top-level
+  // children, so document_start hiding keeps working on new layouts. They are
+  // used ONLY by the JS scan path, never by the CSS rules:
+  //   • :has() rules (6b) and the cover CSS (3c) stay on per-result class
+  //     selectors on purpose — a CSS rule cannot tell a single result from a
+  //     multi-result section, so pointing them at `#rso > *` would let one
+  //     blocked domain hide an entire section.
+  //   • The JS path CAN tell, via looksLikeGoogleSection(), so it is safe here.
+  function structuralResults(): Element[] {
+    const stream = resolveGoogleStream(document);
+    if (!stream) return [];
+    const out: Element[] = [];
+    for (const child of Array.from(stream.children)) {
+      if (isGoogleNonResult(child)) continue;
+      // *** FAIL OPEN *** — never hide a node that wraps several results.
+      if (looksLikeGoogleSection(child)) continue;
+      out.push(child);
+    }
+    return out;
+  }
+
+  /** Nearest ancestor (incl. self) that is a direct child of the results stream. */
+  function closestResultShell(stream: Element, el: Element): Element | null {
+    let cur: Element | null = el;
+    while (cur && cur !== stream) {
+      if (cur.parentElement === stream) {
+        if (isGoogleNonResult(cur) || looksLikeGoogleSection(cur)) return null;
+        return cur;
+      }
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  /** Class-based + structural candidates, deduplicated. */
+  function allResultCandidates(): Element[] {
+    const out: Element[] = [];
+    const seen = new Set<Element>();
+    const push = (el: Element): void => {
+      if (seen.has(el)) return;
+      seen.add(el);
+      out.push(el);
+    };
+    try { document.querySelectorAll(SELS).forEach(push); } catch { /* ignore */ }
+    structuralResults().forEach(push);
+    return out;
+  }
+
+  /**
+   * Hide every structural result inside `el`. Used when a bulk insert adds a
+   * node that CONTAINS the results stream (Case B) — the class-based
+   * `el.querySelectorAll(SELS)` cannot see results on layouts that dropped
+   * div.g / div.tF2Cxc.
+   */
+  function tryHideStructuralSubtree(stream: Element, el: Element): void {
+    for (const child of Array.from(stream.children)) {
+      if (child === el || !el.contains(child)) continue;
+      if (isGoogleNonResult(child) || looksLikeGoogleSection(child)) continue;
+      tryHide(child);
+    }
+  }
 
   // ── 6b. Instant CSS-level blocking via :has() ─────────────────────────────
   //
@@ -491,6 +575,24 @@
       } catch { /* ignore selector errors */ }
     }
 
+    // *** SECTION GUARD (Google only) ***
+    // A node that wraps SEVERAL results (Discussions block, an appended
+    // infinite-scroll page, a video carousel) must never be hidden because one
+    // result inside it matched. The old guard only caught nodes containing a
+    // class-matched result; this also catches sections on layouts where those
+    // class names no longer exist. Failure mode is deliberately fail-open: a
+    // section is left visible and the content script resolves it properly at
+    // document_idle, rather than hiding results the user did not block.
+    if (isGoogle && looksLikeGoogleSection(el)) return;
+
+    // *** AGGREGATE GUARD (Google only) ***
+    // An AI Overview is one block that cites a dozen domains. It carries no
+    // per-result markup, so the heading probe above cannot distinguish it from
+    // a single organic result — and tryHide() below checks the FIRST link only,
+    // so a block list containing any one of those domains would hide the entire
+    // answer. Fail open: leave the aggregate alone.
+    if (isGoogle && looksLikeGoogleAggregate(el)) return;
+
     // Check only the first meaningful external link (most result cards have one).
     const a = el.querySelector<HTMLAnchorElement>('a[href]:not([href^="#"]):not([href^="javascript"])');
     if (!a) return;
@@ -505,6 +607,19 @@
       return;
     }
 
+    // Opaque /goto?url= redirect: the destination is not in the href, so the
+    // link told us nothing. Fall back to the display URL the user can read —
+    // the same source the content script uses. Without this, document_start
+    // blocking is completely inert on Google's current layout.
+    if (isGoogle) {
+      const display = googleDisplayDomain(el);
+      if (display && hostMatches(display)) {
+        (el as HTMLElement).style.setProperty("display", "none", "important");
+        el.setAttribute("data-shh-preloaded", "true");
+        return;
+      }
+    }
+
     // Not blocked — reveal if Google and has external link.
     if (isGoogle) {
       el.setAttribute("data-shh-ok", "true");
@@ -513,7 +628,7 @@
 
   // ── 9. Initial scan + MutationObserver + timed rescans ───────────────────
   // Scan anything already in the DOM (rare at document_start, safe to do).
-  try { document.querySelectorAll(SELS).forEach(tryHide); } catch { /* ignore */ }
+  try { allResultCandidates().forEach(tryHide); } catch { /* ignore */ }
 
   // Rescan after the DOM is fully parsed — catches results that Google's
   // inline scripts add between document_start and DOMContentLoaded.
@@ -522,7 +637,7 @@
   let rafScanCount = 0;
   function rafRescan(): void {
     try {
-      const nodes = document.querySelectorAll(SELS);
+      const nodes = allResultCandidates();
       let hasUnprocessed = false;
       for (const node of nodes) {
         if (!node.getAttribute("data-shh-preloaded") && !node.getAttribute("data-shh-ok")) {
@@ -539,7 +654,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    try { document.querySelectorAll(SELS).forEach(tryHide); } catch { /* ignore */ }
+    try { allResultCandidates().forEach(tryHide); } catch { /* ignore */ }
     requestAnimationFrame(rafRescan);
     // Safety-net: after 2 s, reveal any Google results that are still covered
     // (e.g. the content script took longer than expected to run processResults).
@@ -551,7 +666,7 @@
   // Rescan after all resources load — catches results added by deferred /
   // async scripts that fire after DOMContentLoaded (common on Google).
   window.addEventListener("load", () => {
-    try { document.querySelectorAll(SELS).forEach(tryHide); } catch { /* ignore */ }
+    try { allResultCandidates().forEach(tryHide); } catch { /* ignore */ }
   }, { once: true });
 
   // ── 10. bfcache restoration handler ──────────────────────────────────────
@@ -592,18 +707,23 @@
     // Google: clear any stale data-shh-ok markers so every result is
     // re-evaluated from scratch.  This handles the case where Google did a
     // soft navigation (updating result URLs) before the user pressed Back.
+    //
+    // Class-agnostic since 2026-09-06: the old selector hardcoded
+    // div.g / div.tF2Cxc, which the current layout no longer ships — the
+    // clear silently matched nothing, and a stale-safe node that had
+    // soft-navigated to a blocked domain stayed visible after Back.
+    // allResultCandidates() is the same structural+legacy list tryHide()
+    // itself uses, so anything that can carry data-shh-ok gets cleared.
     if (isGoogle) {
       try {
-        document.querySelectorAll(
-          "div.g:not(.g .g)[data-shh-ok],div.tF2Cxc:not(.tF2Cxc .tF2Cxc)[data-shh-ok]"
-        ).forEach(el => {
-          el.removeAttribute("data-shh-ok");
-        });
+        for (const el of allResultCandidates()) {
+          if (el.hasAttribute("data-shh-ok")) el.removeAttribute("data-shh-ok");
+        }
       } catch { /* ignore */ }
     }
 
     // Re-evaluate all result nodes.
-    try { document.querySelectorAll(SELS).forEach(tryHide); } catch { /* ignore */ }
+    try { allResultCandidates().forEach(tryHide); } catch { /* ignore */ }
 
     // Reveal any remaining uncovered Google nodes after re-evaluation.
     // Schedule slightly deferred so Google's own bfcache restore scripts
@@ -635,6 +755,11 @@
   //   'href' and walk up to re-check the parent container.
   //   Same data-shh-ok clearing applies here.
   const obs = new MutationObserver((mutations) => {
+    // Resolve the results stream ONCE per callback batch, not per added node:
+    // resolveGoogleStream() runs up to 6 document-wide querySelectors, and a
+    // Google hydration burst of N nodes used to pay that 2N times (Case B +
+    // closestResultShell), with cost growing as the DOM grows.
+    const stream = isGoogle ? resolveGoogleStream(document) : null;
     for (const m of mutations) {
       // ── Case D: attribute mutation (href set/changed on existing element) ──
       if (m.type === "attributes") {
@@ -653,6 +778,16 @@
             }
             tryHide(parent);
           }
+
+          // Structural equivalent: an href changed inside a result that the
+          // class-based selector can no longer match.
+          const shell = stream ? closestResultShell(stream, el) : null;
+          if (shell && shell !== parent) {
+            if (isGoogle && shell.hasAttribute("data-shh-ok")) {
+              shell.removeAttribute("data-shh-ok");
+            }
+            tryHide(shell);
+          }
         } catch { /* ignore */ }
         continue;
       }
@@ -667,6 +802,12 @@
 
           // Case B — the added node contains result descendants.
           el.querySelectorAll(SELS).forEach(tryHide);
+          // Case B (structural) — bulk insert that contains the results stream
+          // itself. Only runs when el is the stream or an ancestor, so the
+          // per-mutation cost stays off the hot path.
+          if (stream && (el === stream || el.contains(stream))) {
+            tryHideStructuralSubtree(stream, el);
+          }
 
           // Case C — the added node was inserted INSIDE a result container.
           // This is the Google two-step fix: when Google populates a div.g
@@ -690,6 +831,18 @@
               if (isLink) parent.removeAttribute("data-shh-ok");
             }
             tryHide(parent);
+          }
+
+          // Case C (structural) — the added node landed INSIDE a result that
+          // the class-based selector cannot match. closestResultShell() walks
+          // up to the nearest direct child of the results stream.
+          const shell = stream ? closestResultShell(stream, el) : null;
+          if (shell && shell !== parent) {
+            if (isGoogle && shell.hasAttribute("data-shh-ok")) {
+              const isLink = el.tagName === "A" || !!el.querySelector?.("a[href]");
+              if (isLink) shell.removeAttribute("data-shh-ok");
+            }
+            tryHide(shell);
           }
         } catch { /* ignore */ }
       }

@@ -73,7 +73,7 @@ export class StartpageAdapter implements EngineAdapter {
     );
   }
 
-  getResultNodes(doc: Document): Element[] {
+  getResultNodes(doc: Document | Element): Element[] {
     for (const sel of RESULT_SELECTORS) {
       const nodes = Array.from(doc.querySelectorAll(sel)).filter(
         (n) => !n.getAttribute("data-shh-result") && this.getResultUrl(n) !== null
