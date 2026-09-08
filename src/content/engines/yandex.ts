@@ -299,32 +299,52 @@ export class YandexAdapter implements EngineAdapter {
     // Fast path: the organic list by its stable id (classic + SSR variants).
     const byId = d.querySelector("ul#search-result");
     if (byId) return byId;
-    // RESULT-ANCHORED resolution (field 2026-09-08, cee variant): the id is
-    // absent on the live continuous-scroll DOM, and the first .serp-list in
-    // document order is the AI-answer card's OWN list — empty of URL-bearing
-    // results. Resolving to it appended every auto-loaded page INSIDE the
-    // first result card (page placement receipt: index=2/3, zero organic
-    // results in container). The list holding the most result nodes IS the
-    // organic list, whatever its id or classes; fall back to the first
-    // result's parent when no list matches at all.
+    // RESULT-ANCHORED resolution (field 2026-09-08, cee variant). Two traps
+    // proven by the placement receipts:
+    //   1. ul#search-result is ABSENT on the live cee DOM, and the first
+    //      .serp-list in document order is the AI-answer card's own list.
+    //   2. When the li.serp-item class ALSO rotated away, getResultNodes
+    //      falls back to div.Organic — whose parent is a PER-RESULT wrapper
+    //      (one result each). A "most results" tally then tied at 1 and the
+    //      FIRST result card won the container (receipt: lastResult=1 with
+    //      processed=10): marker, spinner, and every appended page rendered
+    //      INSIDE result card #1.
+    // Invariant: the results container is the nearest shared ancestor that
+    // holds a MAJORITY of the resolved results — a single result's wrapper
+    // can never be it. Tally parent-chains, take the highest host that
+    // crosses half, preferring the SHALLOWEST host when several do (the
+    // deeper one is a sub-list inside the stream).
     const results = this.getResultNodes(d);
-    if (results.length > 0) {
+    if (results.length >= 2) {
+      const majority = Math.floor(results.length / 2);
       const tally = new Map<Element, number>();
       for (const r of results) {
-        const host = r.closest("ol.serp-list, ul.serp-list") ?? r.parentElement;
-        if (host) tally.set(host, (tally.get(host) ?? 0) + 1);
-      }
-      let best: Element | null = null;
-      let bestCount = 0;
-      for (const [host, count] of tally) {
-        if (count > bestCount) {
-          best = host;
-          bestCount = count;
+        let host: Element | null = r.parentElement;
+        while (host) {
+          tally.set(host, (tally.get(host) ?? 0) + 1);
+          host = host.parentElement;
         }
       }
-      if (best) return best;
+      const hosts = Array.from(tally.entries())
+        .filter(([, n]) => n > majority)
+        .sort((a, b) => {
+          const depth = (el: Element): number => {
+            let n = 0;
+            for (let p: Element | null = el; p; p = p.parentElement) n++;
+            return n;
+          };
+          // DEEPEST majority ancestor wins: the nearest shared ancestor of
+          // the results is the stream itself. Shallower holders (content
+          // columns, body, html) also carry a majority but appending there
+          // lands pages outside the results flow.
+          return depth(b[0]) - depth(a[0]);
+        });
+      if (hosts.length > 0) {
+        const chosen = hosts[0]![0];
+        return chosen;
+      }
     }
-    // No results resolvable (empty/captcha page) — legacy best-effort order.
+    // No majority (0-1 results resolvable) — legacy best-effort order.
     for (const sel of ["#search-results", "ol.serp-list", "ul.serp-list"]) {
       const el = d.querySelector(sel);
       if (el) return el;

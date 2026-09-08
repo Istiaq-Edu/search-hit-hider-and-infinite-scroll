@@ -262,6 +262,54 @@ describe("YandexAdapter", () => {
       const w = adapter.getFetchWrapper(doc);
       expect(w?.getAttribute("data-region")).toBe("organic");
     });
+
+    // ── Rotated classes (field 2026-09-08, 1.8.14 receipt: lastResult=1
+    // with processed=10) — li.serp-item absent, results resolve via
+    // div.Organic, each inside its OWN per-result wrapper. The "most
+    // results in one list" tally tied at 1 and the FIRST result card won
+    // the container: marker + spinner + every page rendered inside card #1.
+    it("resolves to the deepest MAJORITY ancestor when results sit in per-result wrappers", () => {
+      const doc = parseHTML(`
+        <div class="content__left">
+          <ul class="serp-list serp-list_left_yes">
+            <li class="someNewClass"><div class="wrapper"><div class="Organic organic"><h2><a class="OrganicTitle-Link" href="https://a.com/1">r1</a></h2></div></div></li>
+            <li class="someNewClass"><div class="wrapper"><div class="Organic organic"><h2><a class="OrganicTitle-Link" href="https://b.com/2">r2</a></h2></div></div></li>
+            <li class="someNewClass"><div class="wrapper"><div class="Organic organic"><h2><a class="OrganicTitle-Link" href="https://c.com/3">r3</a></h2></div></div></li>
+            <li class="someNewClass"><div class="wrapper"><div class="Organic organic"><h2><a class="OrganicTitle-Link" href="https://d.com/4">r4</a></h2></div></div></li>
+          </ul>
+          <nav class="Pager"><a class="Pager-Item_type_next" href="/search/?text=test&amp;p=1">next</a></nav>
+        </div>`);
+      const el = adapter.getResultsContainer(doc);
+      // The results list itself — NOT html/body/content__left (shallow
+      // majority holders) and NOT a per-result wrapper.
+      expect(el?.tagName.toLowerCase()).toBe("ul");
+      expect(el?.classList.contains("serp-list")).toBe(true);
+      const results = adapter.getResultNodes(doc);
+      expect(results.filter((r) => el!.contains(r)).length).toBe(results.length);
+      // A single result's wrapper never wins even with 1 result resolved:
+      const firstWrapper = results[0]!.closest("li")!;
+      expect(el).not.toBe(firstWrapper);
+    });
+
+    it("never returns a single-result wrapper as the container (tie-break guard)", () => {
+      // Two results in two DIFFERENT lists (fragmented DOM): the majority
+      // rule finds no majority holder — must fall to legacy selectors,
+      // never to one result's own wrapper.
+      const doc = parseHTML(`
+        <div class="content__left">
+          <ul class="serp-list serp-list_left_yes">
+            <li class="someNewClass"><div class="Organic organic"><h2><a class="OrganicTitle-Link" href="https://a.com/1">r1</a></h2></div></li>
+          </ul>
+          <ul class="serp-list">
+            <li class="someNewClass"><div class="Organic organic"><h2><a class="OrganicTitle-Link" href="https://b.com/2">r2</a></h2></div></li>
+          </ul>
+        </div>`);
+      const el = adapter.getResultsContainer(doc);
+      const results = adapter.getResultNodes(doc);
+      const r1 = results[0]!;
+      expect(el).not.toBe(r1.parentElement);
+      expect(el?.contains(r1)).toBe(true);
+    });
   });
 
   describe("getFetchWrapper", () => {
