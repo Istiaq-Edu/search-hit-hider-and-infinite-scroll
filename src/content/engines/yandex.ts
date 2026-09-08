@@ -260,14 +260,30 @@ export class YandexAdapter implements EngineAdapter {
    * fetched page's own results list restores per-card styling.
    */
   getFetchWrapper(doc: Document): Element | null {
-    // querySelector returns the first match in DOCUMENT order, so a single
-    // comma list cannot express "prefer the organic list". Iterate.
-    for (const sel of [
-      "ul#search-result.serp-list",
-      "ul.serp-list_left_yes",
-      "ol.serp-list",
-      "ul.serp-list",
-    ]) {
+    // Fast path by stable id (SSR fetches ship it); then RESULT-ANCHORED:
+    // the list that actually hosts the most fetched result nodes — a bare
+    // class-ordered query can resolve to the AI card's own list when the
+    // id is absent (same trap as getResultsContainer, field 2026-09-08).
+    const byId = doc.querySelector("ul#search-result.serp-list");
+    if (byId) return byId;
+    const results = this.getResultNodes(doc);
+    if (results.length > 0) {
+      const tally = new Map<Element, number>();
+      for (const r of results) {
+        const host = r.closest("ol.serp-list, ul.serp-list");
+        if (host) tally.set(host, (tally.get(host) ?? 0) + 1);
+      }
+      let best: Element | null = null;
+      let bestCount = 0;
+      for (const [host, count] of tally) {
+        if (count > bestCount) {
+          best = host;
+          bestCount = count;
+        }
+      }
+      if (best) return best;
+    }
+    for (const sel of ["ul.serp-list_left_yes", "ol.serp-list", "ul.serp-list"]) {
       const el = doc.querySelector(sel);
       if (el) return el;
     }
@@ -280,16 +296,36 @@ export class YandexAdapter implements EngineAdapter {
 
   getResultsContainer(doc?: Document): Element | null {
     const d = doc ?? document;
-    // Iterate alternatives in priority order: querySelector on a comma list
-    // returns the first match in DOCUMENT order, which could hand back the
-    // right-column list (serp-list_right_yes) or an in-card list when those
-    // precede the organic list. ul#search-result is the organic list.
-    for (const sel of [
-      "ul#search-result",
-      "#search-results",
-      "ol.serp-list",
-      "ul.serp-list",
-    ]) {
+    // Fast path: the organic list by its stable id (classic + SSR variants).
+    const byId = d.querySelector("ul#search-result");
+    if (byId) return byId;
+    // RESULT-ANCHORED resolution (field 2026-09-08, cee variant): the id is
+    // absent on the live continuous-scroll DOM, and the first .serp-list in
+    // document order is the AI-answer card's OWN list — empty of URL-bearing
+    // results. Resolving to it appended every auto-loaded page INSIDE the
+    // first result card (page placement receipt: index=2/3, zero organic
+    // results in container). The list holding the most result nodes IS the
+    // organic list, whatever its id or classes; fall back to the first
+    // result's parent when no list matches at all.
+    const results = this.getResultNodes(d);
+    if (results.length > 0) {
+      const tally = new Map<Element, number>();
+      for (const r of results) {
+        const host = r.closest("ol.serp-list, ul.serp-list") ?? r.parentElement;
+        if (host) tally.set(host, (tally.get(host) ?? 0) + 1);
+      }
+      let best: Element | null = null;
+      let bestCount = 0;
+      for (const [host, count] of tally) {
+        if (count > bestCount) {
+          best = host;
+          bestCount = count;
+        }
+      }
+      if (best) return best;
+    }
+    // No results resolvable (empty/captcha page) — legacy best-effort order.
+    for (const sel of ["#search-results", "ol.serp-list", "ul.serp-list"]) {
       const el = d.querySelector(sel);
       if (el) return el;
     }

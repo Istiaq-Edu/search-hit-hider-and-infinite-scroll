@@ -225,6 +225,43 @@ describe("YandexAdapter", () => {
       const el = adapter.getResultsContainer(doc);
       expect(el?.id).toBe("search-result");
     });
+
+    // ── Result-anchored resolution (field 2026-09-08, cee variant) ───────────
+    // Live continuous-scroll DOM: ul#search-result ABSENT, and the first
+    // .serp-list in document order is the AI-answer card's OWN list. The
+    // container resolved to it → every appended page landed INSIDE the first
+    // result card (receipt: index=2/3, zero organic results in container).
+    it("resolves to the list that CONTAINS the results when ul#search-result is absent", () => {
+      const doc = parseHTML(`
+        <div class="content__left">
+          <div class="Root FuturisSearchOuter">
+            <ul class="serp-list serp-list_left_yes"><li>AI sources…</li></ul>
+          </div>
+          <ul class="serp-list serp-list_left_yes" data-region="organic">
+            <li class="serp-item serp-item_card"><h2><a class="OrganicTitle-Link" href="https://a.com/1">r1</a></h2></li>
+            <li class="serp-item serp-item_card"><h2><a class="OrganicTitle-Link" href="https://b.com/2">r2</a></h2></li>
+          </ul>
+          <nav class="Pager"><a class="Pager-Item_type_next" href="/search/?text=test&amp;p=1">next</a></nav>
+        </div>`);
+      const el = adapter.getResultsContainer(doc);
+      expect(el?.getAttribute("data-region")).toBe("organic");
+      const results = adapter.getResultNodes(doc);
+      expect(results.filter((r) => el!.contains(r)).length).toBe(results.length);
+    });
+
+    it("getFetchWrapper is result-anchored too (AI-card list must not win)", () => {
+      const doc = parseHTML(`
+        <div class="content__left">
+          <div class="Root FuturisSearchOuter">
+            <ul class="serp-list serp-list_left_yes"><li>AI sources…</li></ul>
+          </div>
+          <ul class="serp-list serp-list_left_yes" data-region="organic">
+            <li class="serp-item serp-item_card"><h2><a class="OrganicTitle-Link" href="https://a.com/1">r1</a></h2></li>
+          </ul>
+        </div>`);
+      const w = adapter.getFetchWrapper(doc);
+      expect(w?.getAttribute("data-region")).toBe("organic");
+    });
   });
 
   describe("getFetchWrapper", () => {

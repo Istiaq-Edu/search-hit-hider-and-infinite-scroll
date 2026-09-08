@@ -345,6 +345,10 @@ export class InfiniteScrollManager {
       if (refIdx === -1) return false;
       let lastResultIdx = -1;
       for (const node of this.engine.getResultNodes(this.container)) {
+        // Our own appended pages hold result-shaped nodes; counting them
+        // would reject every anchor after the first append (the newest page
+        // becomes the "last result").
+        if (node.closest("[data-inf-page]")) continue;
         let cur: Element | null = node;
         while (cur && cur.parentElement !== this.container) cur = cur.parentElement;
         if (!cur) continue;
@@ -855,6 +859,10 @@ export class InfiniteScrollManager {
       let last = -1;
       try {
         for (const n of this.engine.getResultNodes(this.container)) {
+          // Skip results inside page containers we appended ourselves —
+          // counting them made the FIRST append always report MID-LIST
+          // (the fresh page was its own "last result").
+          if (n.closest("[data-inf-page]")) continue;
           let cur: Element | null = n;
           while (cur && cur.parentElement !== this.container) cur = cur.parentElement;
           if (cur) last = Math.max(last, kids.indexOf(cur));
