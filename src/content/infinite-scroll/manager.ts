@@ -715,6 +715,81 @@ export class InfiniteScrollManager {
     return out;
   }
 
+  /**
+   * Measure the live page's result-card presentation and inline it onto the
+   * appended clones (Yandex 2026-09-08: rotated-class builds style cards via
+   * wrapper classes the fetched SSR markup doesn't carry).
+   *
+   * Reference = the live result node with the RICHEST computed presentation
+   * (most card-defining properties non-default). The clones' top-level nodes
+   * then receive, inline: padding, border-radius, background-color,
+   * background-image, box-shadow, border, and margin-bottom (card spacing).
+   *
+   * Engine-gated: engines whose fetched markup already matches the live
+   * stylesheet (same generation — Google, Bing, DDG…) gain nothing, and
+   * inlining presentation there could FIGHT live rules. Runs only for yandex.
+   */
+  private applyLiveCardPresentation(sourceNodes: Element[], resultHost: HTMLElement): void {
+    if (sourceNodes.length === 0) return;
+    if (this.engine.id !== "yandex") return;
+    try {
+      const liveResults = this.engine.getResultNodes(this.container).filter(
+        (n) => !n.closest("[data-inf-page]")
+      );
+      if (liveResults.length === 0) return;
+
+      // Pick the reference: the live result with the most non-default
+      // card-defining properties (a plain unboxed result scores ~0).
+      const CARD_PROPS = [
+        "padding-top", "padding-bottom", "padding-left", "padding-right",
+        "border-radius", "background-color", "background-image",
+        "box-shadow", "border-top-width", "margin-bottom",
+      ] as const;
+      const score = (el: Element): number => {
+        const cs = window.getComputedStyle(el);
+        let s = 0;
+        if (parseFloat(cs.paddingTop) > 0 || parseFloat(cs.paddingBottom) > 0) s += 2;
+        if (cs.borderRadius && cs.borderRadius !== "0px") s += 2;
+        const bg = cs.backgroundColor;
+        if (bg && !/rgba?\(0,\s*0,\s*0,\s*0\)|transparent/.test(bg)) s += 2;
+        if (cs.boxShadow && cs.boxShadow !== "none") s += 3;
+        if (parseFloat(cs.marginBottom) > 0) s += 1;
+        return s;
+      };
+      let ref: Element = liveResults[0]!;
+      let refScore = -1;
+      for (const r of liveResults) {
+        const s = score(r);
+        if (s > refScore) {
+          ref = r;
+          refScore = s;
+        }
+      }
+      if (refScore <= 2) return; // live page shows no card look — nothing to transfer
+
+      const cs = window.getComputedStyle(ref);
+      const cloned = Array.from(resultHost.children) as HTMLElement[];
+      for (const c of cloned) {
+        const s = window.getComputedStyle(c);
+        // Only dress clones that are NOT already card-styled (fetched markup
+        // matching live classes keeps its own rules — never fight them).
+        if (score(c) >= 2) continue;
+        for (const prop of CARD_PROPS) {
+          const val = cs.getPropertyValue(prop);
+          if (val && val !== "none" && !/^0(px)?$/.test(val)) {
+            c.style.setProperty(prop, val);
+          }
+        }
+        // Live cards separate via margin-bottom; ensure a gap even when the
+        // wrapper list resets margins.
+        const mb = parseFloat(cs.marginBottom);
+        if (mb > 0) c.style.setProperty("margin-bottom", `${mb}px`);
+      }
+    } catch {
+      /* computed-style probing must never break the append */
+    }
+  }
+
   /** Insert a page marker so interceptPagination can find page boundaries. */
   private markInitialPage(): void {
     const marker = document.createElement('div');
@@ -773,6 +848,17 @@ export class InfiniteScrollManager {
       if (wrapClone.id && document.getElementById(wrapClone.id)) {
         wrapClone.removeAttribute("id");
       }
+      // A UL/OL wrapper outside the engine's own stylesheet context falls
+      // back to BROWSER DEFAULT list styling (bullets + indent) when the
+      // live page's list rules are class-scoped and the fetched classes
+      // don't match (rotated-class builds). Reset defensively — matching
+      // the live list reset (.serp-list_left_yes{list-style:none;margin:0;
+      // padding:0} in every captured generation).
+      if (wrapClone.tagName === "UL" || wrapClone.tagName === "OL") {
+        wrapClone.style.listStyle = "none";
+        wrapClone.style.margin = "0";
+        wrapClone.style.padding = "0";
+      }
       pageContainer.appendChild(wrapClone);
       resultHost = wrapClone;
     }
@@ -823,6 +909,18 @@ export class InfiniteScrollManager {
       }
       resultHost.appendChild(clone);
     }
+
+    // ── Live card-presentation transfer (Yandex 2026-09-08, 5th round) ──────
+    // The live SERP styles result cards through wrapper classes that the
+    // FETCHED (SSR) page does not share — on rotated-class builds the live
+    // stylesheet has no rules for the fetched markup's class names, so clones
+    // render as unboxed, unspaced text (field: "not inside its cards or
+    // spaced in between results"). PortFetchedStyles is engine-gated to
+    // Startpage for a reason (palette safety), so instead MEASURE the live
+    // card presentation once per append and inline it: the cloned top-level
+    // result nodes get the live padding / radius / background / border /
+    // shadow / spacing. Theme-correct by construction, class-agnostic.
+    this.applyLiveCardPresentation(nodes, resultHost);
 
     // Insert before the SENTINEL when it lives inside the container (the
     // spinner then always sits directly beneath the newest results), else

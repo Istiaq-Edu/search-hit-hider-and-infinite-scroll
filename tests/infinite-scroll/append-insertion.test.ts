@@ -203,6 +203,72 @@ describe("InfiniteScrollManager.appendNodes insertion", () => {
       .toBeGreaterThan(Array.from(container.children).indexOf(sentInContainer!));
   });
 
+  // ── Live card-presentation transfer (Yandex 2026-09-08, 5th round) ─────────
+  // Rotated-class builds: fetched SSR clones carry class names the live
+  // stylesheet has no rules for → unboxed, unspaced results. The manager
+  // measures the live card look and inlines it onto unstyled clones.
+  it("inlines the live card presentation onto unstyled Yandex clones", () => {
+    // Live results styled via a scoped class the fetched doc will NOT carry.
+    const style = document.createElement("style");
+    style.textContent = `
+      .live-serp .LiveCard {
+        padding: 12px 16px;
+        border-radius: 16px;
+        background-color: rgb(255, 255, 255);
+        box-shadow: 0 4px 12px 0 rgba(0, 0, 0, 0.05);
+        margin-bottom: 10px;
+      }`;
+    document.head.appendChild(style);
+    const container = document.createElement("ul");
+    container.className = "live-serp";
+    document.body.appendChild(container);
+    for (let i = 0; i < 3; i++) {
+      const li = document.createElement("li");
+      li.className = "LiveCard";
+      li.innerHTML = `<a class="OrganicTitle-Link" href="https://live.test/${i}">live ${i}</a>`;
+      container.appendChild(li);
+    }
+    try {
+      // Fetched nodes: same anatomy, ROTATED class names (no LiveCard) —
+      // the live stylesheet has no rules for them.
+      const fetched = parseHTML(`
+        <ul class="serp-list serp-list_left_yes">
+          <li class="rotatedClass"><h2><a class="OrganicTitle-Link" href="https://a.com/1">fetched 1</a></h2></li>
+          <li class="rotatedClass"><h2><a class="OrganicTitle-Link" href="https://a.com/2">fetched 2</a></h2></li>
+        </ul>`);
+      const engine = {
+        ...stubEngine(null),
+        id: "yandex" as unknown as EngineAdapter["id"],
+        getResultNodes: (d: Document | Element) =>
+          Array.from((d as Element).querySelectorAll(
+            "li.LiveCard:not([data-inf-page] *), li.rotatedClass"
+          )),
+        getFetchWrapper: () => fetched.querySelector("ul.serp-list")!,
+      } as unknown as EngineAdapter;
+      const manager = new InfiniteScrollManager(engine, container, () => {}, { maxPages: 5 });
+      const nodes = Array.from(fetched.querySelectorAll("li.rotatedClass"));
+      callAppend(manager, nodes, fetched);
+
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const clones = page.querySelectorAll("li.rotatedClass");
+      expect(clones.length).toBe(2);
+      for (const c of clones) {
+        const h = c as HTMLElement;
+        // Card properties transferred inline from the live reference:
+        expect(h.style.padding).toBe("12px 16px");
+        expect(h.style.borderRadius).toBe("16px");
+        expect(h.style.backgroundColor).toBe("rgb(255, 255, 255)");
+        expect(h.style.marginBottom).toBe("10px");
+      }
+      // The wrapper list is defensively reset (no default bullets/indent):
+      const wrap = page.querySelector("ul.serp-list") as HTMLElement;
+      expect(wrap.style.listStyle).toBe("none");
+    } finally {
+      style.remove();
+      container.remove();
+    }
+  });
+
   it("notifies with the appended clones so the blocking pipeline processes them", () => {
     const doc = parseHTML('<div id="search-results"></div>');
     const container = doc.querySelector("#search-results")!;
