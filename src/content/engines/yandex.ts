@@ -222,9 +222,31 @@ export class YandexAdapter implements EngineAdapter {
     while (el.parentElement && el.parentElement !== container) {
       el = el.parentElement;
     }
-    // If the walk escaped the container (pager lives outside it), let the
-    // manager fall back to append-at-end instead of a misplaced insert.
-    return el.parentElement === container ? el : null;
+    if (el.parentElement !== container) return null;
+    // POSITION VERIFICATION (field 2026-09-08, second round): a genuine pager
+    // block sits AFTER the last result in the container. Yandex's cee
+    // continuous-scroll variant renders inline load-more controls BETWEEN
+    // results — real /search?&p= links that pass the href-shape filter above.
+    // Any anchor that precedes the last result is such an in-list widget;
+    // anchoring there splices fetched pages and the spinner into the middle
+    // of the list. Refuse and let the manager append at the end instead.
+    const children = Array.from(container.children);
+    const anchorIdx = children.indexOf(el);
+    let lastResultIdx = -1;
+    try {
+      for (const node of this.getResultNodes(container)) {
+        let cur: Element | null = node;
+        while (cur && cur.parentElement !== container) cur = cur.parentElement;
+        if (!cur) continue;
+        const idx = children.indexOf(cur);
+        if (idx > lastResultIdx) lastResultIdx = idx;
+      }
+    } catch { /* unreadable container — skip the position check */ }
+    // Strictly AFTER the last result: an anchor that sits ON or BEFORE a
+    // result is an in-card control or an inline chunk, never the bottom
+    // pager. (No results extracted → -1 → check vacuous, anchor accepted.)
+    if (lastResultIdx >= 0 && anchorIdx <= lastResultIdx) return null;
+    return el;
   }
 
   /**

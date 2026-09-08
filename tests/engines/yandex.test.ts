@@ -162,6 +162,36 @@ describe("YandexAdapter", () => {
         const container = doc.querySelector("ul#search-result")!;
         expect(adapter.getInsertionAnchor(container)).toBeNull();
       });
+
+      // ── Position verification (field 2026-09-08, round 2) ────────────────────
+      // The cee continuous-scroll variant renders REAL /search?&p= load-more
+      // controls BETWEEN results. They pass the href-shape filter — only the
+      // position check rejects them: a pager must sit AFTER the last result.
+      const LIST_WITH_INLINE_CHUNK = `
+        <ul id="search-result" class="serp-list serp-list_left_yes">
+          <li class="serp-item serp-item_card">
+            <h2><a class="OrganicTitle-Link" href="https://example.com/1">One</a></h2>
+          </li>
+          <div class="serp-more-chunk">
+            <a class="Pager-Item Pager-Item_type_next" aria-label="Next page" href="/search/?text=q&amp;lr=10466&amp;cee=1&amp;p=1">load more</a>
+          </div>
+          <li class="serp-item serp-item_card">
+            <h2><a class="OrganicTitle-Link" href="https://example.com/2">Two</a></h2>
+          </li>
+        </ul>`;
+
+      it("rejects a real /search?&p= link that sits BETWEEN results (cee inline chunk)", () => {
+        const doc = parseHTML(LIST_WITH_INLINE_CHUNK);
+        const container = doc.querySelector("ul#search-result")!;
+        expect(adapter.getInsertionAnchor(container)).toBeNull();
+      });
+
+      it("getNextPageUrl still extracts the inline chunk's URL for fetching", () => {
+        // The URL itself is a legitimate next page — only the ANCHOR is wrong.
+        const doc = parseHTML(LIST_WITH_INLINE_CHUNK);
+        const url = adapter.getNextPageUrl(doc);
+        expect(url).toContain("p=1");
+      });
     });
   });
 

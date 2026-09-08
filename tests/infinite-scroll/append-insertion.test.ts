@@ -96,10 +96,6 @@ describe("InfiniteScrollManager.appendNodes insertion", () => {
     expect(page.nextElementSibling).toBeNull();
   });
 
-  // ── Engine fetch wrapper (Yandex 2026-09-08 field report) ──────────────────
-  // Yandex cards rely on list-scoped rules (.serp-list_left_yes{list-style:none},
-  // li margins); bare li nodes in the default div wrapper rendered as one
-  // condensed block. The engine's getFetchWrapper supplies the list element.
   it("hosts fetched nodes inside the engine's fetch wrapper clone", () => {
     const doc = parseHTML(`
       <ul id="search-result" class="serp-list serp-list_left_yes">
@@ -133,6 +129,78 @@ describe("InfiniteScrollManager.appendNodes insertion", () => {
     // duplicate-id guard: the clone must not carry the fetched list's id
     expect(listClone.id).not.toBe("search-result");
     container.remove();
+  });
+
+  // ── Placement invariant (Yandex 2026-09-08 field report, round 2) ─────────
+  // A "next"-labelled element sitting BETWEEN results (Yandex cee inline
+  // load-more chunk) must never become the insertion reference: pages and
+  // the spinner spliced into the middle of the list, right after the first
+  // card. Manager-level defense: any insertRef inside the result range
+  // degrades to append-at-end.
+  it("degrades a mid-list anchor to append-at-end (pages land after ALL results)", () => {
+    const doc = parseHTML(`
+      <ul id="search-result" class="serp-list serp-list_left_yes">
+        <li class="serp-item serp-item_card">r1</li>
+        <div class="serp-more-chunk"><a href="/search?p=1">load more</a></div>
+        <li class="serp-item serp-item_card">r2</li>
+      </ul>
+    `);
+    const container = doc.querySelector("ul#search-result")!;
+    const chunk = doc.querySelector(".serp-more-chunk")!;
+    // Engine returns the mid-list chunk as anchor (simulating an adapter
+    // that missed it); getResultNodes resolves both result lis.
+    const engine = {
+      ...stubEngine(chunk),
+      getResultNodes: (d: Document | Element) =>
+        Array.from((d as Element).querySelectorAll("li.serp-item")),
+    } as unknown as EngineAdapter;
+    const manager = new InfiniteScrollManager(engine, container, () => {}, { maxPages: 5 });
+    const node = doc.createElement("li");
+    node.className = "serp-item serp-item_card";
+    node.textContent = "fetched";
+    callAppend(manager, [node]);
+
+    const page = container.querySelector("[data-inf-page]") as HTMLElement;
+    expect(page).not.toBeNull();
+    // Page must come after the LAST result, not after the first.
+    const lastResult = container.querySelectorAll("li.serp-item")[1];
+    expect(page.previousElementSibling).toBe(lastResult);
+  });
+
+  it("degrades a mid-list sentinel to append-at-end", () => {
+    const doc = parseHTML(`
+      <ul id="search-result" class="serp-list serp-list_left_yes">
+        <li class="serp-item serp-item_card">r1</li>
+        <li class="serp-item serp-item_card">r2</li>
+      </ul>
+    `);
+    const container = doc.querySelector("ul#search-result")!;
+    const engine = {
+      ...stubEngine(null),
+      getResultNodes: (d: Document | Element) =>
+        Array.from((d as Element).querySelectorAll("li.serp-item")),
+    } as unknown as EngineAdapter;
+    const manager = new InfiniteScrollManager(engine, container, () => {}, { maxPages: 5 });
+    // Simulate a sentinel that was placed mid-list (e.g. by a stale anchor
+    // at init time, before later results hydrated in above it).
+    const sent = doc.createElement("div");
+    sent.id = "is-sentinel";
+    const secondChild = container.children[1];
+    if (secondChild) container.insertBefore(sent, secondChild);
+    (manager as unknown as { sentinel: { element: HTMLElement } }).sentinel = { element: sent };
+    const node = doc.createElement("li");
+    node.textContent = "fetched";
+    callAppend(manager, [node]);
+
+    const page = container.querySelector("[data-inf-page]") as HTMLElement;
+    expect(page).not.toBeNull();
+    expect(page.previousElementSibling?.textContent).toBe("r2");
+    // The stray mid-list sentinel stays BELOW the appended page (page lands
+    // at the end, sentinel still floats mid-list where it was misplaced).
+    const sentInContainer = container.querySelector("#is-sentinel");
+    expect(sentInContainer).not.toBeNull();
+    expect(Array.from(container.children).indexOf(page))
+      .toBeGreaterThan(Array.from(container.children).indexOf(sentInContainer!));
   });
 
   it("notifies with the appended clones so the blocking pipeline processes them", () => {

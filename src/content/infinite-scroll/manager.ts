@@ -321,8 +321,40 @@ export class InfiniteScrollManager {
     // Place the spinner directly beneath the streamed results when the
     // engine exposes a pager anchor (Startpage/Bing/Yandex); otherwise
     // after the container, as before.
-    const anchor = this.engine.getInsertionAnchor?.(this.container) ?? null;
+    let anchor = this.engine.getInsertionAnchor?.(this.container) ?? null;
+    // Placement invariant (2026-09-08 Yandex field round): a mid-list anchor
+    // puts the spinner — and every page inserted before it — into the middle
+    // of the results. Only accept anchors that sit after the last result.
+    if (anchor && !this.afterLastResult(anchor)) anchor = null;
     this.sentinel = new Sentinel(this.container, anchor ?? undefined);
+  }
+
+  /**
+   * True when `ref` sits strictly after the last result the adapter can
+   * resolve inside the container. Auto-loaded pages and the spinner must
+   * never splice into the middle of the existing result list — a stray
+   * in-list "next" control (Yandex's cee continuous-scroll chunk) otherwise
+   * hijacks insertion and stacks every fetched page right after the first
+   * result card. Unknown container (no results resolvable) → true: keep the
+   * engine's own anchor choice, as before.
+   */
+  private afterLastResult(ref: Element): boolean {
+    try {
+      const children = Array.from(this.container.children);
+      const refIdx = children.indexOf(ref);
+      if (refIdx === -1) return false;
+      let lastResultIdx = -1;
+      for (const node of this.engine.getResultNodes(this.container)) {
+        let cur: Element | null = node;
+        while (cur && cur.parentElement !== this.container) cur = cur.parentElement;
+        if (!cur) continue;
+        const idx = children.indexOf(cur);
+        if (idx > lastResultIdx) lastResultIdx = idx;
+      }
+      return lastResultIdx === -1 || refIdx > lastResultIdx;
+    } catch {
+      return true; // unreadable — trust the engine's anchor
+    }
   }
 
   private startObserver(): void {
@@ -794,20 +826,45 @@ export class InfiniteScrollManager {
     // end of the results container. The parentNode guards keep insertBefore
     // from throwing on misplaced references.
     const sentinelEl = this.sentinel?.element ?? null;
-    const anchor = this.engine.getInsertionAnchor?.(this.container) ?? null;
+    let anchor = this.engine.getInsertionAnchor?.(this.container) ?? null;
+    // Same placement invariant as createSentinel: an anchor that sits inside
+    // the result range would splice fetched pages into the middle of the list
+    // (field 2026-09-08: pages + spinner landing right after the FIRST card).
+    if (anchor && !this.afterLastResult(anchor)) anchor = null;
     const pagination =
       anchor ??
       this.container.querySelector('#pagination-snippet, nav[role="pagination"], .pagination');
+    // The generic pagination fallback must ALSO respect the invariant — an
+    // in-list element matching ".pagination" is exactly the same hijack.
     const insertRef =
-      sentinelEl && sentinelEl.parentNode === this.container
+      sentinelEl && sentinelEl.parentNode === this.container && this.afterLastResult(sentinelEl)
         ? sentinelEl
-        : pagination && pagination.parentNode === this.container
+        : pagination && pagination.parentNode === this.container && this.afterLastResult(pagination)
           ? pagination
           : null;
     if (insertRef) {
       this.container.insertBefore(pageContainer, insertRef);
     } else {
       this.container.appendChild(pageContainer);
+    }
+    // Placement receipt (debug): WHERE the page landed relative to the
+    // results — the field report needed exactly this and it was invisible.
+    if (this.config.debugMode) {
+      const kids = Array.from(this.container.children);
+      const idx = kids.indexOf(pageContainer);
+      let last = -1;
+      try {
+        for (const n of this.engine.getResultNodes(this.container)) {
+          let cur: Element | null = n;
+          while (cur && cur.parentElement !== this.container) cur = cur.parentElement;
+          if (cur) last = Math.max(last, kids.indexOf(cur));
+        }
+      } catch { /* ignore */ }
+      const pos = last === -1 ? "unknown" : idx > last ? "after-results" : "MID-LIST";
+      this.log(
+        `page placement: index=${idx}/${kids.length} lastResult=${last} → ${pos}` +
+          (pos === "MID-LIST" ? " (insertRef was in-list — report this)" : "")
+      );
     }
 
     // Port the fetched page's own styles when the engine needs it: fetched
