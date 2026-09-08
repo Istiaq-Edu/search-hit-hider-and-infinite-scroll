@@ -5,6 +5,7 @@ import {
   looksLikeGoogleAggregate,
   googleDisplayDomain,
 } from "./engines/google-dom";
+import { isOwnEchoRecord } from "./markers";
 
 // ============================================================
 // Anti-FOUC preload — registered at document_start.
@@ -771,6 +772,15 @@ import {
       // ── Case D: attribute mutation (href set/changed on existing element) ──
       if (m.type === "attributes") {
         const el = m.target as Element;
+        // ── Own-echo gate (2026-09-07 crash field report on 1.8.10) ────────
+        // See markers.ts: reacting to our own SET echoes of data-shh-ok
+        // (remove ok → tryHide → re-stamp → new record → …) is an unbounded
+        // microtask loop that starves the event loop and CRASHED the
+        // browser on every Google search in 1.8.10. Only ABSENT-marker
+        // records (Google stripped ours) are actionable.
+        if (isOwnEchoRecord(m.attributeName, el)) {
+          continue; // our own SET — nothing to heal
+        }
         try {
           // Walk up to the nearest result container and re-check it.
           const parent = el.closest?.(SELS);
