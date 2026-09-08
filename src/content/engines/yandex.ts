@@ -157,17 +157,42 @@ export class YandexAdapter implements EngineAdapter {
       'a[aria-label="Next"]',
       'a.pager__next',
     ];
+    const pagerNexts: string[] = [];
     for (const sel of selectors) {
-      const btn = doc.querySelector<HTMLAnchorElement>(sel);
-      if (btn?.href) return btn.href;
+      for (const a of Array.from(doc.querySelectorAll<HTMLAnchorElement>(sel))) {
+        // Same discriminator as getInsertionAnchor: an AI-card or converter
+        // "next" control must never be mistaken for the pager — its href
+        // would become the next fetch URL (an in-page anchor re-fetches the
+        // SAME page: dedupe eats it, two empties end the session).
+        if (a.href && this.isPagerNextLink(a)) pagerNexts.push(a.href);
+      }
     }
-    return null;
+    // Last match wins: when both a top and a bottom pager render, they point
+    // at the same next page; the bottom one is the real pager.
+    return pagerNexts.length > 0 ? (pagerNexts[pagerNexts.length - 1] ?? null) : null;
   }
 
   getPaginationSelectors(): string[] {
     // Keep pagination visible as fallback — Yandex's bot detection makes
     // automatic fetching unreliable, so users need manual page links.
     return [];
+  }
+
+  /** Next links are PAGER nexts only when they point at a paginated /search
+   *  URL (…&p=N). Anything else — a source-scroller or gallery control inside
+   *  an AI card, a related-query chip — is NOT a pager, and treating it as one
+   *  made getInsertionAnchor land auto-loaded pages and the spinner directly
+   *  after the FIRST result card (field report 2026-09-08: "animation shown
+   *  after first result box, results added after first result card"). */
+  private isPagerNextLink(a: HTMLAnchorElement | Element): boolean {
+    const href = a.getAttribute("href");
+    if (!href) return false;
+    try {
+      const u = new URL(href, "https://yandex.com");
+      return /^\/search\/?$/.test(u.pathname) && /[?&]p=\d+/.test(u.search);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -183,7 +208,15 @@ export class YandexAdapter implements EngineAdapter {
     const nexts = container.querySelectorAll(
       'a.Pager-Item_type_next, a[aria-label="Next page"], a[aria-label="Next"], a.pager__next'
     );
-    const next = nexts.length > 0 ? nexts[nexts.length - 1] : null;
+    // Only links that actually paginate the search qualify. Class/aria alone
+    // is not enough: Yandex's AI-answer and converter cards carry "next"
+    // controls of their own, and the first of those used to hijack the
+    // anchor (verified: anchor resolved to the AI card's li — pages and the
+    // spinner were inserted right after the first result).
+    const pagerNexts = Array.from(nexts).filter((a) =>
+      this.isPagerNextLink(a as HTMLAnchorElement)
+    );
+    const next = pagerNexts.length > 0 ? pagerNexts[pagerNexts.length - 1] : null;
     if (!next) return null;
     let el: Element = next;
     while (el.parentElement && el.parentElement !== container) {
@@ -194,12 +227,50 @@ export class YandexAdapter implements EngineAdapter {
     return el.parentElement === container ? el : null;
   }
 
+  /**
+   * Yandex styles result cards via rules scoped to the results list
+   * (.serp-list_left_yes{list-style:none}, li.serp-item margins) and — after
+   * the 2026 card redesign — via CSS custom properties the list carries.
+   * Dropping fetched li.serp-item nodes into a plain div wrapper (the
+   * manager default) strips that context: margins collapse oddly and the
+   * group renders as ONE condensed block instead of separate cards (field
+   * report 2026-09-08). Hosting the clones inside a shallow clone of the
+   * fetched page's own results list restores per-card styling.
+   */
+  getFetchWrapper(doc: Document): Element | null {
+    // querySelector returns the first match in DOCUMENT order, so a single
+    // comma list cannot express "prefer the organic list". Iterate.
+    for (const sel of [
+      "ul#search-result.serp-list",
+      "ul.serp-list_left_yes",
+      "ol.serp-list",
+      "ul.serp-list",
+    ]) {
+      const el = doc.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
+  }
+
   getResultId(_node: Element): string | null {
     return null;
   }
 
   getResultsContainer(doc?: Document): Element | null {
     const d = doc ?? document;
-    return d.querySelector('#search-results, ol.serp-list, ul.serp-list');
+    // Iterate alternatives in priority order: querySelector on a comma list
+    // returns the first match in DOCUMENT order, which could hand back the
+    // right-column list (serp-list_right_yes) or an in-card list when those
+    // precede the organic list. ul#search-result is the organic list.
+    for (const sel of [
+      "ul#search-result",
+      "#search-results",
+      "ol.serp-list",
+      "ul.serp-list",
+    ]) {
+      const el = d.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
   }
 }

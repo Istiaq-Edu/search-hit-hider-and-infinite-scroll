@@ -728,6 +728,15 @@ export class InfiniteScrollManager {
     const wrapper = sourceDoc ? this.engine.getFetchWrapper?.(sourceDoc) : null;
     if (wrapper) {
       const wrapClone = document.importNode(wrapper, false) as HTMLElement;
+      // An engine's fetch wrapper can carry an id (Yandex's ul#search-result).
+      // Importing it verbatim duplicates the id in the live document —
+      // engine JS resolving that id (getElementById/querySelector return the
+      // first match, the original, but hash-anchors and strict tooling can
+      // still trip). The clone needs the CLASSES for styling context; the
+      // id is never functional on a container whose position we control.
+      if (wrapClone.id && document.getElementById(wrapClone.id)) {
+        wrapClone.removeAttribute("id");
+      }
       pageContainer.appendChild(wrapClone);
       resultHost = wrapClone;
     }

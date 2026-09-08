@@ -98,6 +98,71 @@ describe("YandexAdapter", () => {
       const stray = doc.querySelector("div")!;
       expect(adapter.getInsertionAnchor(stray)).toBeNull();
     });
+
+    // ── Pager-vs-card discrimination (field 2026-09-08) ─────────────────────
+    // A "next"-labelled link inside the AI/answer card used to hijack the
+    // anchor: the walk-up landed on the CARD's li, so auto-loaded pages and
+    // the spinner were inserted directly after the FIRST result.
+    describe("pager-next discrimination", () => {
+      const CARD_WITH_NEXT = `
+        <ul id="search-result" class="serp-list serp-list_left_yes">
+          <li class="serp-item serp-item__futuris-snippet serp-item_card">
+            <div class="FuturisSearchCard">
+              <ol class="FuturisGPTMessage-Sources"><li>src</li></ol>
+              <a class="pager__next" aria-label="Next" href="#src-2">next source</a>
+            </div>
+          </li>
+          <li class="serp-item serp-item_card">
+            <h2><a class="OrganicTitle-Link" href="https://example.com/1">One</a></h2>
+          </li>
+          <li class="serp-item serp-item_card">
+            <h2><a class="OrganicTitle-Link" href="https://example.com/2">Two</a></h2>
+          </li>
+        </ul>`;
+      const CARD_PLUS_PAGER = CARD_WITH_NEXT.replace(
+        "</ul>",
+        `<div class="pager"><a class="Pager-Item Pager-Item_type_next" href="/search/?text=q&amp;lr=87&amp;p=1">next</a></div>
+        </ul>`
+      );
+
+      it("ignores an in-card next control that is not a /search?&p= link", () => {
+        const doc = parseHTML(CARD_WITH_NEXT);
+        const container = doc.querySelector("ul#search-result")!;
+        // Anchor must NOT resolve to the AI card's li (child index 0).
+        expect(adapter.getInsertionAnchor(container)).toBeNull();
+      });
+
+      it("still finds the real pager when an in-card next control coexists", () => {
+        const doc = parseHTML(CARD_PLUS_PAGER);
+        const container = doc.querySelector("ul#search-result")!;
+        const anchor = adapter.getInsertionAnchor(container);
+        expect(anchor).not.toBeNull();
+        expect(anchor!.className).toBe("pager");
+        expect(anchor!.parentElement).toBe(container);
+      });
+
+      it("getNextPageUrl ignores the in-card anchor href", () => {
+        const doc = parseHTML(CARD_WITH_NEXT);
+        expect(adapter.getNextPageUrl(doc)).toBeNull();
+      });
+
+      it("getNextPageUrl returns the pager's paginated search URL", () => {
+        const doc = parseHTML(CARD_PLUS_PAGER);
+        const url = adapter.getNextPageUrl(doc);
+        expect(url).toContain("/search");
+        expect(url).toContain("p=1");
+      });
+
+      it("a related-query link (no p=) is not a pager next", () => {
+        const doc = parseHTML(`
+          <ul id="search-result" class="serp-list serp-list_left_yes">
+            <li class="serp-item serp-item_card"><a class="OrganicTitle-Link" href="https://example.com/1">One</a></li>
+            <div class="pager"><a aria-label="Next" href="/search/?text=related+query">more like this</a></div>
+          </ul>`);
+        const container = doc.querySelector("ul#search-result")!;
+        expect(adapter.getInsertionAnchor(container)).toBeNull();
+      });
+    });
   });
 
   describe("getResultsContainer", () => {
@@ -116,6 +181,39 @@ describe("YandexAdapter", () => {
     it("returns null on unrelated pages", () => {
       const doc = parseHTML("<div id='main'>nothing</div>");
       expect(adapter.getResultsContainer(doc)).toBeNull();
+    });
+
+    it("prefers ul#search-result even when another serp-list precedes it in document order", () => {
+      // 2026 anatomy: the right column (aside) ships a serp-list_right_yes
+      // BEFORE the organic left list in document order on some layouts; a
+      // single comma-list querySelector would return the first DOM match.
+      const doc = parseHTML(`
+        <div class="content">
+          <div class="content__right"><ul class="serp-list serp-list_right_yes"></ul></div>
+          <div class="content__left"><ul id="search-result" class="serp-list serp-list_left_yes"></ul></div>
+        </div>`);
+      const el = adapter.getResultsContainer(doc);
+      expect(el?.id).toBe("search-result");
+    });
+  });
+
+  describe("getFetchWrapper", () => {
+    it("returns the organic results list from a fetched doc", () => {
+      const doc = parseHTML(`
+        <div class="content">
+          <ul class="serp-list serp-list_right_yes"></ul>
+          <ul id="search-result" class="serp-list serp-list_left_yes">
+            <li class="serp-item serp-item_card"><h2><a class="OrganicTitle-Link" href="https://a.com/1">a</a></h2></li>
+          </ul>
+        </div>`);
+      const w = adapter.getFetchWrapper(doc);
+      expect(w?.id).toBe("search-result");
+      expect(w?.classList.contains("serp-list_left_yes")).toBe(true);
+    });
+
+    it("returns null when the fetched doc has no results list", () => {
+      const doc = parseHTML("<div>captcha page</div>");
+      expect(adapter.getFetchWrapper(doc)).toBeNull();
     });
   });
 });

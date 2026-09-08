@@ -96,6 +96,45 @@ describe("InfiniteScrollManager.appendNodes insertion", () => {
     expect(page.nextElementSibling).toBeNull();
   });
 
+  // ── Engine fetch wrapper (Yandex 2026-09-08 field report) ──────────────────
+  // Yandex cards rely on list-scoped rules (.serp-list_left_yes{list-style:none},
+  // li margins); bare li nodes in the default div wrapper rendered as one
+  // condensed block. The engine's getFetchWrapper supplies the list element.
+  it("hosts fetched nodes inside the engine's fetch wrapper clone", () => {
+    const doc = parseHTML(`
+      <ul id="search-result" class="serp-list serp-list_left_yes">
+        <li class="serp-item serp-item_card">r1</li>
+      </ul>
+    `);
+    const container = doc.querySelector("ul#search-result")!;
+    // The duplicate-id guard checks the GLOBAL document — attach the live
+    // list so it plays the production role (ul#search-result present).
+    document.body.appendChild(container);
+    const fetched = parseHTML(`
+      <ul id="search-result" class="serp-list serp-list_left_yes">
+        <li class="serp-item serp-item_card"><a class="OrganicTitle-Link" href="https://a.com/2">fetched</a></li>
+      </ul>
+    `);
+    const wrapEl = fetched.querySelector("ul.serp-list")!;
+    const engine = {
+      ...stubEngine(null),
+      getFetchWrapper: () => wrapEl,
+    } as unknown as EngineAdapter;
+    const manager = new InfiniteScrollManager(engine, container, () => {}, { maxPages: 5 });
+    const node = fetched.querySelector("li.serp-item")!;
+    callAppend(manager, [node], fetched);
+
+    const page = container.querySelector("[data-inf-page]") as HTMLElement;
+    const listClone = page.querySelector("ul.serp-list")!;
+    expect(listClone).not.toBeNull();
+    // fetched li lives INSIDE the list clone, not directly in the page div
+    const li = page.querySelector("li.serp-item")!;
+    expect(li.closest("ul.serp-list")).toBe(listClone);
+    // duplicate-id guard: the clone must not carry the fetched list's id
+    expect(listClone.id).not.toBe("search-result");
+    container.remove();
+  });
+
   it("notifies with the appended clones so the blocking pipeline processes them", () => {
     const doc = parseHTML('<div id="search-results"></div>');
     const container = doc.querySelector("#search-results")!;
