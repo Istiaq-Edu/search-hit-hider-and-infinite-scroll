@@ -767,6 +767,51 @@ export class InfiniteScrollManager {
       }
       if (refScore <= 2) return; // live page shows no card look — nothing to transfer
 
+      // ── Inter-card gap (field round 6, 2026-09-09) ────────────────────────
+      // Boxes transferred fine in 1.8.16 but clones still rendered TOUCHING:
+      // on the cee build the card box lives on the result node while the gap
+      // lives on its (rotated-class) wrapper — the reference node's own
+      // margin-bottom measures 0 and nothing transfers. Never trust a single
+      // element's margins for spacing: measure the GEOMETRIC gap between
+      // consecutive live result boxes (rect bottom → next rect top), which is
+      // correct wherever the live build keeps it (li margin, wrapper margin,
+      // or container gap). Median over consecutive pairs, capped to kill
+      // layout outliers (sticky headers, interleaved ads).
+      const measureCardGap = (): number => {
+        const rects = liveResults
+          .map((r) => r.getBoundingClientRect())
+          .filter((r) => r.height > 0 && r.bottom > 0);
+        if (rects.length < 2) return -1;
+        // Compare in document order (getResultNodes order can differ from
+        // visual order when the adapter resolves at mixed DOM levels).
+        rects.sort((a, b) => a.bottom - b.bottom);
+        const gaps: number[] = [];
+        for (let i = 1; i < rects.length; i++) {
+          const prev = rects[i - 1]!;
+          const cur = rects[i]!;
+          const gap = cur.top - prev.bottom;
+          // Overlap = different visual column or a measured mid-card node —
+          // not evidence of spacing; skip rather than pollute the median.
+          if (gap >= 0 && gap < 400) gaps.push(gap);
+        }
+        if (gaps.length === 0) return -1;
+        gaps.sort((a, b) => a - b);
+        const median = gaps[Math.floor(gaps.length / 2)]!;
+        return median > 0 ? Math.round(median * 10) / 10 : -1;
+      };
+      const geometricGap = measureCardGap();
+      // Fallback: the reference node's own margin (1.8.16 behavior) when the
+      // geometric probe cannot run (hidden container, jsdom zero-layout) or
+      // measures no gap.
+      const refMarginBottom = parseFloat(window.getComputedStyle(ref).marginBottom);
+      let gapPx = geometricGap;
+      let gapSource = "geometric";
+      if (gapPx <= 0) {
+        gapPx = refMarginBottom > 0 ? refMarginBottom : 0;
+        gapSource = "ref-margin";
+      }
+      this.lastCardGap = { px: gapPx, source: gapSource };
+
       const cs = window.getComputedStyle(ref);
       const cloned = Array.from(resultHost.children) as HTMLElement[];
       for (const c of cloned) {
@@ -784,6 +829,19 @@ export class InfiniteScrollManager {
         // wrapper list resets margins.
         const mb = parseFloat(cs.marginBottom);
         if (mb > 0) c.style.setProperty("margin-bottom", `${mb}px`);
+        // Spacing between cloned cards: the measured live gap (or the ref's
+        // own margin when geometry was unavailable). Applied even when the
+        // card-prop loop skipped margin-bottom (ref margin 0 — the cee case).
+        if (gapPx > 0) c.style.setProperty("margin-bottom", `${gapPx}px`);
+      }
+      // The page container's hardcoded 20px top margin separated an appended
+      // page from the page above by a fixed seam regardless of the real card
+      // gap. Match the measured gap so consecutive pages read as one stream.
+      // Guard: without a fetch wrapper the host's parent is the LIVE results
+      // container — never write layout there.
+      const pageEl = resultHost.parentElement;
+      if (gapPx > 0 && pageEl && pageEl.getAttribute("data-inf-page") !== null) {
+        pageEl.style.setProperty("margin-top", `${gapPx}px`);
       }
     } catch {
       /* computed-style probing must never break the append */
@@ -1030,6 +1088,7 @@ export class InfiniteScrollManager {
         faviconsPainted: painted,
         tintedEls: tinted,
         refColors: { title: this.lastRefTitle, path: this.lastRefPath },
+        cardGap: this.lastCardGap,
       }));
     }
     this.onNewNodes(appended);
@@ -1092,6 +1151,8 @@ export class InfiniteScrollManager {
   /** Last measured live reference colors (diagnostics). */
   private lastRefTitle: string | null = null;
   private lastRefPath: string | null = null;
+  /** Last measured live inter-card gap and its source (diagnostics). */
+  private lastCardGap: { px: number; source: string } | null = null;
 
   /**
    * Page-1 favicon intelligence (host->icon map + learned URL pattern),

@@ -269,6 +269,185 @@ describe("InfiniteScrollManager.appendNodes insertion", () => {
     }
   });
 
+  // ── Inter-card gap transfer (Yandex round 6, 2026-09-09) ─────────────────
+  // 1.8.16 shipped boxed-but-TOUCHING clones on the cee build: the card box
+  // lives on the result node while the gap lives on its rotated wrapper, so
+  // the reference's own margin-bottom measured 0. Spacing must come from the
+  // GEOMETRIC gap between consecutive live cards, not any single margin.
+  it("measures the geometric inter-card gap when the reference margin is 0 (cee build)", () => {
+    // Live: card look on the node itself, but NO margin on it — the gap is
+    // produced by margin on the wrapper (out of the measurement's reach).
+    const style = document.createElement("style");
+    style.textContent = `
+      .live-serp .LiveCard {
+        padding: 12px;
+        border-radius: 16px;
+        background-color: rgb(255, 255, 255);
+        margin-bottom: 0px;
+      }
+      .live-serp .wrap { margin-bottom: 14px; }`;
+    document.head.appendChild(style);
+    const container = document.createElement("div");
+    container.className = "live-serp";
+    document.body.appendChild(container);
+    for (let i = 0; i < 3; i++) {
+      const wrap = document.createElement("div");
+      wrap.className = "wrap";
+      const card = document.createElement("div");
+      card.className = "LiveCard";
+      card.innerHTML = `<a class="OrganicTitle-Link" href="https://live.test/${i}">live ${i}</a>`;
+      wrap.appendChild(card);
+      container.appendChild(wrap);
+    }
+    try {
+      const fetched = parseHTML(`
+        <ul class="serp-list serp-list_left_yes">
+          <li class="rotatedClass"><h2><a class="OrganicTitle-Link" href="https://a.com/1">fetched 1</a></h2></li>
+          <li class="rotatedClass"><h2><a class="OrganicTitle-Link" href="https://a.com/2">fetched 2</a></h2></li>
+        </ul>`);
+      const engine = {
+        ...stubEngine(null),
+        id: "yandex" as unknown as EngineAdapter["id"],
+        getResultNodes: (d: Document | Element) =>
+          Array.from((d as Element).querySelectorAll(
+            ".LiveCard:not([data-inf-page] *), li.rotatedClass"
+          )),
+        getFetchWrapper: () => fetched.querySelector("ul.serp-list")!,
+      } as unknown as EngineAdapter;
+      const manager = new InfiniteScrollManager(engine, container, () => {}, { maxPages: 5 });
+      // jsdom does no layout — stub the live cards' rects to a rendered
+      // stream: 50px cards separated by the wrapper margin (14px).
+      const cards = Array.from(container.querySelectorAll(".LiveCard"));
+      cards.forEach((card, i) => {
+        const top = i * 64;
+        (card as HTMLElement).getBoundingClientRect = () =>
+          ({ top, bottom: top + 50, height: 50, width: 600, left: 0, right: 600, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+      });
+      callAppend(manager, Array.from(fetched.querySelectorAll("li.rotatedClass")), fetched);
+
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const clones = page.querySelectorAll("li.rotatedClass");
+      expect(clones.length).toBe(2);
+      for (const c of clones) {
+        const h = c as HTMLElement;
+        // Card box still transfers from the reference:
+        expect(h.style.padding).toBe("12px");
+        // Gap comes from the measured geometric distance (ref margin was 0):
+        expect(h.style.marginBottom).toBe("14px");
+      }
+      // The page container's fixed 20px seam now tracks the measured gap:
+      expect(page.style.marginTop).toBe("14px");
+    } finally {
+      style.remove();
+      container.remove();
+    }
+  });
+
+  it("falls back to the reference margin when geometry is unavailable", () => {
+    // Live cards carry the gap on the node itself; getBoundingClientRect
+    // returns zeros in jsdom, so the geometric probe degrades to the
+    // reference's own margin-bottom (1.8.16 behavior).
+    const style = document.createElement("style");
+    style.textContent = `
+      .live-serp .LiveCard {
+        padding: 12px;
+        border-radius: 16px;
+        background-color: rgb(255, 255, 255);
+        margin-bottom: 10px;
+      }`;
+    document.head.appendChild(style);
+    const container = document.createElement("ul");
+    container.className = "live-serp";
+    document.body.appendChild(container);
+    for (let i = 0; i < 3; i++) {
+      const li = document.createElement("li");
+      li.className = "LiveCard";
+      li.innerHTML = `<a class="OrganicTitle-Link" href="https://live.test/${i}">live ${i}</a>`;
+      container.appendChild(li);
+    }
+    try {
+      const fetched = parseHTML(`
+        <ul class="serp-list serp-list_left_yes">
+          <li class="rotatedClass"><h2><a class="OrganicTitle-Link" href="https://a.com/1">fetched 1</a></h2></li>
+        </ul>`);
+      const engine = {
+        ...stubEngine(null),
+        id: "yandex" as unknown as EngineAdapter["id"],
+        getResultNodes: (d: Document | Element) =>
+          Array.from((d as Element).querySelectorAll(
+            "li.LiveCard:not([data-inf-page] *), li.rotatedClass"
+          )),
+        getFetchWrapper: () => fetched.querySelector("ul.serp-list")!,
+      } as unknown as EngineAdapter;
+      const manager = new InfiniteScrollManager(engine, container, () => {}, { maxPages: 5 });
+      callAppend(manager, Array.from(fetched.querySelectorAll("li.rotatedClass")), fetched);
+
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const clone = page.querySelector("li.rotatedClass") as HTMLElement;
+      expect(clone.style.marginBottom).toBe("10px");
+      expect(page.style.marginTop).toBe("10px");
+    } finally {
+      style.remove();
+      container.remove();
+    }
+  });
+
+  it("never writes margin-top onto the live container when no fetch wrapper exists", () => {
+    // Without getFetchWrapper the clones' host IS the page container, whose
+    // parent is the LIVE results container. The gap-matching margin-top must
+    // never land on the live container (would shift the whole result list).
+    const style = document.createElement("style");
+    style.textContent = `
+      .live-serp .LiveCard {
+        padding: 12px;
+        border-radius: 16px;
+        background-color: rgb(255, 255, 255);
+        margin-bottom: 10px;
+      }`;
+    document.head.appendChild(style);
+    const container = document.createElement("ul");
+    container.className = "live-serp";
+    document.body.appendChild(container);
+    for (let i = 0; i < 3; i++) {
+      const li = document.createElement("li");
+      li.className = "LiveCard";
+      li.innerHTML = `<a class="OrganicTitle-Link" href="https://live.test/${i}">live ${i}</a>`;
+      container.appendChild(li);
+    }
+    try {
+      const fetched = parseHTML(`
+        <div>
+          <li class="rotatedClass"><h2><a class="OrganicTitle-Link" href="https://a.com/1">fetched 1</a></h2></li>
+        </div>`);
+      const engine = {
+        ...stubEngine(null),
+        id: "yandex" as unknown as EngineAdapter["id"],
+        getResultNodes: (d: Document | Element) =>
+          Array.from((d as Element).querySelectorAll(
+            "li.LiveCard:not([data-inf-page] *), li.rotatedClass"
+          )),
+        // NOTE: no getFetchWrapper — default div page container path.
+      } as unknown as EngineAdapter;
+      const manager = new InfiniteScrollManager(engine, container, () => {}, { maxPages: 5 });
+      callAppend(manager, Array.from(fetched.querySelectorAll("li.rotatedClass")), fetched);
+
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      expect(page).not.toBeNull();
+      // Clones still receive the gap…
+      const clone = page.querySelector("li.rotatedClass") as HTMLElement;
+      expect(clone.style.marginBottom).toBe("10px");
+      // …but the LIVE container is untouched:
+      expect((container as HTMLElement).style.marginTop).toBe("");
+      // and the page container keeps its own separator only when it is the
+      // direct parent of the host (wrapper path) — here it IS the host, so
+      // its own margin-top remains the default 20px set at creation.
+      expect(page.style.marginTop).toBe("20px");
+    } finally {
+      style.remove();
+      container.remove();
+    }
+  });
+
   it("notifies with the appended clones so the blocking pipeline processes them", () => {
     const doc = parseHTML('<div id="search-results"></div>');
     const container = doc.querySelector("#search-results")!;
