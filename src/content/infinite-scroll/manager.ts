@@ -756,16 +756,42 @@ export class InfiniteScrollManager {
         if (parseFloat(cs.marginBottom) > 0) s += 1;
         return s;
       };
-      let ref: Element = liveResults[0]!;
+      // ── Card-unit resolution (field round 7, 2026-09-09 — cardGap:null) ──
+      // The 1.8.17 field receipt came back cardGap:null, and with live
+      // results provably resolvable (placement receipt lastResult=14) the
+      // ONLY path to null was the old refScore<=2 early return: NO resolved
+      // result node carries a card look. On the cee build getResultNodes
+      // resolves at the inner content level (div.Organic) while the card BOX
+      // lives on the rotated per-result WRAPPER above it — 1.8.16's box
+      // transfer AND 1.8.17's gap transfer both measured the wrong DOM level
+      // and silently never ran. Resolve each live result to its CARD UNIT:
+      // the result itself when it carries the card look, else the nearest
+      // ancestor below the container that does — never entering an ancestor
+      // that also contains another result (that is a group/section wrapper,
+      // not a card).
+      const cardUnit = (r: Element): Element => {
+        let unit: Element = r;
+        while (unit.parentElement && unit.parentElement !== this.container) {
+          if (score(unit) >= 2) break;
+          const parent = unit.parentElement;
+          if (liveResults.some((o) => o !== r && parent.contains(o))) break;
+          unit = parent;
+        }
+        return unit;
+      };
+      const units = liveResults.map(cardUnit);
+      let ref: Element = units[0]!;
       let refScore = -1;
-      for (const r of liveResults) {
-        const s = score(r);
+      for (const u of units) {
+        const s = score(u);
         if (s > refScore) {
-          ref = r;
+          ref = u;
           refScore = s;
         }
       }
-      if (refScore <= 2) return; // live page shows no card look — nothing to transfer
+      // NOTE: no early return on refScore<=2 anymore. Even when no unit shows
+      // a card look, the inter-card GAP below is still real and must
+      // transfer — an unboxed-but-spaced list is the correct rendering there.
 
       // ── Inter-card gap (field round 6, 2026-09-09) ────────────────────────
       // Boxes transferred fine in 1.8.16 but clones still rendered TOUCHING:
@@ -778,8 +804,11 @@ export class InfiniteScrollManager {
       // or container gap). Median over consecutive pairs, capped to kill
       // layout outliers (sticky headers, interleaved ads).
       const measureCardGap = (): number => {
-        const rects = liveResults
-          .map((r) => r.getBoundingClientRect())
+        // Measure the rendered distance between consecutive CARD UNITS, not
+        // raw result nodes — on the cee build the visible boxes are the
+        // wrappers, and their content children sit INSIDE those boxes.
+        const rects = units
+          .map((u) => u.getBoundingClientRect())
           .filter((r) => r.height > 0 && r.bottom > 0);
         if (rects.length < 2) return -1;
         // Compare in document order (getResultNodes order can differ from

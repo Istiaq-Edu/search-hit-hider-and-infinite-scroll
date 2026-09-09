@@ -448,6 +448,71 @@ describe("InfiniteScrollManager.appendNodes insertion", () => {
     }
   });
 
+  // ── Card-unit resolution (Yandex round 7, 2026-09-09 — cardGap:null) ─────
+  // Field receipt: cardGap:null with 15 live results provably resolvable →
+  // the only path to null was the refScore<=2 early return. On the cee build
+  // the card box lives on the rotated WRAPPER above the resolved result
+  // nodes, so both the box and the gap transfers measured the wrong level
+  // and never ran. The reference must resolve to the card UNIT.
+  it("resolves card units through unstyled results to the wrapper carrying the card look", () => {
+    const style = document.createElement("style");
+    style.textContent = `
+      .live-serp .cardWrap {
+        padding: 12px;
+        border-radius: 16px;
+        background-color: rgb(255, 255, 255);
+        margin-bottom: 14px;
+      }`;
+    document.head.appendChild(style);
+    const container = document.createElement("div");
+    container.className = "live-serp";
+    document.body.appendChild(container);
+    for (let i = 0; i < 3; i++) {
+      const wrap = document.createElement("div");
+      wrap.className = "cardWrap";
+      const inner = document.createElement("div");
+      inner.className = "Inner";
+      inner.innerHTML = `<a class="OrganicTitle-Link" href="https://live.test/${i}">live ${i}</a>`;
+      wrap.appendChild(inner);
+      container.appendChild(wrap);
+    }
+    try {
+      const fetched = parseHTML(`
+        <ul class="serp-list serp-list_left_yes">
+          <li class="rotatedClass"><h2><a class="OrganicTitle-Link" href="https://a.com/1">fetched 1</a></h2></li>
+          <li class="rotatedClass"><h2><a class="OrganicTitle-Label" href="https://a.com/2">fetched 2</a></h2></li>
+        </ul>`);
+      const engine = {
+        ...stubEngine(null),
+        id: "yandex" as unknown as EngineAdapter["id"],
+        getResultNodes: (d: Document | Element) =>
+          Array.from((d as Element).querySelectorAll(
+            ".Inner:not([data-inf-page] *), li.rotatedClass"
+          )),
+        getFetchWrapper: () => fetched.querySelector("ul.serp-list")!,
+      } as unknown as EngineAdapter;
+      const manager = new InfiniteScrollManager(engine, container, () => {}, { maxPages: 5 });
+      callAppend(manager, Array.from(fetched.querySelectorAll("li.rotatedClass")), fetched);
+
+      const page = container.querySelector("[data-inf-page]") as HTMLElement;
+      const clones = page.querySelectorAll("li.rotatedClass");
+      expect(clones.length).toBe(2);
+      for (const c of clones) {
+        const h = c as HTMLElement;
+        // Box transfers from the WRAPPER-level reference:
+        expect(h.style.padding).toBe("12px");
+        expect(h.style.borderRadius).toBe("16px");
+        // Gap transfers too (geometric in real browsers; ref-margin here in
+        // jsdom zero-layout — both must exceed nothing):
+        expect(h.style.marginBottom).toBe("14px");
+      }
+      expect(page.style.marginTop).toBe("14px");
+    } finally {
+      style.remove();
+      container.remove();
+    }
+  });
+
   it("notifies with the appended clones so the blocking pipeline processes them", () => {
     const doc = parseHTML('<div id="search-results"></div>');
     const container = doc.querySelector("#search-results")!;
