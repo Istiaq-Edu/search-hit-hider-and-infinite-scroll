@@ -19,17 +19,17 @@ manifest.json, same entry points. Only embedded timestamps differ.
 ## Bundle mapping (esbuild)
 
 TypeScript sources are bundled and minified by esbuild (`build.js`),
-one-to-one:
+one entry point per output file:
 
-| dist file | built from |
+| dist file | entry point (imports the rest) |
 |---|---|
-| `dist/content/index.js` | `src/content/**/*.ts` |
-| `dist/popup/index.js` | `src/popup/**/*.ts(x)` |
-| `dist/popup/options.js` | `src/popup/options.ts(x)` |
-| `dist/background.js` | `src/background.ts` |
+| `dist/background/service-worker.js` | `src/background/service-worker.ts` |
+| `dist/content/preload.js` | `src/content/preload.ts` |
+| `dist/content/index.js` | `src/content/index.ts` |
+| `dist/popup/index.js` | `src/popup/index.tsx` |
+| `dist/popup/options.js` | `src/popup/options-entry.tsx` |
 
-No other processing or code generation is applied. Non-JS assets
-(HTML, CSS, icons) are copied verbatim.
+All bundled application code originates from this repo's `src/` tree.
 
 Bundles inline **Preact** (MIT, declared in package.json) at esbuild's
 standard inlined-library position — that is bundler library inlining,
