@@ -636,6 +636,15 @@ import {
       return {
         coverArmed,
         active: document.documentElement.hasAttribute("data-shh-active"),
+        // The number that decides whether this audit means anything at all. The
+        // preload reads its block list from `_shh_cache` at document_start; with
+        // an empty cache the cover is NEVER armed, so `blankGaps=0` is trivially
+        // true and proves nothing. A field report showed exactly that
+        // (domains=0 while storage held 6), and the audit's verdict still said
+        // "nothing is stuck under the cover" — a false all-clear from the one
+        // tool built to avoid false all-clears.
+        preloadDomains: lc.length,
+        skipReason: preloadDiag.preloadSkipReason ?? null,
         candidates,
         undeterminedCount: undetermined.length,
         // The symptom, counted: unmarked AND occupying space.

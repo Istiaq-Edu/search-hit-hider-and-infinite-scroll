@@ -287,6 +287,8 @@ const coverAuditText = (): string => {
       coverArmed?: boolean;
       active?: boolean;
       undetermined?: Array<Record<string, unknown>>;
+      preloadDomains?: number;
+      skipReason?: string | null;
     };
     // An oracle that answers "?" is worse than useless — if the hook could not
     // run, SAY WHY. The first version of this returned all-`?` and cost a
@@ -294,13 +296,41 @@ const coverAuditText = (): string => {
     if (a.error) return `cover audit FAILED inside the preload: ${a.error}`;
     const head =
       `blankGaps=${a.blankGaps ?? "?"}  undetermined=${a.undeterminedCount ?? "?"}  ` +
-      `candidates=${a.candidates ?? "?"}  coverArmed=${a.coverArmed}  active=${a.active}`;
+      `candidates=${a.candidates ?? "?"}  coverArmed=${a.coverArmed}  active=${a.active}  ` +
+      `preloadDomains=${a.preloadDomains ?? "?"}`;
+
+    // A BLANK GAP CANNOT BE ATTRIBUTED TO A COVER THAT WAS NEVER ARMED.
+    // This branch exists because a real field report returned
+    // `coverArmed=false  active=false  preloadDomains=0` and the verdict below
+    // still printed a confident all-clear. The cover was off — the preload's
+    // `_shh_cache` held no domains, so nothing could have been stranded — and
+    // the audit was silently answering a question it had not been able to ask.
+    if (a.coverArmed !== true || a.active !== true) {
+      return (
+        head +
+        "\n  VERDICT: THE COVER WAS NOT ARMED on this page" +
+        (a.skipReason ? ` (${a.skipReason})` : "") +
+        ".\n  blankGaps=0 therefore proves NOTHING about the cover — there was no" +
+        "\n  cover to strand anything. A blank gap here is caused by something" +
+        "\n  else. Check, in order:" +
+        "\n    1. visibility:hidden — the extension NEVER sets it, so if a sized" +
+        "\n       node is invisible this way it is Google's own styling." +
+        "\n    2. the node's own opacity / color vs its background." +
+        "\n    3. whether the node is empty because it never hydrated." +
+        "\n  ALSO: preloadDomains=0 means document_start hiding was INERT for this" +
+        "\n  load — blocked results flash before the content script hides them." +
+        "\n  Read localStorage.getItem('_shh_cache') and compare with the" +
+        "\n  matcher's entriesTotal above."
+      );
+    }
     const rows = a.undetermined ?? [];
     if (rows.length === 0) {
       return (
         head +
-        "\n  VERDICT: nothing is stuck under the cover. If a blank gap is on " +
-        "screen, the cover is NOT its cause — check the node's own opacity/color."
+        "\n  VERDICT: the cover WAS armed, and nothing is stuck under it." +
+        "\n  If a blank gap is on screen, the cover is NOT its cause — check" +
+        "\n  visibility:hidden (never set by this extension) and the node's own" +
+        "\n  opacity / color."
       );
     }
     const detail = rows.map(
