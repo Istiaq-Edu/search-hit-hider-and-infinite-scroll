@@ -436,7 +436,6 @@ export interface ShhDiagEffect {
 /** Why a result-shaped node was not offered as a result. Debug mode only. */
 export interface ShhDiagDiscovery {
   /** Nodes the adapter actually returned this page load. */
-  offeredLastScan: number;
   probeSelector: string | null;
   /**
    * Which guard rejected the probe node, or `notRejected` when no guard the
@@ -592,7 +591,19 @@ function buildResultAccounting(doc: Document, res: DiagResolver | null): ResultA
       acc.leaves++;
       if (offeredSet && offeredSet.has(el)) acc.offered++;
 
-      if (el.hasAttribute("data-shh-result")) { acc.hidden++; continue; }
+      // A leaf can be hidden by an ANCESTOR as well as by itself. `hideResult`
+      // stamps the node the ADAPTER offered; this walk enumerates DOM LEAVES,
+      // and on Google those are routinely one level below the stamped wrapper.
+      // So a correctly hidden result was counted as `unmarked`, and because its
+      // URL matches the block list it then counted as UNMARKED-BUT-BLOCKED — a
+      // false alarm that reads exactly like the reported defect. A field report
+      // showed "4 BLOCKED result(s) are neither hidden nor given a block
+      // button" while `rejected.insideProcessed` was 4, i.e. the guard had
+      // correctly declined those very nodes.
+      if (el.closest("[data-shh-result],[data-shh-preloaded]")) {
+        acc.hidden++;
+        continue;
+      }
       // The block button is signalled two ways and BOTH must be checked, on the
       // node ITSELF as well as its subtree: `injectBlockButton` stamps
       // `data-shh-btn` on the container it was handed (the result node), while
@@ -888,7 +899,6 @@ export function collectDiagnostics(doc: Document = document): ShhDiagnostics {
   // order, and the population counts are restricted to nodes production would
   // actually reject.
   const discovery: ShhDiagDiscovery = {
-    offeredLastScan: 0,
     probeSelector: null,
     probeRejectedBy: null,
     probeHeadingFound: null,

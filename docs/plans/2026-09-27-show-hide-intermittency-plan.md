@@ -1636,3 +1636,59 @@ field-captured shape (`google.test.ts:391-412` — `/goto?url=` opaque hrefs,
 `MjjYud > A6K0A > tF2Cxc > N54PNb > kb0PBd`), not `harness/dom.ts:30-42`; with
 direct `https://` hrefs `isExternalHref` succeeds and the
 `googleDisplayDomain` fallback — B2's entire subject — is never exercised.
+
+---
+
+## 10. Corrections — 2026-10-10
+
+Field evidence and a real-browser harness falsified several claims above. Per this
+document's own convention (§6 keeps v1's wrong diagnosis deliberately), the
+original text is left in place and the corrections are recorded here. **Read this
+section before acting on any claim above.**
+
+### Falsified
+
+| Claim above | What falsified it |
+|---|---|
+| §5b / :1188 — *"a defect in the preload cannot be caught by this suite at all"*; :380 — *"the preload layer still has **no** coverage at all"* | `tests/preload-flicker.test.ts` boots the real `dist/content/preload.js` and drives its MutationObserver; `tests/bundle-global-isolation.test.ts` pins the cross-bundle invariant; `reports/showhide-audit/firefox-check.{mjs,sh}` runs the real extension in real Firefox |
+| §9 :1081-1085 — the byte-level `H` census concluding *"There is no other binding that could shadow it"* | **The binding was in the OTHER bundle.** `build.js` built every entry with `format: "esm"`, which emits no wrapper, so `preload.js` and `index.js` shared one global scope: measured, preload declared 27 globals and index.js overwrote **18 of them (67%)**. `H` was `resolveGoogleStream`. Fixed with `format: "iife"` on the two content targets |
+| §9 :1095-1097 — *"the artifact is **undiagnosable** … This is a build problem, not a logic problem."* | Right about the category, wrong about diagnosability. The cause is named and pinned by a test |
+| §5b — *"jsdom 29 does not implement `document.adoptedStyleSheets` … the preload IIFE is not importable"* | Both worked around: the flicker suite evals the bundle and reads its `CSSStyleSheet` back |
+| §5b :1189-1193 — *"the cheapest real coverage is to extract `buildHasRules`'s rule-string construction … the recommended next piece of work"* | Superseded: `markers.ts` owns the shared cover-selector/marker contract, and a real-Firefox harness now exists |
+| §3/:1018 and :1274 — *"44 test files, 750 tests"* | Now **50 files / 808 tests** |
+| `reports/showhide-audit/RESULTS.md:274` — *"The cause is the pipeline's state machine, not the cover."* | Falsified for the later blank-gap report, whose signature is a cover/`visibility` phenomenon, not messaging |
+| `RESULTS.md:3`, `:139` — target v1.8.18; *"`manifest.json:151` is `document_idle`"* | Stale. The preload is `document_start` (manifest:102); the content scripts are `document_end` (152/165) |
+| An earlier review's dismissal of `visibility:hidden` — *"no rule applies it; grep hits are probes/comments only"* | **Falsified as a mechanism.** A field report shows 13 sized, unpainted descendants of a result at `opacity=1 display:block visibility:hidden h=38px`. The extension indeed never SETS visibility — so these are Google's own rows — but the mechanism is real and was the closest thing to the reported symptom anyone found |
+
+### Newly established
+
+- **The anti-flicker cover is not always armed.** The preload reads `_shh_cache`
+  at `document_start`; a field report showed `domains=0` there while storage held
+  6. With no cover, nothing can be stranded, so a `blankGaps=0` reading proves
+  nothing — the audit now says so explicitly instead of printing an all-clear.
+- **The page-console bridge never installed.** `installPageBridge` called
+  `cloneInto(fn, pageGlobal, { functions: "callable" })` — no such option exists,
+  so it threw on every load and the `catch` swallowed it. Every documented
+  `copy(__shhDiagText())` instruction produced `ReferenceError`, and
+  `tests/diag-bridge.test.ts` passed throughout because jsdom has no
+  compartments. Fixed with `exportFunction` and **verified in real Gecko**.
+- **`visibleButBlocked` could never fire.** It iterated `resolver.resultNodes()`,
+  which `isValidResult()` has already emptied of stamped nodes — and the loop
+  skipped exactly those. The report's "single most important number" was
+  structurally always 0. `tests/debug.test.ts` asserts it and passed anyway,
+  because its fake resolver supplies an input production cannot.
+- **The preload's uncaught errors are page-origin.** The trap has no origin
+  filter, and the preload's own code is wrapped and routes through `recordError`,
+  so anything reaching `window.error` escaped those guards.
+
+### Still open
+
+The optimality recommendation stands unreviewed by field evidence: **invert the
+cover to a fail-open allow-list** (stamp `data-shh-cover` only on nodes being
+actively deferred, so an untouched node is never covered and "undetermined" cannot
+exist). It would remove the bug class rather than adding a fifth reveal site — but
+its failure mode is *flicker for every user with a block list*, against a blank gap
+that hits a subset. It needs its own verification pass, not a same-day change.
+**Do not touch** the preload's `document_start` registration or `preload.css`
+Rule 1: that is the one layer that survived the 54 s D8 window and it is
+bfcache-immune.
