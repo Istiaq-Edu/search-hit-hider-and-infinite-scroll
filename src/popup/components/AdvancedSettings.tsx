@@ -79,7 +79,10 @@ export function AdvancedSettings({ prefs, onUpdatePrefs }: Props) {
             <li>Reproduce the problem — blocked results visible that should be hidden</li>
             <li>
               Open DevTools → <b>Console</b>, run{" "}
-              <code style={{ color: "var(--accent)" }}>copy(__shhDiagText())</code> and paste it here.
+              <code style={{ color: "var(--accent)" }}>
+                copy(document.documentElement.getAttribute(&quot;data-shh-report&quot;))
+              </code>{" "}
+              then paste it here. The first lines are a plain-English verdict.
               The first lines are a plain-English verdict.
             </li>
           </ol>
@@ -91,10 +94,13 @@ export function AdvancedSettings({ prefs, onUpdatePrefs }: Props) {
             <b>BLOCKED result(s) … neither hidden nor given a block button</b> are real defects.
           </div>
           <div style={{ color: "var(--text-3)", marginTop: "4px" }}>
-            <b>If the console says <code>__shhDiagText is not defined</code></b>, Firefox is
-            still running the previous copy of the extension. Go to <code>about:debugging</code>,
-            hit <b>Reload</b> on Search Hit Hider, then reload the tab and try again. The
-            report&apos;s <b>stamp:</b> line tells you which build produced it.
+            The attribute above is the reliable channel: a plain DOM attribute crosses
+            neither the content-script boundary nor the page one.{" "}
+            <code>copy(__shhDiagText())</code> is a convenience that can be unavailable, so if
+            the console says <code>__shhDiagText is not defined</code>, use the attribute
+            instead. If it returns <code>null</code>, the content script did not run on this
+            page. The report&apos;s <b>stamp:</b> line names the build, and its{" "}
+            <b>page-bridge:</b> line says whether the console helper installed.
           </div>
         </div>
       )}

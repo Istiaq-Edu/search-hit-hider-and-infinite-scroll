@@ -622,7 +622,6 @@ import {
           continue;
         }
         const cs = getComputedStyle(el);
-        const box = el.getBoundingClientRect();
         // Is this node ACTUALLY not painted? The first version of this hook
         // counted "unmarked AND has height" as a gap, which is a false positive
         // whenever the cover is disarmed: those nodes are perfectly visible.
@@ -636,17 +635,24 @@ import {
             : cs.opacity === "0"
               ? "opacity:0"
               : null;
+        // LAZY, AND THE REASON IS COST, NOT STYLE. `getBoundingClientRect()`
+        // forces a synchronous layout, and `textContent` serialises the whole
+        // subtree. Doing that for every candidate put a forced reflow on the
+        // ordinary page-load path, because shhDiagText() calls this audit and
+        // refreshDiagReport() runs on load, on init-complete and on every bail.
+        // A VISIBLE node can never be a blank gap, so it needs neither read.
+        const box = why === null ? null : el.getBoundingClientRect();
         undetermined.push({
           tag: el.tagName.toLowerCase(),
           cls: String((el as HTMLElement).className || "").slice(0, 40),
           opacity: cs.opacity,
           display: cs.display,
           visibility: cs.visibility,
-          h: Math.round(box.height),
-          w: Math.round(box.width),
+          h: box ? Math.round(box.height) : null,
+          w: box ? Math.round(box.width) : null,
           invisible: why !== null,
           why,
-          text: (el.textContent || "").trim().slice(0, 40),
+          text: why === null ? "" : (el.textContent || "").trim().slice(0, 40),
         });
       }
       return {

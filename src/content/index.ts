@@ -250,12 +250,34 @@ function installPageBridge(fn: () => string, name: string): void {
     // "Permission denied to access object". Cloning the function into the page
     // compartment with `functions: "callable"` is what makes it invocable.
     // It is a no-op-safe feature test: absent outside a content script.
-    const clone = (globalThis as { cloneInto?: (v: unknown, t: unknown, o?: unknown) => unknown })
-      .cloneInto;
-    pageGlobal[name] = clone
-      ? clone(fn, pageGlobal, { functions: "callable" })
-      : fn;
-    pageBridgeDiag += ` | ${name}=OK(cloned=${!!clone})`;
+    // `exportFunction` is the API BUILT for this: it defines a function in
+    // another compartment so the other side can call it.
+    //
+    // THE BUG THIS REPLACES: the shipped call was
+    //     cloneInto(fn, pageGlobal, { functions: "callable" })
+    // and there is NO SUCH OPTION. MDN: to clone a function you must pass
+    // `{ cloneFunctions: true }`; otherwise the call THROWS. It threw on every
+    // load, the catch below swallowed it, and the page world never received the
+    // function. That is the entire cause of the user-facing
+    // `Uncaught ReferenceError: __shhDiagText is not defined` -- and no reload
+    // could ever have fixed it. Confirmed against the built bundle:
+    //   grep -o '.\{80\}functions:"callable".\{40\}' dist/content/index.js
+    //   -> cloneInto;t[e]=r?r(n,t,{functions:"callable"}):n
+    const g = globalThis as {
+      exportFunction?: (f: unknown, t: unknown, o?: unknown) => unknown;
+      cloneInto?: (v: unknown, t: unknown, o?: unknown) => unknown;
+    };
+    if (typeof g.exportFunction === "function") {
+      g.exportFunction(fn, pageGlobal, { defineAs: name });
+      pageBridgeDiag += ` | ${name}=OK(exportFunction)`;
+    } else if (typeof g.cloneInto === "function") {
+      pageGlobal[name] = g.cloneInto(fn, pageGlobal, { cloneFunctions: true });
+      pageBridgeDiag += ` | ${name}=OK(cloneInto)`;
+    } else {
+      // No compartments (jsdom). Fine for tests, never reached in Firefox.
+      pageGlobal[name] = fn;
+      pageBridgeDiag += ` | ${name}=OK(direct)`;
+    }
   } catch (e) {
     // Not a content-script context (tests) — the local copy still works. But
     // say so, because "the console says not defined" is the symptom this whole

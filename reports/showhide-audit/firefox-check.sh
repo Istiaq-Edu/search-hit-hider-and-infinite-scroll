@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -u
-cd "$(dirname "$0")/.." || exit 1
+cd "$(dirname "$0")/../.." || exit 1
 FF="/c/Program Files/Firefox Developer Edition/firefox.exe"
-PROF=".tmp-ff/prof"
-rm -rf "$PROF" .tmp-ff/report.txt; mkdir -p "$PROF"
+# A FRESH profile directory per run. `rm -rf` on a stale profile is
+# intercepted by the environment's safe-delete and can fail, leaving a
+# locked profile that makes web-ext hang -> an empty capture that looks
+# like a product failure. A unique name sidesteps that entirely.
+PROF=".tmp-ff/prof-$$"
+mkdir -p "$PROF"
+: > .tmp-ff/report.txt
 cat > "$PROF/user.js" <<'PREFS'
 user_pref("network.dns.localDomains", "www.google.com");
 user_pref("network.proxy.type", 0);
@@ -33,8 +38,20 @@ MOZ_HEADLESS=1 npx web-ext run --source-dir dist --firefox "$FF" \
   --pref=extensions.autoDisableScopes=0 \
   --start-url "http://www.google.com:8765/" > .tmp-ff/webext.log 2>&1 &
 WE=$!
-sleep 22
-kill $WE 2>/dev/null; pkill -f "firefox.exe" 2>/dev/null; kill $SRV 2>/dev/null
+# WAIT FOR THE RESULT, do not guess a duration. A fixed sleep raced Firefox's
+# startup: the driver killed the browser before web-ext had finished installing
+# the add-on, and the harness reported an empty capture that looked like a
+# product failure. Poll the captured report instead, with a hard ceiling.
+for _ in $(seq 1 75); do
+  [ -s .tmp-ff/report.txt ] && break
+  sleep 1
+done
+# Kill ONLY our own web-ext child. `pkill -f firefox` was used here before and it
+# is indiscriminate: it kills the user's own browser windows, not just the
+# profile this script launched. web-ext closes its own Firefox on SIGTERM.
+kill $WE 2>/dev/null
+wait $WE 2>/dev/null
+kill $SRV 2>/dev/null
 sleep 1
 echo "=== web-ext log (tail) ==="
 tail -6 .tmp-ff/webext.log 2>/dev/null
