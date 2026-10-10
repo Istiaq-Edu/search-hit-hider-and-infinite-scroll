@@ -82,7 +82,7 @@ export const GOOGLE_LEGACY_RESULT_SELECTORS = [
 const MAX_DESCENT_DEPTH = 6;
 
 /** A node with this many headings is a section wrapper, not a single result. */
-const SECTION_HEADING_THRESHOLD = 2;
+export const SECTION_HEADING_THRESHOLD = 2;
 
 /**
  * A node citing this many DIFFERENT domains is an aggregate — an AI Overview, a

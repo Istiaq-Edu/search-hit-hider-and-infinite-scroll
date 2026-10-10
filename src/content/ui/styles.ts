@@ -5,7 +5,7 @@
 const STYLE_ID = "shh-base-styles";
 
 /**
- * Detect the search page's background and text color from the root element.
+ * Detect the search page's background and text color from the body element.
  * Returns CSS variable overrides to match the page's color scheme.
  */
 function detectPageColors(): { bg: string; text: string; border: string; isDark: boolean } {
@@ -24,8 +24,19 @@ function detectPageColors(): { bg: string; text: string; border: string; isDark:
 }
 
 function isColorDark(color: string): boolean {
-  const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
   if (!match?.[1] || !match[2] || !match[3]) return false;
+
+  // A fully transparent background means "inherit from the ancestor", NOT black.
+  // Reading it as black is how a light SERP came to be detected as dark: at
+  // DOMContentLoaded the page's stylesheet may not be applied yet, so
+  // `getComputedStyle(body).backgroundColor` is `rgba(0, 0, 0, 0)`, whose
+  // luminance is 0 — i.e. "dark". The content script used to run at `load`
+  // (where stylesheets are guaranteed applied) so this never surfaced; moving
+  // to DOMContentLoaded made it the normal path, and the resulting dark theme
+  // was latched for the whole page session.
+  if (match[4] !== undefined && parseFloat(match[4]) === 0) return false;
+
   const r = parseInt(match[1]);
   const g = parseInt(match[2]);
   const b = parseInt(match[3]);
@@ -53,6 +64,34 @@ export function injectBaseStyles(): void {
   style.id = STYLE_ID;
   style.textContent = getBaseCSS(colors);
   document.head.appendChild(style);
+
+  // RE-EVALUATE ONCE THE STYLESHEET IS GUARANTEED APPLIED.
+  //
+  // The content script now runs at DOMContentLoaded rather than `load`, and MDN
+  // is explicit that DCL does not wait for stylesheets — so `getComputedStyle`
+  // can legitimately return a value the finished page disagrees with. The
+  // transparent case is handled above, but a stylesheet that genuinely changes
+  // the body background is not.
+  //
+  // This is a CORRECTION, not a blind re-injection: if the colours are unchanged
+  // it does nothing, so a page with a transparent background that gets resolved
+  // to a real colour by `load` ends up themed correctly, and a page whose colour
+  // was already right is untouched. Safe if `load` has already fired.
+  if (document.readyState !== "complete") {
+    window.addEventListener("load", () => {
+      if (document.getElementById(STYLE_ID) !== style) return; // replaced meanwhile
+      const loaded = detectPageColors();
+      if (
+        loaded.isDark === colors.isDark &&
+        loaded.bg === colors.bg &&
+        loaded.text === colors.text &&
+        loaded.border === colors.border
+      ) {
+        return;
+      }
+      style.textContent = getBaseCSS(loaded);
+    }, { once: true });
+  }
 }
 
 function getBaseCSS(colors: {

@@ -13,6 +13,7 @@ import {
   popUndoEntry,
 } from "../shared/storage";
 import { addEntry, removeEntry, updateEntry, applyBulkOp } from "../shared/list-utils";
+import { broadcastToTabs, shouldEvictTab } from "./broadcast";
 
 // ============================================================
 // Background service worker — storage coordination + messaging
@@ -78,6 +79,29 @@ browser.storage.onChanged.addListener((changes, area) => {
 // Track tabs with active content scripts to avoid broadcasting to all tabs
 const activeTabIds = new Set<number>();
 
+// Consecutive send failures per tab. `tabs.onRemoved` prunes on close, but
+// nothing prunes on NAVIGATION — so a tab that left an engine page keeps its id
+// and fails every send forever, which both costs an IPC round-trip and (because
+// any failure triggers the sweep) a tabs.query on every subsequent mutation.
+// Evicting on the FIRST failure is what this whole module exists to undo, so
+// instead we require K in a row; see shouldEvictTab.
+const sendFailures = new Map<number, number>();
+
+function noteSendResult(tabId: number, ok: boolean): void {
+  if (ok) {
+    sendFailures.delete(tabId);
+    activeTabIds.add(tabId);
+    return;
+  }
+  const n = (sendFailures.get(tabId) ?? 0) + 1;
+  if (shouldEvictTab(n)) {
+    sendFailures.delete(tabId);
+    activeTabIds.delete(tabId);
+  } else {
+    sendFailures.set(tabId, n);
+  }
+}
+
 browser.runtime.onMessage.addListener(
   (
     message: unknown,
@@ -101,6 +125,7 @@ browser.runtime.onMessage.addListener(
 
 browser.tabs.onRemoved.addListener((tabId) => {
   activeTabIds.delete(tabId);
+  sendFailures.delete(tabId);
 });
 
 async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unknown> {
@@ -188,6 +213,23 @@ async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unk
     case "SET_PREFS": {
       const updated = await patchPrefs(msg.patch);
       cachedPrefs = updated;
+      // Broadcast. Without this, refreshPrefs() in the content script is dead
+      // code: nothing ever sends PREFS_UPDATED, so pause/unpause, the
+      // subdomain-wildcard setting and engine toggles never reach an open tab.
+      // A tab that loaded while paused stays paused until reload — which reads
+      // to the user as "unpause didn't work".
+      //
+      // `void`, like every sibling broadcast in this file. Awaiting it would
+      // put a sequential tab fan-out — and, on the failure path, a
+      // tabs.query({}) — on the popup's critical path. A threshold slider fires
+      // one SET_PREFS per input event, and a broadcast failure must never read
+      // as a failed pref write: patchPrefs has already succeeded by here, and
+      // the storage write is the authoritative result.
+      //
+      // COUPLING: safe only because preload.ts now clears its :has() sheet on
+      // an empty list, and the content script registers its onMessage listener
+      // at module scope so a paused-at-load tab can actually receive this.
+      void broadcastToContentScripts({ type: "PREFS_UPDATED" });
       return { prefs: updated };
     }
 
@@ -198,6 +240,10 @@ async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unk
       const entries = await getEntries();
       const result = addEntry(entries, entry.domain, entry.mode);
       await persistEntries(result.entries);
+      // Broadcast: undoing a block re-adds a domain, so other tabs must
+      // re-hide it. Without this they keep showing it until reload.
+      // `void` for the same reason as SET_PREFS — see the note there.
+      void broadcastToContentScripts({ type: "LIST_UPDATED" });
       return { restored: entry };
     }
 
@@ -214,37 +260,32 @@ async function broadcastToContentScripts(
   message: object,
   exceptTabId?: number
 ): Promise<void> {
-  const send = async (tabId: number): Promise<boolean> => {
-    if (tabId === exceptTabId) return true;
-    try {
-      await browser.tabs.sendMessage(tabId, message);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  if (activeTabIds.size === 0) {
-    // Fallback: no registered tabs yet, query all tabs (first-run scenario)
-    try {
-      const tabs = await browser.tabs.query({});
-      for (const tab of tabs) {
-        if (tab.id !== undefined) {
-          if (await send(tab.id)) activeTabIds.add(tab.id);
-        }
+  const outcome = await broadcastToTabs(activeTabIds, exceptTabId, {
+    send: async (tabId) => {
+      try {
+        await browser.tabs.sendMessage(tabId, message);
+        return true;
+      } catch {
+        return false;
       }
-    } catch { /* tabs API unavailable */ }
-    return;
-  }
+    },
+    queryTabIds: async () => {
+      try {
+        const tabs = await browser.tabs.query({});
+        return tabs
+          .map((t) => t.id)
+          .filter((id): id is number => id !== undefined);
+      } catch {
+        return null; // tabs API unavailable
+      }
+    },
+  });
 
-  const deadTabs: number[] = [];
-  for (const tabId of activeTabIds) {
-    if (!(await send(tabId))) deadTabs.push(tabId);
-  }
-  // Clean up dead tabs
-  for (const tabId of deadTabs) {
-    activeTabIds.delete(tabId);
-  }
+  // Learn from successes and failures, but never evict on a single failure —
+  // see background/broadcast.ts. `noteSendResult` handles both the add and the
+  // K-consecutive-failure eviction.
+  for (const tabId of outcome.delivered) noteSendResult(tabId, true);
+  for (const tabId of outcome.failed) noteSendResult(tabId, false);
 }
 
 // ============================================================

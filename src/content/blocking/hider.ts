@@ -1,12 +1,46 @@
 import type { MatchResult } from "./matcher";
+import { GOOGLE_COVER_CANDIDATE_SELECTOR, revealCoverSubtree } from "../markers";
 
 // ============================================================
 // DOM hide/show/restore logic for search result nodes
 // ============================================================
 
+/**
+ * The URL a node was hidden for. Exported because `reconcile.ts` reads it to
+ * decide whether a node still belongs to its blocked domain — the producer and
+ * the consumer of this attribute MUST agree, so there is one name for it.
+ */
+export const ATTR_SHH_URL = "data-shh-url";
+
+/** "confirmed safe" — the ONLY marker preload.css's cover respects. */
+const ATTR_SHH_OK = "data-shh-ok";
+/** the preload's hide marker; also exempt from the cover. */
+const ATTR_SHH_PRELOADED = "data-shh-preloaded";
+
+/**
+ * The Google anti-flicker cover only exists on Google hosts, so the show-once
+ * exemption must not fire elsewhere.
+ *
+ * Reads the host from the NODE'S OWN document, not the ambient `location`.
+ * That is both more correct (a node knows which document it belongs to) and
+ * the only version that is testable: under vitest the ambient location is the
+ * test runner's, so an ambient read made this silently return false in every
+ * test and the fix would have shipped unverified.
+ */
+function isGoogleHost(node: Element): boolean {
+  const view = node.ownerDocument?.defaultView;
+  const h = view?.location?.hostname
+    ?? (typeof location !== "undefined" ? location.hostname : "");
+  return (
+    h === "www.google.com" ||
+    h.startsWith("www.google.") ||
+    h.startsWith("google.co") ||
+    h === "encrypted.google.com"
+  );
+}
+
 const ATTR_SHH_RESULT = "data-shh-result";
 const ATTR_SHH_MODE = "data-shh-mode";
-const ATTR_SHH_URL = "data-shh-url";
 const ATTR_SHH_PLACEHOLDER = "data-shh-placeholder";
 const CLASS_HIDDEN = "shh-hidden";
 const CLASS_PBAN = "shh-pban";
@@ -127,6 +161,38 @@ export function showOnce(
   // so the result is fully visible and interactive after the user clicks Show.
   (node as HTMLElement).style.setProperty("opacity", "1", "important");
   (node as HTMLElement).style.setProperty("pointer-events", "auto", "important");
+
+  // *** THE INNER-COVER FIX (field capture 2026-09-29) ***
+  //
+  // The two overrides above apply to THIS node only, and they are not enough
+  // when the adapter offered a WRAPPER and the preload hid something INSIDE
+  // it — which is the normal case on the 2026 layout
+  // (`#rso > div.MjjYud > div.A6K0A > div.tF2Cxc > div.N54PNb > div.kb0PBd`,
+  // and the preload's own SELS matches BOTH div.tF2Cxc and div.g).
+  //
+  // Sweeping `data-shh-preloaded` off the descendants (above) is what arms the
+  // trap: a descendant that had it is now neither `[data-shh-ok]` nor
+  // `[data-shh-preloaded]`, so it MATCHES the cover and takes
+  // `opacity:0 !important; pointer-events:none !important`. The parent's inline
+  // `opacity:1` cannot rescue it — opacity does not cascade as an override, so
+  // a child with its own opacity:0 stays invisible however the parent is set.
+  //
+  // The observed symptom was exactly this: the notice bar and the result's
+  // outer box visible, the body's content an empty correctly-sized area
+  // (opacity:0 preserves layout; display:none would have collapsed it).
+  //
+  // The only lever the cover exposes is `data-shh-ok`, so stamp it on every
+  // descendant the cover could still match. Semantically correct too: the user
+  // has just asked to see this result, which is precisely what the marker
+  // means — `preload.ts` sets it on every node it has positively cleared.
+  if (isGoogleHost(node)) {
+    const exempt = [node, ...node.querySelectorAll(GOOGLE_COVER_CANDIDATE_SELECTOR)];
+    for (const el of exempt) {
+      // Only while the cover is not already lifted for it; do not resurrect a
+      // marker the node legitimately carries for another reason.
+      if (!el.hasAttribute(ATTR_SHH_PRELOADED)) el.setAttribute(ATTR_SHH_OK, "true");
+    }
+  }
   node.setAttribute(ATTR_SHH_MODE, "shown-once");
 
   // Insert the slim notice strip at the very top of the now-visible result.
@@ -164,6 +230,94 @@ export function rehideResult(
 }
 
 /**
+ * Every preload-hidden DESCENDANT of `node` (not `node` itself).
+ *
+ * Callers must re-test each of these before revealing one — see
+ * `revealPreloadHiding` for why.
+ */
+export function preloadHiddenDescendants(node: Element): HTMLElement[] {
+  return Array.from(
+    node.querySelectorAll<HTMLElement>("[data-shh-preloaded]")
+  );
+}
+
+/**
+ * Lift preload-applied hiding on `node` AND everything inside it.
+ *
+ * Narrower than restoreResult() on purpose:
+ *   - does NOT touch placeholders. A placeholder is the PREVIOUS SIBLING of the
+ *     result it belongs to, so clearing one from here could strip the control
+ *     off a *different*, still-blocked neighbouring result.
+ *   - does NOT clear data-shh-result. Callers reach this only when no
+ *     descendant is stamped (processResults rejects those via the container
+ *     guard first), so there is nothing legitimate to clear.
+ *
+ * UNCONDITIONAL on the subtree — the caller is responsible for deciding that
+ * every descendant really is safe to reveal. `processResults` uses
+ * `revealPreloadHiding` (which re-tests each one); `restoreResult` uses this
+ * directly, because it is only ever called for a node the user has explicitly
+ * unblocked.
+ */
+export function clearPreloadHiding(node: Element): void {
+  const targets: Element[] = [
+    node,
+    ...Array.from(node.querySelectorAll("[data-shh-preloaded]")),
+  ];
+  for (const el of targets) {
+    (el as HTMLElement).style.removeProperty("display");
+    el.removeAttribute("data-shh-preloaded");
+    el.classList.remove(CLASS_HIDDEN);
+  }
+}
+
+/** True when `node` or anything inside it carries a preload hide. */
+export function hasPreloadHiding(node: Element): boolean {
+  return (
+    node.hasAttribute("data-shh-preloaded") ||
+    node.querySelector("[data-shh-preloaded]") !== null
+  );
+}
+
+/**
+ * Lift preload hiding on `node` and on every descendant that is NOT still
+ * blocked. This is the reveal path used by `processResults`, and the predicate
+ * is not optional decoration — it is the guard.
+ *
+ * WHY A PREDICATE IS REQUIRED
+ * ---------------------------
+ * SELF is always safe: the caller reaches the reveal branch only because this
+ * node's own destination does not match, and the adapter is authoritative for
+ * the node it offered.
+ *
+ * DESCENDANTS are not. Two independent reasons:
+ *   1. The check must cover them at all. The preload and the adapter routinely
+ *      pick different DOM levels for the same result — the preload stamps the
+ *      inner `div.g`, the adapter offers the wrapping `tF2Cxc`/`MjjYud` — so a
+ *      self-only test missed exactly that case and left the inner node at
+ *      `display:none` with the block button trapped inside it (audit D3).
+ *   2. ...but an unmatched WRAPPER can still contain a blocked result. The
+ *      preload and the adapters resolve a destination with DIFFERENT selectors
+ *      and different fallback scopes, so they can disagree about the same
+ *      subtree. `data-shh-preloaded` is deliberately absent from
+ *      `SELECTOR_PROCESSED` (see dedupe.ts:36-51), so `containsProcessed` does
+ *      NOT protect this case.
+ *
+ * Clearing a descendant blindly trades "blocked result hidden with a trapped
+ * button" for "blocked result VISIBLE" — the exact symptom this change set
+ * exists to remove. Hence one re-test per descendant.
+ */
+export function revealPreloadHiding(
+  node: Element,
+  isStillBlocked: (el: Element) => boolean
+): void {
+  if (node.hasAttribute("data-shh-preloaded")) clearPreloadHiding(node);
+  for (const inner of preloadHiddenDescendants(node)) {
+    if (isStillBlocked(inner)) continue;
+    clearPreloadHiding(inner);
+  }
+}
+
+/**
  * Fully restore a result (after unblocking). Removes placeholder and all markers.
  */
 export function restoreResult(node: Element): void {
@@ -171,26 +325,35 @@ export function restoreResult(node: Element): void {
   if (placeholder) placeholder.remove();
 
   node.querySelector("." + CLASS_SHOWN_NOTICE)?.remove();
-  (node as HTMLElement).style.removeProperty("display");
   // Clear any opacity/pointer-events overrides set by showOnce().
   (node as HTMLElement).style.removeProperty("opacity");
   (node as HTMLElement).style.removeProperty("pointer-events");
   node.removeAttribute(ATTR_SHH_RESULT);
   node.removeAttribute(ATTR_SHH_MODE);
   node.removeAttribute(ATTR_SHH_URL);
-  // Remove the preload marker so the preload CSS rule
-  // ([data-shh-preloaded="true"]{display:none!important}) stops applying.
-  node.removeAttribute("data-shh-preloaded");
-  // ...and INNER preload marks too (A2 F2a): when the adapter offered the
-  // wrapper while the preload hid an inner node, unblocking must lift every
-  // preload hide in the subtree — the Show path (showOnce) already does;
-  // without this, Unblock left the result visible but hollow.
-  node.querySelectorAll("[data-shh-preloaded]").forEach((inner) => {
-    (inner as HTMLElement).style.removeProperty("display");
-    inner.removeAttribute("data-shh-preloaded");
-    inner.classList.remove("shh-hidden");
-  });
-  node.classList.remove(CLASS_HIDDEN, CLASS_PBAN, CLASS_SHOWN_RESULT);
+  // Inline display + the preload marker on self and every inner node, so the
+  // preload CSS rule ([data-shh-preloaded="true"]{display:none!important})
+  // stops applying. The subtree walk matters for the same reason as
+  // clearPreloadHiding() — see its comment (A2 F2a, audit D3).
+  clearPreloadHiding(node);
+
+  // *** AND LIFT THE COVER — the step that was missing here ***
+  //
+  // clearPreloadHiding() above REMOVES `data-shh-preloaded`, and the cover's
+  // selector excludes exactly that attribute:
+  //   html[data-shh-active] div.g:not([data-shh-ok]):not([data-shh-preloaded])
+  // So removing it does not merely un-hide the node — it RE-ARMS the cover on
+  // any node the cover can match. A result the user just unblocked then renders
+  // as a full-height blank gap: the same reported symptom, reached by a
+  // different, entirely deterministic, user-initiated path.
+  //
+  // `showOnce` had to add this same stamp for this same reason (see its
+  // "INNER-COVER FIX" note); restoreResult performs the identical removal with
+  // none of the mitigation. `opacity` does not cascade as an override, so the
+  // stamp has to reach the whole subtree, not just this node.
+  if (isGoogleHost(node)) revealCoverSubtree(node);
+
+  node.classList.remove(CLASS_PBAN, CLASS_SHOWN_RESULT);
 }
 
 /**

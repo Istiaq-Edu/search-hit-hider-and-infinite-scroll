@@ -33,7 +33,7 @@ export function AdvancedSettings({ prefs, onUpdatePrefs }: Props) {
 
       <Row
         label="Debug mode"
-        hint="Verbose console diagnostics + built-in __shhDiag() report"
+        hint="Verbose console diagnostics + a one-click copy(__shhDiagText()) field report"
       >
         <Toggle label="Debug mode" checked={prefs.debugMode}
           onChange={() => void onUpdatePrefs({ debugMode: !prefs.debugMode })}
@@ -69,11 +69,33 @@ export function AdvancedSettings({ prefs, onUpdatePrefs }: Props) {
           fontSize: "11px",
           color: "var(--text-2)",
           fontFamily: "monospace",
+          lineHeight: 1.5,
         }}>
-          Debug mode active — open DevTools on a search page. Verbose diagnostics are
-          logged there; run{" "}
-          <code style={{ color: "var(--text)" }}>copy(__shhDiag())</code> to copy a full
-          report (build version, domains, results found, link encoding, markup sample).
+          <div style={{ color: "var(--text)", marginBottom: "4px" }}>
+            Debug mode ON — reload the search page, then:
+          </div>
+          <ol style={{ margin: "0 0 6px", paddingLeft: "16px" }}>
+            <li>Reload the search page</li>
+            <li>Reproduce the problem — blocked results visible that should be hidden</li>
+            <li>
+              Open DevTools → <b>Console</b>, run{" "}
+              <code style={{ color: "var(--accent)" }}>copy(__shhDiagText())</code> and paste it here.
+              The first lines are a plain-English verdict.
+            </li>
+          </ol>
+          <div style={{ color: "var(--text-3)" }}>
+            The verdict lines matter more than the tables. Read them in order:
+            {" "}<b>detectorArmed</b> false means the blocked-result counter never ran and the
+            report is worthless; <b>BLOCKING IS SUSPENDED</b> means you paused it and nothing is
+            hidden by design; only <b>ON-SCREEN RESULT(S)…VISIBLE</b> and{" "}
+            <b>BLOCKED result(s) … neither hidden nor given a block button</b> are real defects.
+          </div>
+          <div style={{ color: "var(--text-3)", marginTop: "4px" }}>
+            <b>If the console says <code>__shhDiagText is not defined</code></b>, Firefox is
+            still running the previous copy of the extension. Go to <code>about:debugging</code>,
+            hit <b>Reload</b> on Search Hit Hider, then reload the tab and try again. The
+            report&apos;s <b>stamp:</b> line tells you which build produced it.
+          </div>
         </div>
       )}
 

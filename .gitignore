@@ -2,3 +2,8 @@ node_modules/
 dist/
 releases/
 *.zip
+
+# Agent working state — session memory, tool caches and agent-authored plan
+# drafts. Working state, not project content: never publish.
+.workbuddy-ai/
+.hermes/

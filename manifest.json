@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Search Hit Hider and Infinite Scroll",
-  "version": "1.8.18",
+  "version": "1.8.21",
   "description": "Hide unwanted domains from search results with one click. Auto-load more results as you scroll. Supports Google, DuckDuckGo, Bing, Yandex, Baidu, Brave Search, and Startpage.",
   "author": "Istiaq-Edu",
   "homepage_url": "https://github.com/Istiaq-Edu/Search-Hit-Hider",
@@ -23,6 +23,7 @@
     "default_title": "Search Hit Hider and Infinite Scroll"
   },
   "background": {
+    "service_worker": "background/service-worker.js",
     "scripts": [
       "background/service-worker.js"
     ],
@@ -148,7 +149,7 @@
       "js": [
         "content/index.js"
       ],
-      "run_at": "document_idle",
+      "run_at": "document_end",
       "all_frames": false
     },
     {
@@ -161,7 +162,7 @@
       "js": [
         "content/index.js"
       ],
-      "run_at": "document_idle",
+      "run_at": "document_end",
       "all_frames": false
     },
     {
@@ -171,7 +172,7 @@
       "js": [
         "content/index.js"
       ],
-      "run_at": "document_idle",
+      "run_at": "document_end",
       "all_frames": false
     },
     {
@@ -189,7 +190,7 @@
       "js": [
         "content/index.js"
       ],
-      "run_at": "document_idle",
+      "run_at": "document_end",
       "all_frames": false
     },
     {
@@ -199,7 +200,7 @@
       "js": [
         "content/index.js"
       ],
-      "run_at": "document_idle",
+      "run_at": "document_end",
       "all_frames": false
     },
     {
@@ -210,7 +211,7 @@
       "js": [
         "content/index.js"
       ],
-      "run_at": "document_idle",
+      "run_at": "document_end",
       "all_frames": false
     },
     {

@@ -4,6 +4,7 @@ import { Deduper, unwrapProxyDestination } from "./deduper";
 import { fetchPage } from "./fetcher";
 import { extractFaviconDataAny } from "./favicon-data";
 import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type ScrollState } from "./persist";
+import { revealCoverSubtree } from "../markers";
 
 /**
  * First-party favicon services, per engine. These are hosts the ENGINE
@@ -1136,20 +1137,14 @@ export class InfiniteScrollManager {
     // (hideResult) and are skipped — only genuinely-unhandled nodes get the
     // ok stamp. Stale-cache directions are safe both ways: the content
     // script's list is authoritative and has already run.
+    //
+    // The selector and the marker rules are the SHARED definitions from
+    // markers.ts, not a third copy of the string. The comment there records
+    // what three copies cost the last time they drifted; this call site is now
+    // one of its consumers, so a cover change reaches it automatically.
     if (this.engine.id === "google") {
       try {
-        const coverCandidates = pageContainer.querySelectorAll(
-          "div.g:not(.g .g), div.tF2Cxc:not(.tF2Cxc .tF2Cxc)"
-        );
-        for (const el of Array.from(coverCandidates)) {
-          if (
-            !el.hasAttribute("data-shh-ok") &&
-            !el.hasAttribute("data-shh-preloaded") &&
-            !el.hasAttribute("data-shh-result")
-          ) {
-            el.setAttribute("data-shh-ok", "true");
-          }
-        }
+        revealCoverSubtree(pageContainer);
       } catch { /* cosmetic — never fail the append */ }
     }
 

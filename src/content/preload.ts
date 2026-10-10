@@ -5,7 +5,12 @@ import {
   looksLikeGoogleAggregate,
   googleDisplayDomain,
 } from "./engines/google-dom";
-import { isOwnEchoRecord } from "./markers";
+import {
+  isOwnEchoRecord,
+  GOOGLE_COVER_SELECTOR,
+  GOOGLE_COVER_CANDIDATE_SELECTOR,
+  revealCoverCandidate,
+} from "./markers";
 
 // ============================================================
 // Anti-FOUC preload — registered at document_start.
@@ -101,14 +106,70 @@ import { isOwnEchoRecord } from "./markers";
       paused = c.paused === true;
     }
   } catch { /* localStorage unavailable or JSON corrupted */ }
-  const buildV = browser.runtime.getManifest?.().version ?? "?";
-  console.log(`[SHH-preload v${buildV}] host=${location.hostname} domains=${domains.length} paused=${paused}`);
+  const buildV =
+    typeof __SHH_BUILD__ !== "undefined"
+      ? __SHH_BUILD__
+      : (browser.runtime.getManifest?.().version ?? "?");
+  // `buildV` already carries its own "v" (the stamp is "v1.8.20+<hash>"), so
+  // the template must not add a second one.
+  console.log(`[SHH-preload ${buildV}] host=${location.hostname} domains=${domains.length} paused=${paused}`);
+
+  // ── Preload-side timeline ───────────────────────────────────────────────
+  // Both this and the content script record against the SAME document
+  // performance timeline, so their marks are directly comparable. That is the
+  // measurement the whole show/hide investigation needed and never had: did the
+  // 2s cover-reveal fire BEFORE or AFTER the authoritative processResults?
+  const shhPreloadMarks: Array<{ label: string; t: number }> = [];
+  const pmark = (label: string): void => {
+    shhPreloadMarks.push({ label, t: Math.round(performance.now()) });
+  };
+  pmark("preload-start");
+
+  // Whether the 2s unconditional cover-reveal actually fired, and whether the
+  // CSS layers ended up live. Both were unmeasurable before.
+  const preloadDiag = {
+    version: buildV,
+    host: location.hostname,
+    domains: domains.length,
+    paused,
+    hasRulesBuilt: 0,
+    coverAttached: false,
+    adoptedSheetCount: 0,
+    revealFiredAtMs: null as number | null,
+    revealFired: false,
+    // Not a constant. The previous revision initialised this to "ran fully" and
+    // never assigned it again, so it reported "ran fully" for a preload that
+    // bailed early or threw. Set at each early return below.
+    preloadSkipReason: "starting",
+    coversAnyNode: 0,
+    // The whole preload-vs-content timing comparison assumes both scripts share
+    // one clock. Publishing the value is what lets the field report CHECK that
+    // assumption instead of resting on it.
+    timeOrigin: typeof performance !== "undefined" ? performance.timeOrigin : null,
+  };
+
   try {
     document.documentElement.setAttribute(
       "data-shh-preload-run",
-      `v=${buildV};host=${location.hostname};domains=${domains.length};paused=${paused}`
+      // `buildV` already begins with "v" (the stamp is "v1.8.20+<hash>"), so
+      // this template must not prepend another - it read "v=v1.8.20+...".
+      `build=${buildV};host=${location.hostname};domains=${domains.length};paused=${paused}`
     );
   } catch { /* ignore */ }
+
+  (window as Window & { __shhPreloadDiag?: () => unknown }).__shhPreloadDiag = () => ({
+    ...preloadDiag,
+    marks: shhPreloadMarks,
+    // Uncaught errors seen by this script, with their throwing frame. A report
+    // that shows this non-empty tells us exactly what the console could not.
+    errors: errors.slice(),
+    // `contentMarks` reads an attribute off documentElement. Guarded, because a
+    // diagnostic that throws takes the ENTIRE field report with it — and this
+    // is the last thing standing between a field tester and a usable paste.
+    // Verified by driving documentElement to null and requiring this to
+    // survive.
+    contentMarks: readContentMarks(),
+  });
 
   // Pause / engine-disable must stop ALL preload hiding. The main content
   // script writes this flag whenever blocking is suspended for this engine;
@@ -137,7 +198,30 @@ import { isOwnEchoRecord } from "./markers";
   //
   // WHY NOT always set it: users with an empty block list must see results
   // immediately — we must not cover div.g when there is nothing to block.
+  // ── 3. Arm the static CSS cover (html[data-shh-active]) ──────────────────
+  //
+  // preload.css contains:
+  //   html[data-shh-active] div.g:not(.g .g):not([data-shh-ok]):not([data-shh-preloaded])
+  //     { opacity:0!important; pointer-events:none!important }
+  //
+  // That rule only fires when <html> carries data-shh-active.  We set it
+  // synchronously here (before any body elements are parsed) when the block
+  // list is non-empty.  On bfcache restoration the attribute survives in the
+  // DOM, so the static CSS cover is active before any JS runs.
+  //
+  // WHY NOT always set it: users with an empty block list must see results
+  // immediately — we must not cover div.g when there is nothing to block.
+  //
+  // `coverArmed` is the single source of truth for BOTH the attribute and the
+  // adopted sheet, and the bfcache `pageshow` handler consults it rather than
+  // `isGoogle`. Re-arming from `isGoogle` alone re-armed the cover on a page
+  // that had been SUSPENDED (whose content observer is stopped, so anything
+  // rendered later stayed at opacity:0 with no reveal net) and on a tab with an
+  // empty block list (whose preload IIFE returned early, so no observer and no
+  // reveal existed at all — a blank SERP after Back).
+  let coverArmed = false;
   if (domains.length > 0 && isGoogle) {
+    coverArmed = true;
     try {
       document.documentElement.setAttribute("data-shh-active", "true");
     } catch { /* ignore */ }
@@ -233,13 +317,20 @@ import { isOwnEchoRecord } from "./markers";
   //   could cause unwanted side-effects.
   // Cover both the classic div.g selector (pre-2025) and div.tF2Cxc which is
   // Google's 2025 per-result card replacing div.g in the updated SERP layout.
-  const GOOGLE_COVER_SEL = [
-    "div.g:not(.g .g):not([data-shh-ok]):not([data-shh-preloaded])",
-    "div.tF2Cxc:not(.tF2Cxc .tF2Cxc):not([data-shh-ok]):not([data-shh-preloaded])",
-  ].join(",");
+  // Defined ONCE in markers.ts: preload.css carries the same rule, preload.ts
+  // re-queries it here to stamp data-shh-ok, and blocking/hider.ts has to
+  // exempt the same set on show-once. Three copies of this string is how they
+  // drifted into disagreeing.
+  const GOOGLE_COVER_SEL = GOOGLE_COVER_SELECTOR;
 
   function injectCoverCSS(): void {
-    if (!isGoogle || domains.length === 0) return;
+    // `lc`, not `domains`. `domains` is the document_start snapshot and is
+    // never rewritten — a tab that loaded while paused has it empty forever, so
+    // the old guard made the cover permanently unbuildable on exactly the tab
+    // __shhRearmCover exists for. `lc` is the live list, so after a resume the
+    // cover can actually be built. (Hoisted `let`, read at call time, so there
+    // is no TDZ: every call site is below the declaration.)
+    if (!isGoogle || lc.length === 0) return;
     try {
       if (!coverAdoptedSheet) {
         coverAdoptedSheet = new CSSStyleSheet();
@@ -253,18 +344,117 @@ import { isOwnEchoRecord } from "./markers";
       if (!document.adoptedStyleSheets.includes(coverAdoptedSheet)) {
         document.adoptedStyleSheets = [...document.adoptedStyleSheets, coverAdoptedSheet];
       }
+      preloadDiag.coverAttached = true;
+      preloadDiag.adoptedSheetCount = document.adoptedStyleSheets?.length ?? 0;
     } catch { /* adoptedStyleSheets unavailable — static CSS is the primary protection */ }
   }
 
-  // Initial injection.
-  injectBlockingCSS();
-  injectCoverCSS();
+  // -- Uncaught-error trap --------------------------------------------------
+  //
+  // WHY THIS EXISTS
+  // ---------------
+  // The 2026-09-29 field run produced dozens of "TypeError: H is not a
+  // function  preload.js:2:1870" and no actionable information whatsoever.
+  // "H" is a minified identifier; 2:1870 points at a resolveGoogleStream(doc)
+  // call that provably CANNOT throw -- verified: H is a hoisted function
+  // declaration at the same lexical depth as both its call sites, and its
+  // selector loop swallows its own errors. So the console was pointing at the
+  // enclosing MutationObserver callback rather than at the statement that
+  // actually threw, and nothing in the build could recover the difference.
+  //
+  // Three changes make the next run conclusive:
+  //   1. this trap records the message AND the stack, so the report carries the
+  //      real throwing frame instead of a mangled position;
+  //   2. build.js now ships external sourcemaps and keepNames, so even the
+  //      console line maps back to source;
+  //   3. the observer callback body is wrapped, so one bad batch neither aborts
+  //      the rest of that batch nor every batch after it.
+  //
+  // Capped ring: an error-per-mutation bug would otherwise grow this without
+  // bound, which is its own memory leak in a script that runs for the life of
+  // the tab.
+  const errors: string[] = [];
+  const recordError = (where: string, e: unknown): void => {
+    // Must not be able to throw. It is called FROM the catch that is the last
+    // line of defence, and it touches a value that may be a page-compartment
+    // object whose `stack` getter can throw. An error handler that can throw is
+    // not an error handler.
+    let msg: string;
+    let frame = "";
+    try {
+      msg = e instanceof Error ? e.name + ": " + e.message : String(e);
+    } catch { msg = "(unprintable error)"; }
+    try {
+      if (e instanceof Error && e.stack) frame = (e.stack.split("\n")[1] ?? "").trim();
+    } catch { frame = ""; }
+    try {
+      errors.push(where + " | " + msg + (frame ? " | " + frame : ""));
+      while (errors.length > 25) errors.shift();
+    } catch { /* the array is gone; nothing left to do */ }
+  };
+  try {
+    window.addEventListener("error", (ev: Event) => {
+      recordError("window.error", (ev as ErrorEvent).error ?? (ev as ErrorEvent).message);
+    });
+    window.addEventListener("unhandledrejection", (ev: Event) => {
+      recordError("unhandledrejection", (ev as PromiseRejectionEvent).reason);
+    });
+  } catch { /* addEventListener unavailable - the report just shows fewer errors */ }
 
-  // Nothing blocked in the cache — exit the rest of the logic with zero overhead.
-  // (The CSS rules above are already injected and harmless with an empty block list.)
-  if (domains.length === 0) return;
+  /**
+   * The content script's marks, mirrored onto <html>, parsed for comparison
+   * against the preload's own timeline.
+   *
+   * `^(\d+):(.*)$` and not a plain `split(":")`: the preload's OWN writer emits
+   * `hasRules:cleared`, so a label containing a colon is already in use in this
+   * codebase, and a plain split silently truncated it to the text before the
+   * first colon.
+   *
+   * Every step is guarded. This function runs inside `__shhPreloadDiag`, which
+   * is what a field tester calls to produce the report — an exception here
+   * destroys the whole paste, which is strictly worse than the bug it was
+   * meant to explain.
+   */
+  function readContentMarks(): { tMs: number; label: string }[] {
+    try {
+      const raw = document.documentElement?.getAttribute("data-shh-diag-marks") ?? "";
+      return raw.split("|").filter(Boolean).map((s) => {
+        const m = s.match(/^(\d+):(.*)$/);
+        return { tMs: m ? Number(m[1]) : NaN, label: m ? m[2]! : s };
+      });
+    } catch (e) {
+      recordError("preloadDiag.contentMarks", e);
+      return [];
+    }
+  }
 
-  // ── 5. Build a fast in-memory matcher ────────────────────────────────────
+  // ── 4. State the content script can drive at runtime, and the four hooks ──
+  //
+  // WHY THIS BLOCK IS ABOVE THE EMPTY-LIST EARLY RETURN
+  // ---------------------------------------------------
+  // An earlier revision installed all four window hooks *after*
+  // `if (domains.length === 0) return;`. That is a hard exit, and it is
+  // reached on precisely the two states these transitions come from:
+  //
+  //   * a tab loaded while PAUSED (`if (paused) domains = []` above), and
+  //   * any fresh install with no cache yet.
+  //
+  // On those pages NO hook existed, so the content script's resume branch
+  // called `__shhUpdateHas?.()`, `__shhRearmCover?.()` and got nothing —
+  // `?.` swallowed the miss and the tab silently kept no `:has()` layer and no
+  // cover for the rest of its session. `__shhRearmCover`'s own comment claimed
+  // it closed "no pre-paint protection after resume" on a page where it could
+  // not fire.
+  //
+  // The hooks are now installed unconditionally and gate themselves. Only the
+  // OBSERVER and the scan stay behind the early return — those are the parts
+  // that actually cost something, and with an empty list there is nothing to
+  // hide anyway.
+  //
+  // `buildHasRules`, `sanitizeDomains`, `revealRemainingGoogle` and
+  // `injectCoverCSS` are function DECLARATIONS, so hoisting makes them safe to
+  // reference from here; only the `let` bindings had to move.
+
   // Convert every entry to ASCII (punycode) form — hostnames parsed from
   // page URLs are always ASCII, so a unicode entry would never match — and
   // drop anything that still contains characters outside the hostname-safe
@@ -272,10 +462,28 @@ import { isOwnEchoRecord } from "./markers";
   // braces would otherwise break out of the CSS attribute selectors below
   // and could invalidate an entire :is() rule batch.
   const HOSTNAME_SAFE = /^[a-z0-9.-]+$/;
-  function sanitizeDomains(list: string[]): string[] {
+
+  function sanitizeDomains(list: unknown): string[] {
     const out: string[] = [];
     const seen = new Set<string>();
-    for (const raw of list) {
+    // The CONTAINER needs a guard too, not just the elements. `__shhUpdateHas`
+    // is reachable from `index.ts` with anything the caller likes, and
+    // `for (const raw of list)` throws `TypeError: list is not iterable` for
+    // undefined/null/number/boolean — which, before the element guard existed,
+    // escaped the whole IIFE and left the Google cover permanently up. The
+    // element check below is not a substitute for this one.
+    if (!Array.isArray(list)) return out;
+    for (const raw of list as unknown[]) {
+      // MUST be a string. `Array.isArray` on the cache payload validates the
+      // container, not the elements, and `_shh_cache` lives in localStorage on
+      // the PAGE's origin — writable by any script that has run there (the
+      // repo's own A4-FYI records this). A payload like {"domains":[{}]} used
+      // to throw `raw.trim is not a function` HERE, at module scope, which
+      // escaped the whole preload IIFE: __shhRevealGoogle was never installed,
+      // the observer never started, and every Google result stayed at the
+      // cover's `opacity:0 !important; pointer-events:none !important`. The
+      // visible result was a blank, unclickable SERP with no error anywhere.
+      if (typeof raw !== "string") continue;
       let d = raw.trim().toLowerCase();
       if (d.startsWith("www.")) d = d.slice(4);
       try {
@@ -287,11 +495,248 @@ import { isOwnEchoRecord } from "./markers";
     }
     return out;
   }
-  const lc = sanitizeDomains(domains);
 
+  // `let`, not `const`: __shhUpdateHas rebinds these so a runtime block-list
+  // change reaches the preload's OWN JS hiding path (tryHide → hostMatches →
+  // lc) as well as the :has() sheet. Updating only the sheet would leave the
+  // two preload layers disagreeing for the rest of the page — and after a
+  // suspend, the CSS layer empty while tryHide still hides, i.e. a paused page
+  // with new nodes hidden and no placeholder, because the content observer is
+  // stopped. That is the failure the 2026-08-30 diagnosis named: no
+  // independent layers.
+  let lc = sanitizeDomains(domains);
+  let lcWildcard = wildcard;
+
+  // The `:has()` layer's sheet handle. Declared here (not next to
+  // buildHasRules) so __shhUpdateHas can exist before the early return.
+  let hasSheet: CSSStyleSheet | null = null;
+
+  // ── 6. Window hooks ──────────────────────────────────────────────────────
+  // Runtime list replacement from the content script. Rebinds `lc` as well as
+  // rebuilding the sheet, so the preload's own JS hiding path and the CSS layer
+  // can never disagree.
+  (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
+    .__shhUpdateHas = (newDomains: string[], newWildcard: boolean): void => {
+    lc = sanitizeDomains(newDomains);
+    lcWildcard = newWildcard;
+    buildHasRules(lc, lcWildcard);
+  };
+
+  // ── 7. Reveal helper ──────────────────────────────────────────────────────
+  // Reveal any Google result containers that are still undetermined (no links
+  // found yet — skeleton nodes).  Called from timed rescans and exposed to
+  // the content script so it can trigger the final reveal after processResults().
+  function revealRemainingGoogle(why: string = "unspecified"): void {
+    if (!isGoogle) return;
+    preloadDiag.revealFired = true;
+    preloadDiag.revealFiredAtMs = Math.round(performance.now());
+    // Labelled by ORIGIN. There are six call sites, and the report's whole
+    // point is to compare the 2s safety net against the content script's own
+    // post-processResults call — impossible when they share a label.
+    pmark(`google-cover-reveal:${why}`);
+    try {
+      // One query, one snapshot: counting and stamping from two separate
+      // querySelectorAll calls let a mutation between them make the reported
+      // number disagree with the effect.
+      const nodes = document.querySelectorAll(GOOGLE_COVER_SEL);
+      preloadDiag.coversAnyNode = nodes.length;
+      nodes.forEach(el => { el.setAttribute("data-shh-ok", "true"); });
+    } catch { /* ignore */ }
+  }
+
+  // Expose to the content script (same isolated-world window) so it can call
+  // this after processResults() — at that point every blocked result has been
+  // stamped and any remaining undetermined node is safe to show.
+  (window as Window & { __shhRevealGoogle?: () => void })
+    .__shhRevealGoogle = revealRemainingGoogle;
+
+  // ── 7a. Bounded trailing sweep for nodes we could not determine YET ───────
+  //
+  // `tryHide` declines to judge a node it cannot evaluate — in practice a
+  // Google hydration shell whose anchor has not arrived yet. Such a node must
+  // NOT be stamped safe on the spot: that is precisely the two-step-hydration
+  // flicker the cover exists to prevent (the shell paints empty, then vanishes
+  // when it is populated with a blocked link). So it stays covered — which is
+  // only safe while something will look at it again. `data-shh-ok` is absent,
+  // so the cover holds it at `opacity:0`: a full-height blank gap, the reported
+  // symptom, until the next mutation.
+  //
+  // `revealRemainingGoogle` resolves this at DISCRETE moments only (2 s after
+  // DOMContentLoaded, after processResults, on bfcache restore, on an append).
+  // A shell that arrives after the last of those and is never populated — a
+  // card Google inserted and then failed to hydrate, which the 2026-10-10 field
+  // run's ~100 page-origin TypeErrors make plausible — stays invisible forever.
+  // This is the missing trailing net.
+  //
+  // ONE timer, not one per node: a per-node timer on a SERP with hundreds of
+  // shells is unbounded allocation, and the sweep is document-wide anyway.
+  // The delay is deliberately of the same order as the 2 s net, so it can never
+  // fire between the two steps of Google's two-step hydration.
+  const UNDETERMINED_SWEEP_MS = 1200;
+  let undeterminedTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleUndeterminedSweep(): void {
+    if (!isGoogle || undeterminedTimer !== null) return;
+    try {
+      undeterminedTimer = setTimeout(() => {
+        undeterminedTimer = null;
+        revealRemainingGoogle("undetermined-timeout");
+      }, UNDETERMINED_SWEEP_MS);
+    } catch { /* timers unavailable — the timed nets cannot run either way */ }
+  }
+
+  // ── 7a-bis. On-demand cover audit — THE INVARIANT, MEASURED ──────────────
+  //
+  // WHY THIS EXISTS: a field paste cannot currently answer "is anything stuck
+  // under the cover?" The console logs a healthy boot, the appends log healthy
+  // favicons, and NOTHING in any of it reports per-node visibility. So the one
+  // question that matters is unanswerable from a paste, and two successive
+  // field reports had to be argued about instead of read.
+  //
+  // Worse, the one existing signal is ambiguous. `favicon paint outcome` reports
+  // `visible=false` for a covered ancestor (opacity:0 — the bug) AND for a
+  // blocked result (display:none — correct), and it samples only the FIRST
+  // appended node. It cannot discriminate.
+  //
+  // This hook answers the question directly, on demand, at the moment the user
+  // can see the problem. It is the invariant the whole cover design rests on:
+  //   "every node the cover can match carries a POSITIVE determination"
+  // so the number to look at is `blankGaps` — nodes the cover matches, that no
+  // marker has determined, AND that occupy vertical space. Anything above zero
+  // IS the reported symptom, named and counted.
+  //
+  // Uses the SAME shared selector the CSS rule and the reveal paths use, so it
+  // cannot drift from what is actually painted.
+  (window as Window & { __shhCoverAudit?: () => unknown }).__shhCoverAudit = () => {
+    try {
+      const undetermined: Array<Record<string, unknown>> = [];
+      let candidates = 0;
+      for (const el of Array.from(
+        document.querySelectorAll(GOOGLE_COVER_CANDIDATE_SELECTOR)
+      )) {
+        candidates++;
+        if (
+          el.hasAttribute("data-shh-ok") ||
+          el.hasAttribute("data-shh-preloaded") ||
+          el.hasAttribute("data-shh-result")
+        ) {
+          continue;
+        }
+        const cs = getComputedStyle(el);
+        const box = el.getBoundingClientRect();
+        undetermined.push({
+          tag: el.tagName.toLowerCase(),
+          cls: String((el as HTMLElement).className || "").slice(0, 40),
+          opacity: cs.opacity,
+          display: cs.display,
+          h: Math.round(box.height),
+          w: Math.round(box.width),
+          text: (el.textContent || "").trim().slice(0, 40),
+        });
+      }
+      return {
+        coverArmed,
+        active: document.documentElement.hasAttribute("data-shh-active"),
+        candidates,
+        undeterminedCount: undetermined.length,
+        // The symptom, counted: unmarked AND occupying space.
+        blankGaps: undetermined.filter((u) => Number(u.h) > 0).length,
+        revealFiredAtMs: preloadDiag.revealFiredAtMs ?? null,
+        undetermined: undetermined.slice(0, 20),
+      };
+    } catch (e) {
+      // Surface the reason, with the stack — this hook is the field oracle for
+      // the whole cover invariant, so "it did not work" must not be silent.
+      return { error: String(e), stack: (e as Error)?.stack ?? null };
+    }
+  };
+
+  // ── 7b. Disarm the cover entirely ─────────────────────────────────────────
+  //
+  // The content script's mid-session suspend needs this, and it CANNOT be done
+  // from there: `coverAdoptedSheet` is a closure local, so only this script can
+  // detach it.
+  //
+  // Removing `html[data-shh-active]` alone is NOT enough. That attribute gates
+  // only the STATIC preload.css rule; the primary cover is the adopted
+  // stylesheet created at document_start, which stays attached regardless. A
+  // result rendered after a pause — a soft navigation, an appended infinite-
+  // scroll page — matches it, gets `opacity:0 !important` and
+  // `pointer-events:none !important`, and the observer has been stopped, so
+  // nothing ever marks it safe. Invisible AND unclickable, for good.
+  //
+  // preload.ts's own comment at the top of the file states the invariant this
+  // preserves: "Pause / engine-disable must stop ALL preload hiding."
+  (window as Window & { __shhDisarmCover?: () => void }).__shhDisarmCover = () => {
+    coverArmed = false;
+    preloadDiag.coverAttached = false;
+    try {
+      if (coverAdoptedSheet) {
+        document.adoptedStyleSheets = document.adoptedStyleSheets.filter(
+          (s) => s !== coverAdoptedSheet
+        );
+      }
+      preloadDiag.adoptedSheetCount = document.adoptedStyleSheets.length;
+    } catch { /* adoptedStyleSheets unavailable — the attribute is the belt */ }
+    // `documentElement` is null only before <html> exists, which cannot happen
+    // by document_idle, but a throw HERE would skip the pmark and the reveal
+    // below — leaving a disarmed cover with every covered node still at
+    // `opacity:0; pointer-events:none` and no stamp to lift it. Degrade instead.
+    try {
+      document.documentElement?.removeAttribute("data-shh-active");
+    } catch (e) { recordError("disarm.documentElement", e); }
+    pmark("cover-disarmed");
+    // Mark every currently-covered node safe so a rule that is mid-teardown
+    // cannot strand a result the user has already been shown.
+    revealRemainingGoogle("disarm");
+  };
+
+  // The mirror of the above, for a mid-session RESUME. Suspend tears the cover
+  // down; without re-arming it here, a resumed tab has no pre-paint protection
+  // for results that arrive before the content script's first pass.
+  //
+  // Gated on `lc` — the LIVE list — not on the document_start `domains` array,
+  // which is never rewritten. The old `!domains.length` guard made this a
+  // no-op on exactly the tab it exists for: one that loaded while PAUSED, where
+  // `domains` was emptied at the top of this IIFE.
+  (window as Window & { __shhRearmCover?: () => void }).__shhRearmCover = () => {
+    if (!isGoogle || lc.length === 0) return;
+    // `coverArmed` is set FIRST and unconditionally, so a throw below cannot
+    // leave it true while the cover is down — which would make the bfcache
+    // handler re-enter a branch that never attached a sheet. The attribute is
+    // what the static preload.css rule keys on, so a null documentElement
+    // degrades to "cover not armed" rather than an exception.
+    coverArmed = false;
+    try {
+      document.documentElement?.setAttribute("data-shh-active", "true");
+    } catch (e) { recordError("rearm.documentElement", e); }
+    injectCoverCSS();
+    preloadDiag.coverAttached = document
+      .adoptedStyleSheets?.includes(coverAdoptedSheet!) ?? false;
+    coverArmed = preloadDiag.coverAttached;
+    pmark("cover-rearmed");
+  };
+
+  // Initial injection.
+  injectBlockingCSS();
+  injectCoverCSS();
+  pmark("css-injected");
+
+  // Nothing blocked in the cache. The hooks above are installed; the OBSERVER
+  // and the scans are not, because with an empty list there is nothing to hide
+  // and both cost real per-mutation work.
+  if (domains.length === 0) {
+    preloadDiag.preloadSkipReason = "no blocked domains in cache (hooks installed, observer not started)";
+    return;
+  }
+  preloadDiag.preloadSkipReason = "ran fully";
+
+  // ── 5. Build a fast in-memory matcher ────────────────────────────────────
+  // (sanitizeDomains, `lc`, `lcWildcard` and the four window hooks are declared
+  //  ABOVE the empty-list early return, so a paused-at-load tab can still be
+  // driven. Only the observer and the scans are gated.)
   function hostMatches(host: string): boolean {
     const h = host.toLowerCase().replace(/^www\./, "");
-    return lc.some(d => h === d || (wildcard && h.endsWith("." + d)));
+    return lc.some(d => h === d || (lcWildcard && h.endsWith("." + d)));
   }
 
   // Resolve the real destination host for a link.
@@ -302,6 +747,28 @@ import { isOwnEchoRecord } from "./markers";
   // includes Google's current /goto?url=<opaque blob> form (2026-08-30): the
   // token is a protobuf wrapper around an encrypted payload, so callers must
   // fall back to the result's display URL instead of trusting this host.
+  /**
+   * Hide a node, tolerating a missing `CSSStyleDeclaration`.
+   *
+   * `el.style` is undefined for elements outside the HTML namespace — a XUL
+   * element is still an `Element` and still matches a result selector, and
+   * `.style.setProperty` on one throws `TypeError`. Every call site absorbed
+   * that in a bare `catch`, so the node was neither hidden nor marked and
+   * blocking was silently LOST for it, with nothing in any log. The attribute
+   * half still applies, which is the layer the content script reconciles on,
+   * so return whether the inline style was set rather than pretending all or
+   * nothing happened.
+   */
+  function hideNode(el: Element): boolean {
+    try {
+      (el as HTMLElement).style?.setProperty("display", "none", "important");
+      return true;
+    } catch (e) {
+      recordError("tryHide.style", e);
+      return false;
+    }
+  }
+
   function resolveHost(a: HTMLAnchorElement): string {
     const raw = a.getAttribute("href") ?? "";
     // Opaque redirect — the destination is not in the URL at all.
@@ -480,8 +947,9 @@ import { isOwnEchoRecord } from "./markers";
   //
   // Progressive enhancement: if the browser lacks :has() (Firefox < 121) the
   // invalid rules are silently ignored; the MutationObserver path covers those.
-  let hasSheet: CSSStyleSheet | null = null;
-
+  //
+  // `hasSheet` itself is declared ABOVE the empty-list early return, so
+  // __shhUpdateHas can exist on a paused-at-load tab.
   function buildHasRules(curLc: string[], curWild: boolean): void {
     try {
       const isNew = !hasSheet;
@@ -514,7 +982,34 @@ import { isOwnEchoRecord } from "./markers";
         } catch { /* selector invalid in this browser — skip batch */ }
       }
 
-      if (rules.length === 0 && !isNew) return;
+      // An empty rule set is a legitimate INSTRUCTION ("nothing is blocked
+      // any more"), not a no-op. Returning here without clearing left every
+      // previously-built `:has(){display:none!important}` rule live for the
+      // rest of the page session — so after unblocking the last domain, or
+      // after a pause transition, later results were hidden with no
+      // placeholder, no Show and no Unblock, and processResults' reveal branch
+      // could not rescue them (it keys on the data-shh-preloaded attribute,
+      // which a :has()-hidden node never carries).
+      //
+      // Reached from content/index.ts updateHasRules() with [] on unblock and on
+      // the pause transition, and from refreshPrefs()'s suspend branch.
+      if (rules.length === 0) {
+        // Report the CLEAR, not just the build. A suspended page reads
+        // hasRulesBuilt from the last non-empty count otherwise, which is the
+        // exact state this field exists to describe.
+        preloadDiag.hasRulesBuilt = 0;
+        pmark("hasRules:cleared");
+        if (!isNew && hasSheet) {
+          try {
+            hasSheet.replaceSync("");
+          } catch {
+            try {
+              while (hasSheet.cssRules.length > 0) hasSheet.deleteRule(0);
+            } catch { /* sheet already empty or unavailable */ }
+          }
+        }
+        return;
+      }
 
       const sheet = isNew ? new CSSStyleSheet() : hasSheet!;
       // Use replaceSync for batch replacement (Firefox 115+)
@@ -530,41 +1025,26 @@ import { isOwnEchoRecord } from "./markers";
         }
       }
 
-      if (isNew && rules.length > 0) {
+      // Re-attach UNCONDITIONALLY when missing, not only on the `isNew` path.
+      // Whether Firefox discards document.adoptedStyleSheets across a bfcache
+      // freeze is unresolved, and the two possible answers fail differently:
+      // if the sheets survive, `hasSheet` is non-null but a page script (or our
+      // own __shhDisarmCover-style filter) may have dropped it from the array,
+      // in which case replaceSync() repopulates a sheet in nobody's list and the
+      // :has() layer is silently dead for the rest of the session. The
+      // `includes` check is correct either way.
+      if (!document.adoptedStyleSheets.includes(sheet)) {
         document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-        hasSheet = sheet;
       }
+      if (isNew) hasSheet = sheet;
+      preloadDiag.hasRulesBuilt = rules.length;
+      preloadDiag.adoptedSheetCount = document.adoptedStyleSheets?.length ?? 0;
+      pmark(`hasRules:${rules.length}`);
     } catch { /* :has() or adoptedStyleSheets unavailable */ }
   }
 
   // Initial build from the preload cache domains.
-  buildHasRules(lc, wildcard);
-
-  // Expose an updater so the content script (same isolated-world window) can
-  // keep the rules in sync when the block list changes at runtime.
-  (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
-    .__shhUpdateHas = (newDomains: string[], newWildcard: boolean): void => {
-    buildHasRules(sanitizeDomains(newDomains), newWildcard);
-  };
-
-  // ── 7. Reveal helper ──────────────────────────────────────────────────────
-  // Reveal any Google result containers that are still undetermined (no links
-  // found yet — skeleton nodes).  Called from timed rescans and exposed to
-  // the content script so it can trigger the final reveal after processResults().
-  function revealRemainingGoogle(): void {
-    if (!isGoogle) return;
-    try {
-      document.querySelectorAll(GOOGLE_COVER_SEL).forEach(el => {
-        el.setAttribute("data-shh-ok", "true");
-      });
-    } catch { /* ignore */ }
-  }
-
-  // Expose to the content script (same isolated-world window) so it can call
-  // this after processResults() — at that point every blocked result has been
-  // stamped and any remaining undetermined node is safe to show.
-  (window as Window & { __shhRevealGoogle?: () => void })
-    .__shhRevealGoogle = revealRemainingGoogle;
+  buildHasRules(lc, lcWildcard);
 
   // ── 8. Hide a single result element if its URL is blocked ────────────────
   function tryHide(el: Element): void {
@@ -579,7 +1059,13 @@ import { isOwnEchoRecord } from "./markers";
     const tag = el.tagName;
     if (tag === "DIV" || tag === "LI" || tag === "SECTION") {
       try {
-        if (el.querySelector(SELS)) return;
+        if (el.querySelector(SELS)) {
+          // We are NOT hiding this node — it wraps results we manage. Leaving it
+          // here without a marker is what stranded it under the cover at
+          // `opacity:0` (blank gap, full height). See revealCoverCandidate.
+          if (isGoogle) revealCoverCandidate(el);
+          return;
+        }
       } catch { /* ignore selector errors */ }
     }
 
@@ -591,7 +1077,13 @@ import { isOwnEchoRecord } from "./markers";
     // class names no longer exist. Failure mode is deliberately fail-open: a
     // section is left visible and the content script resolves it properly at
     // document_idle, rather than hiding results the user did not block.
-    if (isGoogle && looksLikeGoogleSection(el)) return;
+    if (isGoogle && looksLikeGoogleSection(el)) {
+      // Fail-open for HIDING means "leave it alone" — but the cover does not
+      // read intent, it reads markers. Without this the node stays at
+      // `opacity:0` and the section renders as a correctly-sized blank gap.
+      revealCoverCandidate(el);
+      return;
+    }
 
     // *** AGGREGATE GUARD (Google only) ***
     // An AI Overview is one block that cites a dozen domains. It carries no
@@ -599,18 +1091,36 @@ import { isOwnEchoRecord } from "./markers";
     // a single organic result — and tryHide() below checks the FIRST link only,
     // so a block list containing any one of those domains would hide the entire
     // answer. Fail open: leave the aggregate alone.
-    if (isGoogle && looksLikeGoogleAggregate(el)) return;
+    if (isGoogle && looksLikeGoogleAggregate(el)) {
+      // Same reasoning as the section guard above: fail-open for hiding must
+      // not leave the node undetermined, or the cover renders it as a gap.
+      revealCoverCandidate(el);
+      return;
+    }
 
     // Check only the first meaningful external link (most result cards have one).
+    //
+    // BOTH returns below leave the node UNDETERMINED, which the cover renders as
+    // a full-height blank gap. That is the correct state for a hydration shell
+    // (stamping it safe here would re-introduce the flicker the cover prevents),
+    // but it is only correct while something will re-examine the node. Arm the
+    // trailing sweep so a shell that is never populated cannot sit under the
+    // cover forever. See scheduleUndeterminedSweep.
     const a = el.querySelector<HTMLAnchorElement>('a[href]:not([href^="#"]):not([href^="javascript"])');
-    if (!a) return;
+    if (!a) {
+      scheduleUndeterminedSweep();
+      return;
+    }
     const href = a.getAttribute("href") ?? "";
-    if (!href || href.startsWith("#") || href.startsWith("javascript")) return;
+    if (!href || href.startsWith("#") || href.startsWith("javascript")) {
+      scheduleUndeterminedSweep();
+      return;
+    }
 
     const host = resolveHost(a);
     if (host && hostMatches(host)) {
       // Blocked — hide with display:none and mark.
-      (el as HTMLElement).style.setProperty("display", "none", "important");
+      hideNode(el);
       el.setAttribute("data-shh-preloaded", "true");
       return;
     }
@@ -622,7 +1132,7 @@ import { isOwnEchoRecord } from "./markers";
     if (isGoogle) {
       const display = googleDisplayDomain(el);
       if (display && hostMatches(display)) {
-        (el as HTMLElement).style.setProperty("display", "none", "important");
+        hideNode(el);
         el.setAttribute("data-shh-preloaded", "true");
         return;
       }
@@ -636,7 +1146,20 @@ import { isOwnEchoRecord } from "./markers";
 
   // ── 9. Initial scan + MutationObserver + timed rescans ───────────────────
   // Scan anything already in the DOM (rare at document_start, safe to do).
-  try { allResultCandidates().forEach(tryHide); } catch { /* ignore */ }
+  //
+  // These catches used to be BARE, which is how the 2026-09-29 field run could
+  // show dozens of console errors while `preloadDiag.errors` stayed empty: the
+  // batch-level `recordError` only sees throws that escape, and these absorb
+  // everything first. Worse, the absorbed ones are not always harmless — a
+  // foreign-namespace element (Google's XUL `<option>`-shaped nodes have been
+  // observed) makes `.style.setProperty` throw, and the result is that blocking
+  // is silently LOST for that node with nothing in any log. Record them.
+  const scanAll = (where: string) => {
+    try { allResultCandidates().forEach(tryHide); }
+    catch (e) { recordError(where, e); }
+  };
+
+  scanAll("scan.initial");
 
   // Rescan after the DOM is fully parsed — catches results that Google's
   // inline scripts add between document_start and DOMContentLoaded.
@@ -662,19 +1185,19 @@ import { isOwnEchoRecord } from "./markers";
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    try { allResultCandidates().forEach(tryHide); } catch { /* ignore */ }
+    scanAll("scan.rescan");
     requestAnimationFrame(rafRescan);
     // Safety-net: after 2 s, reveal any Google results that are still covered
     // (e.g. the content script took longer than expected to run processResults).
     // The content script calls __shhRevealGoogle() itself after processResults()
     // so in normal flow this timeout fires with nothing left to reveal.
-    setTimeout(revealRemainingGoogle, 2000);
+    setTimeout(() => revealRemainingGoogle("2s-safety-net"), 2000);
   }, { once: true });
 
   // Rescan after all resources load — catches results added by deferred /
   // async scripts that fire after DOMContentLoaded (common on Google).
   window.addEventListener("load", () => {
-    try { allResultCandidates().forEach(tryHide); } catch { /* ignore */ }
+    scanAll("scan.rescan");
   }, { once: true });
 
   // ── 10. bfcache restoration handler ──────────────────────────────────────
@@ -696,21 +1219,30 @@ import { isOwnEchoRecord } from "./markers";
   window.addEventListener("pageshow", (event: PageTransitionEvent) => {
     if (!event.persisted) return; // Only act on bfcache restoration.
 
-    // Re-arm html[data-shh-active] (survives bfcache, but re-set defensively).
-    if (isGoogle) {
+    // Re-arm the cover ONLY if it is still supposed to be armed.
+    //
+    // Gating on `isGoogle` alone (the previous behaviour) re-armed it in two
+    // states where it must stay down:
+    //   - the page was SUSPENDED mid-session: the content observer is stopped,
+    //     so anything Google rendered after the 300ms reveal stayed at
+    //     opacity:0 / pointer-events:none with no reveal net (A1-2's shape).
+    //   - the block list is EMPTY: the preload IIFE returned early, so there is
+    //     no observer and no 300ms timer at all — Back left a blank SERP.
+    if (isGoogle && coverArmed) {
       try { document.documentElement.setAttribute("data-shh-active", "true"); } catch { /* ignore */ }
+      injectCoverCSS();
     }
 
-    // Re-inject adoptedStyleSheets (they do NOT survive bfcache).
+    // Re-inject the blocking sheet regardless of cover state.
     injectBlockingCSS();
-    injectCoverCSS();
-    // Rebuild :has() rules — these live in adoptedStyleSheets which are
-    // discarded when the page is frozen into bfcache.  Without them, the
-    // only CSS-level protection for blocked results is data-shh-preloaded +
-    // the static preload.css Rule 1.  If Google's JS strips that attribute
-    // during its own bfcache restoration logic, there is no fallback.
-    // Rebuilding here ensures the :has() rules are the primary protection.
-    buildHasRules(lc, wildcard);
+    // Rebuild :has() rules from the LIVE list.
+    //
+    // `lcWildcard`, not the document_start `wildcard`: __shhUpdateHas rebinds
+    // the former, and a stale `true` here re-emits the subdomain href patterns,
+    // which hide a node the content script's matcher says is NOT blocked — with
+    // no data-shh-preloaded attribute, so nothing can ever reveal it. That is
+    // the A2-F2 shape ("hidden with NO placeholder, NO Show, NO Unblock").
+    buildHasRules(lc, lcWildcard);
 
     // Google: clear any stale data-shh-ok markers so every result is
     // re-evaluated from scratch.  This handles the case where Google did a
@@ -731,13 +1263,12 @@ import { isOwnEchoRecord } from "./markers";
     }
 
     // Re-evaluate all result nodes.
-    try { allResultCandidates().forEach(tryHide); } catch { /* ignore */ }
+    scanAll("scan.rescan");
 
     // Reveal any remaining uncovered Google nodes after re-evaluation.
     // Schedule slightly deferred so Google's own bfcache restore scripts
     // (if any) have a chance to repopulate links before we reveal.
-    if (isGoogle) setTimeout(revealRemainingGoogle, 300);
-  });
+    if (isGoogle) setTimeout(() => revealRemainingGoogle("bfcache-300ms"), 300);  });
 
   // ── 11. MutationObserver — hide results the instant they appear ────────────
   //
@@ -763,6 +1294,7 @@ import { isOwnEchoRecord } from "./markers";
   //   'href' and walk up to re-check the parent container.
   //   Same data-shh-ok clearing applies here.
   const obs = new MutationObserver((mutations) => {
+   try {
     // Resolve the results stream ONCE per callback batch, not per added node:
     // resolveGoogleStream() runs up to 6 document-wide querySelectors, and a
     // Google hydration burst of N nodes used to pay that 2N times (Case B +
@@ -864,6 +1396,14 @@ import { isOwnEchoRecord } from "./markers";
         } catch { /* ignore */ }
       }
     }
+   } catch (e) {
+    // Per-BATCH isolation. Before this, a throw anywhere in the callback
+    // escaped to the window and aborted the remaining mutations in the batch
+    // AND left the observer running into the same failure on the next batch --
+    // which is what produced an unactionable error repeating dozens of times
+    // per page load. Recorded, not swallowed: it appears in the field report.
+    recordError("observer.batch", e);
+   }
   });
 
   obs.observe(document.documentElement, {
