@@ -623,13 +623,29 @@ import {
         }
         const cs = getComputedStyle(el);
         const box = el.getBoundingClientRect();
+        // Is this node ACTUALLY not painted? The first version of this hook
+        // counted "unmarked AND has height" as a gap, which is a false positive
+        // whenever the cover is disarmed: those nodes are perfectly visible.
+        // Verified in real Firefox (coverArmed=false, 3 unmarked sized nodes,
+        // all with opacity 1) — the metric reported blankGaps=3 for three
+        // results the user could plainly see.
+        const why = cs.display === "none"
+          ? "display:none"
+          : cs.visibility === "hidden"
+            ? "visibility:hidden"
+            : cs.opacity === "0"
+              ? "opacity:0"
+              : null;
         undetermined.push({
           tag: el.tagName.toLowerCase(),
           cls: String((el as HTMLElement).className || "").slice(0, 40),
           opacity: cs.opacity,
           display: cs.display,
+          visibility: cs.visibility,
           h: Math.round(box.height),
           w: Math.round(box.width),
+          invisible: why !== null,
+          why,
           text: (el.textContent || "").trim().slice(0, 40),
         });
       }
@@ -647,8 +663,12 @@ import {
         skipReason: preloadDiag.preloadSkipReason ?? null,
         candidates,
         undeterminedCount: undetermined.length,
-        // The symptom, counted: unmarked AND occupying space.
-        blankGaps: undetermined.filter((u) => Number(u.h) > 0).length,
+        // The symptom, counted honestly: unmarked, occupying space, AND
+        // actually not painted. `coverGaps` narrows that to the cover's own
+        // signature (opacity:0), so a gap caused by Google's visibility:hidden
+        // is never misattributed to us.
+        blankGaps: undetermined.filter((u) => Number(u.h) > 0 && u.invisible === true).length,
+        coverGaps: undetermined.filter((u) => Number(u.h) > 0 && u.opacity === "0").length,
         revealFiredAtMs: preloadDiag.revealFiredAtMs ?? null,
         undetermined: undetermined.slice(0, 20),
       };

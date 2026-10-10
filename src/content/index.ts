@@ -222,11 +222,28 @@ seedDebugFromCache();
  * `script-src 'nonce-...' 'strict-dynamic'` blocks, and the CSP audit this
  * session established that we ship zero inline scripts on purpose.
  */
+let pageBridgeDiag = "(not attempted)";
+export function getPageBridgeDiag(): string { return pageBridgeDiag; }
+
 function installPageBridge(fn: () => string, name: string): void {
   try {
     const pageGlobal = (window as unknown as { wrappedJSObject?: Record<string, unknown> })
       .wrappedJSObject;
-    if (!pageGlobal) return;
+    // RECORD THE FAILURE. This function used to `return` silently, so a bridge
+    // that never installed looked identical to one that worked — and a field
+    // run then reported `__shhDiagText is not defined` with nothing anywhere to
+    // explain it. Verified in REAL Firefox 2026-10-10 (web-ext run, Developer
+    // Edition, real extension): the bridge does NOT install, and
+    // `typeof window.__shhDiagText` in the page world is "undefined".
+    // jsdom cannot catch this — it has no compartments, so `cloneInto` is absent
+    // and the fallback assignment always "succeeds" there.
+    pageBridgeDiag =
+      `wrappedJSObject=${typeof pageGlobal} cloneInto=${typeof (globalThis as { cloneInto?: unknown }).cloneInto} ` +
+      `exportFunction=${typeof (globalThis as { exportFunction?: unknown }).exportFunction}`;
+    if (!pageGlobal) {
+      pageBridgeDiag += " -> SKIPPED (no page global)";
+      return;
+    }
     // `cloneInto` is REQUIRED. Assigning the content-script function directly
     // makes the name visible from the page — so `typeof __shhDiagText` is
     // "function" and the failure moves to the CALL, where Firefox raises
@@ -238,7 +255,13 @@ function installPageBridge(fn: () => string, name: string): void {
     pageGlobal[name] = clone
       ? clone(fn, pageGlobal, { functions: "callable" })
       : fn;
-  } catch { /* not a content script context (tests) — the local copy still works */ }
+    pageBridgeDiag += ` | ${name}=OK(cloned=${!!clone})`;
+  } catch (e) {
+    // Not a content-script context (tests) — the local copy still works. But
+    // say so, because "the console says not defined" is the symptom this whole
+    // mechanism exists to prevent.
+    pageBridgeDiag += ` | ${name}=THREW ${String(e)}`;
+  }
 }
 
 /**
@@ -282,6 +305,7 @@ const coverAuditText = (): string => {
     const a = fn() as {
       error?: string;
       blankGaps?: number;
+      coverGaps?: number;
       undeterminedCount?: number;
       candidates?: number;
       coverArmed?: boolean;
@@ -297,7 +321,7 @@ const coverAuditText = (): string => {
     const head =
       `blankGaps=${a.blankGaps ?? "?"}  undetermined=${a.undeterminedCount ?? "?"}  ` +
       `candidates=${a.candidates ?? "?"}  coverArmed=${a.coverArmed}  active=${a.active}  ` +
-      `preloadDomains=${a.preloadDomains ?? "?"}`;
+      `preloadDomains=${a.preloadDomains ?? "?"}  coverGaps=${a.coverGaps ?? "?"}`;
 
     // A BLANK GAP CANNOT BE ATTRIBUTED TO A COVER THAT WAS NEVER ARMED.
     // This branch exists because a real field report returned
@@ -336,7 +360,8 @@ const coverAuditText = (): string => {
     const detail = rows.map(
       (u) =>
         `  ${String(u.tag)}.${String(u.cls)} opacity=${String(u.opacity)} ` +
-        `display=${String(u.display)} h=${String(u.h)} w=${String(u.w)} ` +
+        `display=${String(u.display)} visibility=${String(u.visibility)} ` +
+        `h=${String(u.h)} w=${String(u.w)} why=${String(u.why)} ` +
         `text="${String(u.text)}"`
     );
     return (
@@ -361,6 +386,10 @@ const shhDiagText = (): string => {
   L.push(`stage: ${safeAttr(ATTR_STAGE) ?? "(none - never marked)"}`);
   L.push(`alive: ${safeAttr(ATTR_ALIVE) ?? "(none)"}`);
   L.push(`preload-ran: ${safeAttr("data-shh-preload-run") ? "yes" : "NO"}`);
+  // Whether the PAGE-CONSOLE bridge installed. If it did not, every documented
+  // `copy(__shhDiagText())` instruction is wrong on this build, and this line is
+  // the only place that says so.
+  L.push(`page-bridge: ${pageBridgeDiag}`);
 
   // ── THE COVER INVARIANT, MEASURED — deliberately FIRST, not last ─────────
   // This is the one question no other section answers: is anything stuck under

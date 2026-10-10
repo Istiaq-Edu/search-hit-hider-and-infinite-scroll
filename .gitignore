@@ -7,3 +7,8 @@ releases/
 # drafts. Working state, not project content: never publish.
 .workbuddy-ai/
 .hermes/
+
+# Real-browser check scratch (Firefox profile + captured report, Chrome site).
+.tmp-ff/
+.tmp-cascade/
+.tmp-vitest/
