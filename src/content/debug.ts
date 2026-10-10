@@ -709,7 +709,30 @@ export function collectDiagnostics(doc: Document = document): ShhDiagnostics {
   if (resolver) {
     let nodes: Element[] = [];
     try {
-      nodes = resolver.resultNodes();
+      // *** NOT resolver.resultNodes() — that made this scan structurally dead. ***
+      //
+      // `isValidResult()` already excludes any node carrying `data-shh-result`
+      // (google.ts), and the loop below skips exactly those nodes. So after the
+      // first processing pass `resultNodes()` is EMPTY, the loop never executes,
+      // and `visibleButBlocked` was always 0. The report calls it "the single
+      // most important number" and it could not fire — a diagnostic that cannot
+      // detect the defect it exists for, in the one place a field report is read
+      // for that exact verdict.
+      //
+      // Enumerate DOM leaves the same way `buildResultAccounting` does, so both
+      // diagnostics measure the same population. A container is skipped (it has
+      // candidate descendants), and the per-node stamp checks below are what
+      // decide whether a leaf is genuinely visible-but-blocked.
+      const sel = RESULT_CANDIDATES.join(",");
+      const seen = new Set<Element>();
+      for (const s of RESULT_CANDIDATES) {
+        for (const el of Array.from(doc.querySelectorAll(s))) {
+          if (seen.has(el)) continue;
+          if (el.querySelectorAll(sel).length > 0) continue; // a container, not a leaf
+          seen.add(el);
+          nodes.push(el);
+        }
+      }
     } catch { /* the adapter threw — reported via rejected.adapterOfferedNone */ }
     for (const el of nodes) {
       // Skip anything the extension already decided about:
