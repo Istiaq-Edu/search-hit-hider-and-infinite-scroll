@@ -332,6 +332,21 @@ const shhDiagText = (): string => {
   L.push(`alive: ${safeAttr(ATTR_ALIVE) ?? "(none)"}`);
   L.push(`preload-ran: ${safeAttr("data-shh-preload-run") ? "yes" : "NO"}`);
 
+  // ── THE COVER INVARIANT, MEASURED — deliberately FIRST, not last ─────────
+  // This is the one question no other section answers: is anything stuck under
+  // the anti-flicker cover? `blankGaps > 0` IS the reported symptom ("results
+  // are not visible on the screen but there space for that result"), counted
+  // and named.
+  //
+  // It sits here because the report is TRUNCATED to REPORT_MAX (40000) before
+  // being written to `data-shh-report` — and that attribute is the only channel
+  // that cannot fail, since it crosses neither the isolated-world boundary nor
+  // the `cloneInto` one. An earlier revision appended this section near the
+  // END, right before the lifecycle log, which meant a long report would cut
+  // off precisely the field that matters most. Keep it at the top.
+  L.push("", "-- cover audit: is anything invisible but still occupying space? --");
+  L.push(coverAuditText());
+
   // â”€â”€ VERDICT: the numbers that decide the bug â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const lines: string[] = [];
   if (!d.debugMode) {
@@ -588,14 +603,6 @@ const shhDiagText = (): string => {
       "reveal:* labels are triggered by the content script itself and are expected " +
       "to be later."
   );
-
-  // ── THE COVER INVARIANT, MEASURED ────────────────────────────────────────
-  // The one question nothing else in this report answers: is anything stuck
-  // under the anti-flicker cover? `blankGaps > 0` IS the reported symptom
-  // ("results are not visible on the screen but there space for that result"),
-  // named and counted, with the offending nodes listed.
-  L.push("", "-- cover audit: is anything invisible but still occupying space? --");
-  L.push(coverAuditText());
 
   L.push("", "-- lifecycle log --");
   L.push(d.lifecycle.shhDiag);
