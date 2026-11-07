@@ -48,8 +48,6 @@ export function injectBlockButton(
     return null;
   }
 
-  container.setAttribute(ATTR_HAS_BTN, "1");
-
   const label =
     buttonStyle === "icon"      ? BLOCK_ICON :
     buttonStyle === "icon+text" ? `${BLOCK_ICON} block` :
@@ -80,6 +78,10 @@ export function injectBlockButton(
     return null;
   }
 
+  // Stamp only AFTER a successful insertion. Stamping first left the result
+  // permanently marked "has a button" when insertion threw (detached node),
+  // so every later scan skipped it.
+  container.setAttribute(ATTR_HAS_BTN, "1");
   return btn;
 }
 

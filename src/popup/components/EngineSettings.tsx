@@ -1,9 +1,9 @@
-import type { Prefs, EngineId } from "../../shared/types";
+import type { Prefs, EngineId, PrefsPatch } from "../../shared/types";
 import { ALL_ENGINE_IDS } from "../../shared/types";
 
 interface Props {
   prefs: Prefs;
-  onUpdatePrefs: (patch: Partial<Prefs>) => Promise<void>;
+  onUpdatePrefs: (patch: PrefsPatch) => Promise<void>;
 }
 
 const ENGINE_LABELS: Record<EngineId, string> = {
@@ -18,11 +18,10 @@ const ENGINE_LABELS: Record<EngineId, string> = {
 
 export function EngineSettings({ prefs, onUpdatePrefs }: Props) {
   async function toggle(id: EngineId) {
-    const updated = {
-      ...prefs.engineToggles,
-      [id]: !prefs.engineToggles[id],
-    };
-    await onUpdatePrefs({ engineToggles: updated });
+    // Send ONLY the changed key: patchPrefs deep-merges engineToggles, so a
+    // full record built from this popup's (possibly stale) state would revert
+    // a concurrent toggle made in another popup or synced from another device.
+    await onUpdatePrefs({ engineToggles: { [id]: !prefs.engineToggles[id] } });
   }
 
   return (

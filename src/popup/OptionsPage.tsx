@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef } from "preact/hooks";
 import type { BlockEntry, Prefs, BulkImportResponse } from "../shared/types";
-import { DEFAULT_PREFS } from "../shared/types";
+import {
+  DEFAULT_PREFS,
+  STORAGE_KEY_LIST,
+  STORAGE_KEY_PREFS,
+  STORAGE_KEY_PREFS_LOCAL,
+} from "../shared/types";
 import {
   exportToJSON,
   exportToPlainList,
@@ -23,8 +28,48 @@ export function OptionsPage() {
   const [importing, setImporting]     = useState(false);
   const [dragOver, setDragOver]       = useState(false);
   const fileRef                       = useRef<HTMLInputElement>(null);
+  // Synchronous guard: React/Preact state updates are async, so two drop/change
+  // events in the same tick would both see `importing === false`.
+  const importingRef                  = useRef(false);
+  const flashTimer                    = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => { void load(); }, []);
+
+  // This page can outlive several flash messages; an untracked timer would
+  // setState after unmount and an older timer would clear a newer message.
+  useEffect(() => {
+    return () => {
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+    };
+  }, []);
+
+  // Keep the page live: the popup and Firefox Sync write storage directly.
+  useEffect(() => {
+    function applyPrefs(newValue: unknown) {
+      if (newValue && typeof newValue === "object") {
+        setPrefs((prev) => ({ ...prev, ...(newValue as Partial<Prefs>) }));
+      }
+    }
+    function onStorageChanged(
+      changes: Record<string, browser.storage.StorageChange>,
+      area: string,
+    ) {
+      if (area === "local") {
+        if (STORAGE_KEY_LIST in changes) {
+          const v = changes[STORAGE_KEY_LIST].newValue;
+          setEntries(Array.isArray(v) ? (v as BlockEntry[]) : []);
+        }
+        const prefsChange = changes[STORAGE_KEY_PREFS_LOCAL];
+        if (prefsChange) applyPrefs(prefsChange.newValue);
+        return;
+      }
+      if (area !== "sync") return;
+      const prefsChange = changes[STORAGE_KEY_PREFS];
+      if (prefsChange) applyPrefs(prefsChange.newValue);
+    }
+    browser.storage.onChanged.addListener(onStorageChanged);
+    return () => browser.storage.onChanged.removeListener(onStorageChanged);
+  }, []);
 
   useEffect(() => {
     document.documentElement.setAttribute(
@@ -48,7 +93,11 @@ export function OptionsPage() {
 
   function flash(msg: string, ok = true) {
     setFeedback({ msg, ok });
-    setTimeout(() => setFeedback(null), 6000);
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => {
+      flashTimer.current = null;
+      setFeedback(null);
+    }, 6000);
   }
 
   // ── Export ──────────────────────────────────────────────────────────────
@@ -116,20 +165,26 @@ export function OptionsPage() {
     flash(parts.join(" · "));
   }
 
-  async function handleFileChange(e: Event) {
-    const input = e.target as HTMLInputElement;
-    const file  = input.files?.[0];
-    if (!file) return;
-    input.value = "";
-
+  async function runImport(file: File) {
+    if (importingRef.current) return;
+    importingRef.current = true;
     setImporting(true);
     try {
       await processText(await file.text());
     } catch (err) {
       flash(`Failed to read file: ${err instanceof Error ? err.message : "Unknown error"}`, false);
     } finally {
+      importingRef.current = false;
       setImporting(false);
     }
+  }
+
+  async function handleFileChange(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file  = input.files?.[0];
+    if (!file) return;
+    input.value = "";
+    await runImport(file);
   }
 
   // Drag-and-drop support
@@ -140,14 +195,7 @@ export function OptionsPage() {
     setDragOver(false);
     const file = e.dataTransfer?.files[0];
     if (!file) return;
-    setImporting(true);
-    try {
-      await processText(await file.text());
-    } catch (err) {
-      flash(`Failed to read file: ${err instanceof Error ? err.message : "Unknown error"}`, false);
-    } finally {
-      setImporting(false);
-    }
+    await runImport(file);
   }
 
   // ── Styles helpers ───────────────────────────────────────────────────────

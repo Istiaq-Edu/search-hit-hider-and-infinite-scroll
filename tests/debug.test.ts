@@ -30,6 +30,7 @@ const PRODUCTION_REASONS: RejectionReason[] = [
   "adapterOfferedNone",
   "skippedContainer",
   "nodeThrew",
+  "engineInactive",
 ];
 
 // ============================================================

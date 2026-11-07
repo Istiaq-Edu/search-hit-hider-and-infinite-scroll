@@ -148,6 +148,7 @@ export type RejectionReason =
   | "insideProcessed"       // an ancestor is already handled
   | "noUrl"                 // engine could not resolve a destination
   | "noMatcher"             // processResults bailed: prefs/matcher/engine absent
+  | "engineInactive"        // processResults bailed: blocking suspended for this engine
   | "adapterOfferedNone"    // a whole scan produced zero result nodes
   | "skippedContainer"      // overlapped another result or looked like a result list
   | "nodeThrew";            // hideResult/injectButton threw for ONE node
@@ -168,6 +169,7 @@ const REJECTION_REASONS: RejectionReason[] = [
   "insideProcessed",
   "noUrl",
   "noMatcher",
+  "engineInactive",
   "adapterOfferedNone",
   "skippedContainer",
   "nodeThrew",

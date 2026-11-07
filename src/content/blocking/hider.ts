@@ -68,6 +68,21 @@ export interface HideContext {
 }
 
 /**
+ * Drop the cover-safe stamp on `node` and every cover-candidate descendant —
+ * the inverse of showOnce's INNER-COVER stamp, over the SAME walk scope
+ * ([node, ...GOOGLE_COVER_CANDIDATE_SELECTOR]). A hide transition must never
+ * leave `block ∧ ok`: preload's tryHide early-returns on ok nodes, so a stale
+ * stamp would exempt a re-hidden node from cover recapture once Google resets
+ * its inline style and the adopted .shh-hidden rule.
+ */
+function clearCoverOk(node: Element): void {
+  node.removeAttribute(ATTR_SHH_OK);
+  for (const el of node.querySelectorAll(GOOGLE_COVER_CANDIDATE_SELECTOR)) {
+    el.removeAttribute(ATTR_SHH_OK);
+  }
+}
+
+/**
  * Hide a result node. For regular blocks, inserts an external placeholder.
  * For perma-bans, removes from view completely.
  */
@@ -81,6 +96,11 @@ export function hideResult(
   onPermaban: (domain: string, node: Element) => void
 ): void {
   if (node.getAttribute(ATTR_SHH_RESULT)) return; // already processed
+
+  // Every hide transition invalidates the cover-safe stamp (C1). Placed before
+  // the pban early return so BOTH branches clear it; rehideResult inherits this
+  // through its hideResult call below.
+  clearCoverOk(node);
 
   node.setAttribute(ATTR_SHH_RESULT, result.mode);
   node.setAttribute(ATTR_SHH_URL, url);
@@ -124,6 +144,9 @@ export function convertHiddenToPermaban(node: Element): void {
 
   node.setAttribute(ATTR_SHH_RESULT, "pban");
   node.removeAttribute(ATTR_SHH_MODE);
+  // C1: a conversion is a hide transition too — a shown-once node's ok stamp
+  // must not survive into the permaban (no reveal path exists to clear it).
+  clearCoverOk(node);
   (node as HTMLElement).style.setProperty("display", "none", "important");
   node.classList.remove(CLASS_HIDDEN, CLASS_SHOWN_RESULT);
   node.classList.add(CLASS_PBAN);
@@ -142,6 +165,13 @@ export function showOnce(
   onHideAgain: () => void,
   onUnblock: (domain: string) => void
 ): void {
+  // C3-lite: an orphaned placeholder (its result was permabanned by another
+  // path before the click landed) can still call this on a pban node. A
+  // permaban has no reveal path by design, and shown-once would stick forever
+  // — processResults skips stamped nodes and reconcile skips shown-once ones —
+  // leaving a permabanned result permanently visible. Refuse.
+  if (node.getAttribute(ATTR_SHH_RESULT) === "pban") return;
+
   // Remove any leftover shown-notice bar first
   node.querySelector("." + CLASS_SHOWN_NOTICE)?.remove();
 
@@ -274,8 +304,8 @@ export function preloadHiddenDescendants(node: Element): HTMLElement[] {
  * UNCONDITIONAL on the subtree — the caller is responsible for deciding that
  * every descendant really is safe to reveal. `processResults` uses
  * `revealPreloadHiding` (which re-tests each one); `restoreResult` uses this
- * directly, because it is only ever called for a node the user has explicitly
- * unblocked.
+ * only on its no-predicate path (suspend teardown / explicit unblock of the
+ * whole subtree) — with a predicate it re-tests descendants like the former.
  */
 /** Lift the preload hide on ONE node only — never sweeps its subtree. */
 function clearPreloadHidingSelf(el: Element): void {
@@ -347,8 +377,18 @@ export function revealPreloadHiding(
 
 /**
  * Fully restore a result (after unblocking). Removes placeholder and all markers.
+ *
+ * `isStillBlocked` (C2): when provided, preload-marked DESCENDANTS are re-tested
+ * one by one (revealPreloadHiding's discipline — snapshot + self-only clears)
+ * and a still-blocked inner result keeps its hide. Self is always cleared: the
+ * caller only restores a node whose own destination is unblocked. When absent,
+ * the sweep stays UNCONDITIONAL — suspend teardown relies on that (blocking
+ * fully off ⇒ reveal everything).
  */
-export function restoreResult(node: Element): void {
+export function restoreResult(
+  node: Element,
+  isStillBlocked?: (el: Element) => boolean
+): void {
   const placeholder = findPlaceholder(node);
   if (placeholder) placeholder.remove();
 
@@ -363,7 +403,21 @@ export function restoreResult(node: Element): void {
   // preload CSS rule ([data-shh-preloaded="true"]{display:none!important})
   // stops applying. The subtree walk matters for the same reason as
   // clearPreloadHiding() — see its comment (A2 F2a, audit D3).
-  clearPreloadHiding(node);
+  if (isStillBlocked) {
+    // Self layers always cleared — including the inline display a plain block
+    // hide set WITHOUT a preload mark (revealPreloadHiding's self branch only
+    // fires on marked nodes, which is not enough here).
+    clearPreloadHidingSelf(node);
+    // Snapshot first, then one self-only clear per re-tested descendant —
+    // exactly revealPreloadHiding's guard: an unblocked wrapper can still
+    // contain a result the preload hid for a DIFFERENT, still-blocked domain.
+    for (const inner of preloadHiddenDescendants(node)) {
+      if (isStillBlocked(inner)) continue;
+      clearPreloadHidingSelf(inner);
+    }
+  } else {
+    clearPreloadHiding(node);
+  }
 
   // *** AND LIFT THE COVER — the step that was missing here ***
   //
@@ -379,6 +433,11 @@ export function restoreResult(node: Element): void {
   // "INNER-COVER FIX" note); restoreResult performs the identical removal with
   // none of the mitigation. `opacity` does not cascade as an override, so the
   // stamp has to reach the whole subtree, not just this node.
+  //
+  // C2: with a predicate, a descendant that STAYS preload-hidden keeps its
+  // `data-shh-preloaded`, and stampCoverOk (markers.ts) refuses any node
+  // carrying it — so the subtree stamp cannot mark a still-blocked inner
+  // result safe. No extra filtering needed here; the refusal IS the guard.
   if (isGoogleHost(node)) revealCoverSubtree(node);
 
   node.classList.remove(CLASS_PBAN, CLASS_SHOWN_RESULT);
@@ -398,14 +457,23 @@ export function getHiddenNodes(): NodeListOf<Element> {
  * (which would immediately re-hide them if a parent/wildcard domain
  * still exists in the block list).
  */
-export function restoreByDomain(domain: string): Element[] {
+export function restoreByDomain(
+  domain: string,
+  isStillBlocked?: (el: Element) => boolean
+): Element[] {
   const restored: Element[] = [];
   for (const node of getHiddenNodes()) {
     const url = node.getAttribute(ATTR_SHH_URL) ?? "";
     try {
       const host = new URL(url).hostname;
       if (host === domain || host.endsWith("." + domain)) {
-        restoreResult(node);
+        // The caller removed ONE entry; a broader (or more specific) entry can
+        // still match this node — unblocking a.example.com while example.com
+        // stays blocked, or the reverse for a subdomain result. Restoring self
+        // unconditionally would leave it visible for the session, because
+        // processResults skips already-stamped nodes and nothing re-hides it.
+        if (isStillBlocked?.(node)) continue;
+        restoreResult(node, isStillBlocked);
         restored.push(node);
       }
     } catch {

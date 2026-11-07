@@ -1,5 +1,10 @@
 import type { BlockEntry, Prefs, BlockMode } from "../shared/types";
-import { DEFAULT_PREFS } from "../shared/types";
+import {
+  DEFAULT_PREFS,
+  STORAGE_KEY_LIST,
+  STORAGE_KEY_PREFS,
+  STORAGE_KEY_PREFS_LOCAL,
+} from "../shared/types";
 import { detectEngine } from "./engines/registry";
 import type { EngineAdapter } from "./engines/base";
 import type { MatchResult } from "./blocking/matcher";
@@ -9,7 +14,7 @@ import { ResultObserver } from "./blocking/observer";
 import { containsProcessed, isInsideProcessedTerritory, looksLikeResultList, overlapsProcessed } from "./blocking/dedupe";
 import { reconcileAgainstBlockList } from "./blocking/reconcile";
 import { classifyPrefsTransition, isEngineActive } from "./prefs-transition";
-import { RefreshQueue, shouldReScan, runSuspendTeardown, type RefreshKind } from "./refresh-queue";
+import { RefreshQueue, shouldReScan, runSuspendTeardown, type RefreshKind, type SuspendDeps } from "./refresh-queue";
 import {
   CACHE_KEY,
   buildCache,
@@ -53,11 +58,13 @@ class ResultActions {
   };
 
   doUnblock = async (): Promise<void> => {
-    const releasedRoots = restoreByDomain(this.domain);
-    const releasedSet = new Set(releasedRoots);
-
+    // ORDER: rebuild the matcher FIRST. The restore predicate below consults
+    // the LIVE matcher, so restoring before the unblock was applied would
+    // still see the domain as blocked and skip every descendant reveal.
     entries = entries.filter((e) => e.domain !== this.domain);
     refreshMatcher();
+    const releasedRoots = restoreByDomain(this.domain, isStillBlockedNode);
+    const releasedSet = new Set(releasedRoots);
     updateCache();
     updateHasRules();
 
@@ -98,7 +105,10 @@ class ResultActions {
       refreshMatcher();
       updateCache();
       updateHasRules();
-      restoreResult(this.node);
+      // Same nested-result rule as every other release path: this node goes
+      // back to block-mode hiding immediately below, but a preload-hidden
+      // descendant belonging to another blocked domain must stay hidden.
+      restoreResult(this.node, isStillBlockedNode);
       hideResult(
         this.node,
         { matched: true, domain: this.domain, mode: "block" },
@@ -132,6 +142,16 @@ let degradedStart = false;
 // becomes indistinguishable from "the user has nothing blocked" and kills
 // pre-paint hiding on that origin permanently. See content/cache-state.ts.
 let stateAuthoritative = true;
+// Provenance of `prefs`. A cache prime, the degraded fallback and the defaults
+// are all GUESSES about the current state — their `paused`/`wildcard`/`debug`
+// fields must never be published into `_shh_cache` (see updateCache).
+let prefsAuthoritative = false;
+// Generation tokens for the two async state reads. Without them an OLDER read
+// that resolves AFTER a newer one overwrites `entries`/`prefs` with a stale
+// snapshot — e.g. two rapid storage events, or a slow sync read racing a fast
+// local one. Every continuation re-checks its token before touching state.
+let listEpoch = 0;
+let prefsEpoch = 0;
 
 // â”€â”€ Module-scope flags: DECLARED HERE ON PURPOSE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // `init()` is invoked from a top-level `if/else` further down this module, and
@@ -814,12 +834,17 @@ if (!engine) markStage("no-engine");
 // PREFS_UPDATED followed by a LIST_UPDATED during init's (seconds-wide) await
 // ran only refreshPrefs() — and refreshPrefs never re-reads the list. The newly
 // blocked domain then stayed visible.
-let initComplete = false;
 const refreshQueue = new RefreshQueue();
 
-/** Route a refresh through one place so both call sites get a `.catch`. */
-function runRefresh(kind: RefreshKind): void {
-  const p = kind === "prefs" ? refreshPrefs() : refreshEntries();
+/**
+ * Route a refresh through one place so both call sites get a `.catch`.
+ *
+ * `source` matters: `storage` reads storage DIRECTLY (a storage event means the
+ * write already landed), while `message` uses the background bus, whose cache
+ * is current even while the list write is still inside its 500 ms debounce.
+ */
+function runRefresh(kind: RefreshKind, source: "message" | "storage" = "message"): void {
+  const p = kind === "prefs" ? refreshPrefs(source) : refreshEntries(source);
   // `.catch` is not optional: getPrefs()/getList() reject whenever the
   // background is cold, and an unhandled rejection here is noise in the exact
   // console channel (__shhDiag) that field diagnosis relies on.
@@ -827,7 +852,6 @@ function runRefresh(kind: RefreshKind): void {
 }
 
 function finishInit(): void {
-  initComplete = true;
   // Drain whatever arrived while init() was running — or bailed out early.
   for (const kind of refreshQueue.finish()) runRefresh(kind);
 }
@@ -841,6 +865,43 @@ if (engine) {
       const now = refreshQueue.offer(kind);
       if (now) runRefresh(now);
     }
+  });
+
+  // ── Storage events (D1 backstop) ──────────────────────────────────────────
+  // `runtime.sendMessage` is a best-effort channel: a PREFS_UPDATED /
+  // LIST_UPDATED broadcast is fired with `void`, so a background that is
+  // suspending, a tab that was not yet registered, or a rejected send loses it
+  // silently. `storage.onChanged` is delivered by the browser to every
+  // extension context — including content scripts — and cannot be dropped by
+  // the background. Watching it makes the popup → page propagation independent
+  // of the message bus. Firefox can report every key of an area in `changes`,
+  // so this checks key PRESENCE, not "the key actually changed".
+  try {
+    browser.storage.onChanged.addListener((changes, area) => {
+      const offer = (kind: RefreshKind): void => {
+        const now = refreshQueue.offer(kind);
+        if (now) runRefresh(now, "storage");
+      };
+      if (area === "local") {
+        if (STORAGE_KEY_LIST in changes) offer("list");
+        if (STORAGE_KEY_PREFS_LOCAL in changes) offer("prefs");
+        return;
+      }
+      if (area === "sync" && STORAGE_KEY_PREFS in changes) offer("prefs");
+    });
+  } catch { /* storage events unavailable in this environment */ }
+
+  // ── bfcache restore ───────────────────────────────────────────────────────
+  // A page restored from the back/forward cache resumes with the frozen module
+  // state and DOM, but storage may have moved on while it was frozen (another
+  // tab, another device via sync). There is no new page load and therefore no
+  // init(): without this the restored tab keeps a stale list/matcher forever.
+  window.addEventListener("pageshow", (e) => {
+    if (!e.persisted) return;
+    const list = refreshQueue.offer("list");
+    if (list) runRefresh(list, "storage");
+    const p = refreshQueue.offer("prefs");
+    if (p) runRefresh(p, "storage");
   });
 }
 
@@ -933,6 +994,10 @@ async function init(): Promise<void> {
   if (primed?.authoritative && isGoogleOrPrimes(engine)) {
     entries = primed.entries;
     prefs = primed.prefs;
+    // Explicitly NOT authoritative prefs: the cache stores only wildcard /
+    // paused / debug, so every other field (engine toggles, infinite scroll…)
+    // is the defaults guess. Never publish this into the cache.
+    prefsAuthoritative = false;
     setDebugMode(prefs.debugMode);
     engineActive = isEngineActive(prefs, engine.id);
     if (engineActive) {
@@ -976,6 +1041,7 @@ async function init(): Promise<void> {
     // state this whole tier exists to prevent.
     try {
       prefs = await withTimeout(getPrefsDirect(), 2500);
+      prefsAuthoritative = true;
       setDebugMode(prefs.debugMode);
       diagMark("storage-prefs-ok");
     } catch {
@@ -992,11 +1058,16 @@ async function init(): Promise<void> {
   // `prefs` null, `recoverStateFromCache` supplies defaults, and the first
   // healer poll then reads the real prefs from storage. It recovers sooner
   // this way; it is not the difference between working and inert.
-  if (!gotState || !prefs) {
+  // PREFS AUTHORITY is a separate condition. A cache prime leaves `prefs`
+  // non-null, so gating on `!prefs` alone skipped this tier on a tab whose
+  // direct sync read failed — silently running (and publishing) guessed prefs
+  // for the whole session, with no healer because the entries half succeeded.
+  if (!gotState || !prefs || !prefsAuthoritative) {
   try {
     const [e2, p2] = await withTimeout(Promise.all([getList(), getPrefs()]), 2500);
     entries = e2;
     prefs = p2;
+    prefsAuthoritative = true;
     if (prefs) setDebugMode(prefs.debugMode);
     diagMark("messaging-ok");
     setDiagMatcherInfo({ source: "background" });
@@ -1010,6 +1081,7 @@ async function init(): Promise<void> {
       await sleep(400);
       try {
         [entries, prefs] = await withTimeout(Promise.all([getList(), getPrefs()]), 2500);
+        prefsAuthoritative = true;
         if (prefs) setDebugMode(prefs.debugMode);
         recoveredMsg = true;
         diagMark("messaging-ok-after-retry");
@@ -1043,19 +1115,32 @@ async function init(): Promise<void> {
         diagMark("cache-says-paused-return");
         return;
       }
-      entries = fromCache.entries;
-      prefs = fromCache.prefs;
+      // Keep whichever half tier 1 already read from real storage. The old
+      // code overwrote BOTH from the cache snapshot, downgrading a perfectly
+      // good direct list read merely because the sync prefs read failed — and
+      // then suppressed cache writes for entries that were authoritative.
+      if (!gotState) {
+        entries = fromCache.entries;
+        // D5: only a real cache payload is authoritative. With no cache at all
+        // we hold an empty list purely because messaging failed — publishing
+        // that would wipe pre-paint hiding for this origin permanently.
+        stateAuthoritative = fromCache.authoritative;
+        if (!stateAuthoritative) {
+          shhLog("degraded start with NO cache — cache writes suppressed until revive");
+        }
+      } else {
+        stateAuthoritative = true;
+      }
+      // Prefs are a GUESS here even when the cache supplied them: the payload
+      // only records wildcard/paused/debug, not engine toggles etc. Mark them
+      // non-authoritative so updateCache refuses to publish them, and so the
+      // healer below re-reads them.
+      if (!prefs) prefs = fromCache.prefs;
+      prefsAuthoritative = false;
       setDebugMode(prefs.debugMode);
       degradedStart = true;
-      // D5: only a real cache payload is authoritative. With no cache at all we
-      // hold an empty list purely because messaging failed — publishing that
-      // would wipe pre-paint hiding for this origin permanently.
-      stateAuthoritative = fromCache.authoritative;
-      if (!stateAuthoritative) {
-        shhLog("degraded start with NO cache — cache writes suppressed until revive");
-      }
       setDiagMatcherInfo({
-        source: fromCache.authoritative ? "cache" : "defaults",
+        source: gotState ? "storage" : fromCache.authoritative ? "cache" : "defaults",
       });
       diagMark("degraded-start");
     } else {
@@ -1102,6 +1187,16 @@ async function init(): Promise<void> {
   updateCache();
 
   if (!engineActive) {
+    // A page can LOAD while blocking is already suspended (popup pause, engine
+    // toggle off) — the cache prime above may still have armed the preload's
+    // cover and pre-hidden results from an older, active cache. init() returns
+    // before any live layer exists, so nothing would ever lift that hiding:
+    // the page stays blank with no placeholder and no Show control. Discharge
+    // the same obligations as a mid-session suspend. (Observer and manager were
+    // never started, so those two calls are no-ops by design.)
+    const { ran, failed } = runSuspendTeardown(makeSuspendDeps());
+    shhLog(`inactive-at-load teardown: ran=${ran.length} failed=${failed.join(",") || "none"}`);
+    if (failed.length) shhLog("inactive-at-load teardown failures", failed);
     markStage("bail-engine-inactive");
     refreshDiagReport();
     return;
@@ -1277,7 +1372,9 @@ async function reconcilePageInPlace(): Promise<void> {
 
   // Domains that were removed from the list: restore immediate (show them).
   for (const node of toRestore) {
-    restoreResult(node);
+    // A released WRAPPER may still contain a preload-hidden result for a
+    // different, still-blocked domain — never sweep the subtree blindly.
+    restoreResult(node, isStillBlockedNode);
   }
 
   // Domains still blocked — or newly blocked and still on screen: clear the
@@ -1356,7 +1453,7 @@ function wireTabOnce(): void {
   if (engine?.id === "startpage") {
     for (const delay of [1000, 2000, 4000, 8000]) {
       setTimeout(() => {
-        if (matcher && prefs) {
+        if (engineActive && matcher && prefs) {
           invalidateNodeCache();
           processResults(getCachedResultNodes());
         }
@@ -1409,25 +1506,34 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 async function reviveFromBackground(): Promise<void> {
   for (let attempt = 0; attempt < 60; attempt++) {
     await sleep(attempt === 0 ? 300 : 1500);
-    let got = false;
+    // Snapshot the generations BEFORE the reads. If a live refresh lands while
+    // this poll is in flight, that data is newer than this snapshot and this
+    // iteration must not overwrite it.
+    const listGen = listEpoch;
+    const prefsGen = prefsEpoch;
+    let nextEntries: BlockEntry[] | null = null;
+    let nextPrefs: Prefs | null = null;
     try {
-      entries = await withTimeout(getListDirect(), 800);
-      got = true;
+      nextEntries = await withTimeout(getListDirect(), 800);
     } catch { /* storage.local unavailable — fall through to messaging */ }
-    if (got) {
+    if (nextEntries) {
       try {
-        prefs = await withTimeout(getPrefsDirect(), 2500);
+        nextPrefs = await withTimeout(getPrefsDirect(), 2500);
       } catch { /* keep the existing prefs; the list is the critical half */ }
     }
-    if (!got || !prefs) {
+    if (!nextEntries || !nextPrefs) {
       try {
         const [e2, p2] = await withTimeout(Promise.all([getList(), getPrefs()]), 3000);
-        entries = e2;
-        prefs = p2;
-        got = true;
+        nextEntries = e2;
+        nextPrefs = p2;
       } catch { /* background still cold — keep polling */ }
     }
-    if (!got || !prefs) continue;
+    if (!nextEntries || !nextPrefs) continue;
+    if (listGen !== listEpoch || prefsGen !== prefsEpoch) continue;
+
+    entries = nextEntries;
+    prefs = nextPrefs;
+    prefsAuthoritative = true;
 
     setDebugMode(prefs.debugMode);
     refreshMatcher();
@@ -1440,7 +1546,6 @@ async function reviveFromBackground(): Promise<void> {
     stateAuthoritative = true;
     invalidateNodeCache();
     updateCache();
-    updateHasRules();
     // Publish the flipped provenance. `degradedStart`/`stateAuthoritative` reach
     // the report only via syncDiag(), so without this the report keeps describing
     // a degraded tab forever — a stale diagnostic that points the reader at a
@@ -1449,6 +1554,9 @@ async function reviveFromBackground(): Promise<void> {
     if (prefs && engine) {
       markStage("prefs-loaded");
       engineActive = isEngineActive(prefs, engine.id);
+      // AFTER the recompute: a heal can discover the engine is now suspended,
+      // and the :has()/tryHide layers must stand down with it.
+      updateHasRules();
       if (engineActive) {
         processResults(getCachedResultNodes());
         // AND reconcile. The full scan above cannot undo a stale hide: the nodes
@@ -1488,6 +1596,10 @@ function getCachedResultNodes(): Element[] {
 function tryStartInfiniteScroll(retriesLeft = 25): void {
   if (!prefs || !engine || infiniteScrollManager) return;
   if (!prefs.infiniteScroll) return;
+  // A suspended tab must never fetch pages: the appended results would be
+  // hidden by the manager's onNewNodes → processResults path and never get a
+  // Show control, and the network traffic itself is user-visible.
+  if (!engineActive) return;
   if (!(engine.getNextPageUrl || engine.triggerNextPage || engine.getNextPageRequest)) return;
   const container = findInfiniteScrollContainer();
   if (container) {
@@ -1559,7 +1671,7 @@ function recoverStateFromCache(): { entries: BlockEntry[]; prefs: Prefs; authori
 // Watches for dynamically added results. Extracted from init() so that
 // refreshPrefs() can start it when blocking is resumed mid-session.
 function startResultObserver(): void {
-  if (observer || !prefs?.mutationObserver || !engine) return;
+  if (observer || !engineActive || !prefs?.mutationObserver || !engine) return;
   const IGNORE = [".shh-placeholder", ".shh-dialog", ".shh-toast", "[data-shh-btn]"];
   // Batch mutations via queueMicrotask to avoid redundant processResults calls
   let pendingNodes: Element[] = [];
@@ -1669,6 +1781,14 @@ function processResultNodes(nodes: Element[]): void {
 }
 
 function processResults(nodes: Element[]): void {
+  if (!engineActive) {
+    // A suspended tab must never re-hide results. The SPA watcher and
+    // visibility handler gate on shouldReScan, but the observer, the
+    // infinite-scroll manager and direct call sites (undo toasts, prefs
+    // transitions) reach here too; this is the single choke point.
+    bumpRejection("engineInactive", nodes.length);
+    return;
+  }
   if (!matcher || !prefs || !engine) {
     // A silent full-skip. Every result on the page stays visible, yet the
     // report showed a clean `rejected` table and the verdict told the user to
@@ -1747,10 +1867,7 @@ function processResults(nodes: Element[]): void {
       // SELECTOR_PROCESSED. Clearing blindly would trade "blocked result hidden
       // with a trapped button" for "blocked result VISIBLE".
       if (hasPreloadHiding(node)) {
-        revealPreloadHiding(node, (el) => {
-          const u = engine.getResultUrl(el);
-          return !!u && matcher!.match(u).matched;
-        });
+        revealPreloadHiding(node, isStillBlockedNode);
       }
       injectButtonForResult(node, url);
     }
@@ -1884,7 +2001,7 @@ async function handleBlock(
           await removeEntry(domain!);
           entries = entries.filter((e) => e.domain !== domain);
           refreshMatcher();
-          restoreByDomain(domain!);
+          restoreByDomain(domain!, isStillBlockedNode);
           // Remove the :has() rule so the just-unblocked results become visible.
           updateHasRules();
         }
@@ -1893,10 +2010,82 @@ async function handleBlock(
   }
 }
 
-async function refreshPrefs(): Promise<void> {
+/**
+ * The real side effects of a suspend, shared by the two paths that need them:
+ * a mid-session prefs transition and a page that LOADS while already suspended
+ * (init's inactive bail). One definition so the two paths cannot drift —
+ * `runSuspendTeardown` owns the ORDER, this owns the CONTENTS.
+ */
+function makeSuspendDeps(): SuspendDeps {
+  return {
+    // revealHiddenNodes — every hidden result becomes visible again.
+    revealHiddenNodes: () => {
+      for (const node of document.querySelectorAll(
+        "[data-shh-result], [data-shh-preloaded], .shh-hidden, .shh-pban"
+      )) {
+        // UNCONDITIONAL on purpose: blocking is fully off, so no descendant
+        // may keep a preload hide. This is the one caller that must not pass
+        // restoreResult()'s isStillBlocked predicate.
+        restoreResult(node);
+      }
+    },
+    // clearHasRules — requires preload.ts to honour an empty list (C3). The
+    // updater also re-binds the preload's own `lc`/`wildcard` closure vars, so
+    // the CSS layer AND the preload's JS `tryHide` layer stand down together.
+    // Updating only the sheet would leave them disagreeing, and a paused page
+    // whose observer is stopped would pre-hide new nodes with no Show control.
+    clearHasRules: () => {
+      (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
+        .__shhUpdateHas?.([], prefs!.subdomainWildcard);
+    },
+    // revealGoogleCover — without this, anything the preload cover left at
+    // opacity:0 stays invisible AND unclickable (pointer-events:none) for a
+    // user who has just paused. The resume branch already had this call; the
+    // suspend branch did not.
+    revealGoogleCover: () => {
+      (window as Window & { __shhRevealGoogle?: () => void }).__shhRevealGoogle?.();
+    },
+    // disarmStaticCover — two layers, and only the preload can do one of them.
+    // `data-shh-active` gates the static preload.css rule; the PRIMARY Google
+    // cover is an adopted stylesheet whose handle lives in the preload closure,
+    // so it must be detached via the hook the preload exposes. Removing the
+    // attribute alone left results rendered after a pause invisible AND
+    // unclickable (opacity:0 + pointer-events:none) with the observer stopped.
+    disarmStaticCover: () => {
+      (window as Window & { __shhDisarmCover?: () => void }).__shhDisarmCover?.();
+      document.documentElement.removeAttribute("data-shh-active");
+    },
+    // stopObserver — necessary but NOT sufficient. The two real re-entry
+    // points are the visibilitychange handler and the 1.5s SPA URL watcher,
+    // neither of which is the ResultObserver; both are gated on `engineActive`
+    // via shouldReScan.
+    stopObserver: () => {
+      observer?.stop();
+      observer = null;
+    },
+    // destroyScrollManager — appended pages would keep arriving and be
+    // re-hidden by the manager's own onNewNodes → processResults path. The
+    // resume branch rebuilds it, so a pause cycle is symmetric.
+    destroyScrollManager: () => {
+      infiniteScrollManager?.destroy();
+      infiniteScrollManager = null;
+    },
+    // writeCache — publish the paused payload so the next load's preload
+    // stands down instead of pre-hiding for a suspended user.
+    writeCache: () => { updateCache(); },
+  };
+}
+
+async function refreshPrefs(source: "message" | "storage" = "message"): Promise<void> {
+  const epoch = ++prefsEpoch;
   const prevInfiniteScroll = prefs?.infiniteScroll ?? true;
   const wasActive = engineActive;
-  prefs = await getPrefs();
+  const nextPrefs = source === "storage" ? await getPrefsDirect() : await getPrefs();
+  // A newer refresh started while this read was in flight. Applying this
+  // snapshot now would overwrite the newer one (out-of-order continuation).
+  if (epoch !== prefsEpoch) return;
+  prefs = nextPrefs;
+  prefsAuthoritative = true;
   if (!prefs || !engine) return;
   // Debug mode may have been toggled while this page was open.
   setDebugMode(prefs.debugMode);
@@ -1914,65 +2103,9 @@ async function refreshPrefs(): Promise<void> {
 
   if (transition === "suspend") {
     // Suspended mid-session. `runSuspendTeardown` owns the ORDER and the
-    // COMPLETENESS of the list; this block only supplies the real side effects.
-    // An earlier revision inlined the eight steps and separately exported a
-    // `SUSPEND_HANDLERS` map of empty arrows that nothing imported — so
-    // deleting any step, or the whole block, left the suite green.
-    const { ran, failed } = runSuspendTeardown({
-      // revealHiddenNodes — every hidden result becomes visible again.
-      revealHiddenNodes: () => {
-        for (const node of document.querySelectorAll(
-          "[data-shh-result], [data-shh-preloaded], .shh-hidden, .shh-pban"
-        )) {
-          restoreResult(node);
-        }
-      },
-      // clearHasRules — requires preload.ts to honour an empty list (C3). The
-      // updater also re-binds the preload's own `lc`/`wildcard` closure vars, so
-      // the CSS layer AND the preload's JS `tryHide` layer stand down together.
-      // Updating only the sheet would leave them disagreeing, and a paused page
-      // whose observer is stopped would pre-hide new nodes with no Show control.
-      clearHasRules: () => {
-        (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
-          .__shhUpdateHas?.([], prefs!.subdomainWildcard);
-      },
-      // revealGoogleCover — without this, anything the preload cover left at
-      // opacity:0 stays invisible AND unclickable (pointer-events:none) for a
-      // user who has just paused. The resume branch already had this call; the
-      // suspend branch did not.
-      revealGoogleCover: () => {
-        (window as Window & { __shhRevealGoogle?: () => void }).__shhRevealGoogle?.();
-      },
-      // disarmStaticCover — two layers, and only the preload can do one of them.
-      // `data-shh-active` gates the static preload.css rule; the PRIMARY Google
-      // cover is an adopted stylesheet whose handle lives in the preload closure,
-      // so it must be detached via the hook the preload exposes. Removing the
-      // attribute alone left results rendered after a pause invisible AND
-      // unclickable (opacity:0 + pointer-events:none) with the observer stopped.
-      disarmStaticCover: () => {
-        (window as Window & { __shhDisarmCover?: () => void }).__shhDisarmCover?.();
-        document.documentElement.removeAttribute("data-shh-active");
-      },
-      // stopObserver — necessary but NOT sufficient. The two real re-entry
-      // points are the visibilitychange handler and the 1.5s SPA URL watcher,
-      // neither of which is the ResultObserver; both are gated on `engineActive`
-      // via shouldReScan. Stopping the observer here is still correct — it stops
-      // NEW nodes from being hidden.
-      stopObserver: () => {
-        observer?.stop();
-        observer = null;
-      },
-      // destroyScrollManager — appended pages would keep arriving and be
-      // re-hidden by the manager's own onNewNodes â†’ processResults path. The
-      // resume branch rebuilds it, so a pause cycle is symmetric.
-      destroyScrollManager: () => {
-        infiniteScrollManager?.destroy();
-        infiniteScrollManager = null;
-      },
-      // writeCache — publish the paused payload so the next load's preload
-      // stands down instead of pre-hiding for a suspended user.
-      writeCache: () => { updateCache(); },
-    });
+    // COMPLETENESS of the list; makeSuspendDeps() owns the side effects, which
+    // are shared with init's inactive-at-load bail.
+    const { ran, failed } = runSuspendTeardown(makeSuspendDeps());
     diagMark("suspend-teardown");
     shhLog(`suspend teardown: ran=${ran.length} failed=${failed.join(",") || "none"}`);
     if (failed.length) shhLog("suspend teardown failures", failed);
@@ -1985,32 +2118,71 @@ async function refreshPrefs(): Promise<void> {
     //       `{"domains":[],"paused":false}` over a good cache.
     //   correctness: without it the resume builds a matcher from [] and hides
     //       nothing, so unpausing appears to do nothing at all.
-    // The background is reachable here by definition — the user just changed a
-    // pref, which is what delivered this message.
+    // This resume is NOT guaranteed to come from the message bus: the
+    // storage.onChanged backstop can deliver it alone, and storage works even
+    // while the background is cold. Read direct storage FIRST for the same
+    // reason reviveFromBackground does — getList() has no timeout, so a cold
+    // worker would stall this await, and a rejection would abort the rest of
+    // the resume (prefs already say active, but nothing gets wired up).
+    // Every failure is contained: the resume still runs, and a non-
+    // authoritative list is corrected by the next LIST_UPDATED/storage event
+    // (updateCache refuses to publish it in the meantime).
     if (!stateAuthoritative) {
-      entries = await getList();
-      stateAuthoritative = true;
+      const listGen = listEpoch;
+      // This resume is NOT guaranteed to come from the message bus: the
+      // storage.onChanged backstop can deliver it alone, and storage works even
+      // while the background is cold. Read direct storage FIRST for the same
+      // reason reviveFromBackground does — getList() has no timeout, so a cold
+      // worker would stall this await, and a rejection would abort the rest of
+      // the resume (prefs already say active, but nothing gets wired up).
+      // Every failure is contained: the resume still runs, and a non-
+      // authoritative list is corrected by the next LIST_UPDATED/storage event
+      // (updateCache refuses to publish it in the meantime).
+      let freshList: BlockEntry[] | null = null;
+      try {
+        freshList = await getListDirect();
+      } catch {
+        try {
+          freshList = await getList();
+        } catch (err) {
+          shhLog("resume re-read failed — continuing without a list", err);
+        }
+      }
+      // A newer prefs refresh supersedes this whole continuation; a newer LIST
+      // read supersedes only our snapshot. Do not overwrite `entries` with a
+      // read that started before the newer one — and do NOT claim authority
+      // for a list we did not apply.
+      if (epoch !== prefsEpoch) return;
+      if (freshList && listGen === listEpoch) {
+        entries = freshList;
+        stateAuthoritative = true;
+      }
       shhLog(`resume re-read list (entries=${entries.length})`);
     }
     // Resumed mid-session: run the page processing init() skipped.  This also
     // lifts any preload hiding from before the resume.
-    matcher = new DomainMatcher(entries, prefs.subdomainWildcard);
+    refreshMatcher();
     injectBaseStyles();
-    // Re-arm the preload layers suspend tore down. Skipping this left infinite
-    // scroll dead for the whole page session (suspend destroys the manager, and
-    // the pref-diff below only rebuilds it when `infiniteScroll` itself
-    // changed — a pause/unpause cycle does not), and left the engine un-
-    // initialised: GoogleAdapter.onInit derives isImages/isNews from the URL, so
-    // a tab that loaded paused on tbm=isch would resume down the web path and
-    // find nothing.
-    (window as Window & { __shhRearmCover?: () => void }).__shhRearmCover?.();
+    // Initialise the engine BEFORE the cover is re-armed: GoogleAdapter.onInit
+    // derives isImages/isNews from the URL, and the cover is gated on that
+    // context.
     engine.onInit?.(document);
     invalidateNodeCache();
     updateCache();
+    // ORDER (A1): the preload's `lc` and :has() sheet must be current BEFORE
+    // `__shhRearmCover`. Re-arm builds and stamps the cover from `lc`; after a
+    // suspend that list is empty, so arming first covered results that the
+    // live list actually blocks (or missed ones it should cover) until the
+    // next rescan.
     updateHasRules();
+    (window as Window & { __shhRearmCover?: () => void }).__shhRearmCover?.();
     processResults(getCachedResultNodes());
     startResultObserver();
     tryStartInfiniteScroll();
+    // A tab that loaded while suspended never reached wireTabOnce (init bailed
+    // before protectPage). Resume is its first active moment; without this the
+    // visibility/rescan hooks and the Startpage insurance timers never exist.
+    wireTabOnce();
     (window as Window & { __shhRevealGoogle?: () => void }).__shhRevealGoogle?.();
   } else {
     // No active/inactive transition — a pref change that does not cross the
@@ -2075,17 +2247,45 @@ async function refreshPrefs(): Promise<void> {
   }
 }
 
-async function refreshEntries(): Promise<void> {
-  entries = await getList();
+async function refreshEntries(source: "message" | "storage" = "message"): Promise<void> {
+  const epoch = ++listEpoch;
+  // `storage` for a storage.onChanged trigger (the write already landed),
+  // `message` for LIST_UPDATED — whose storage write is still inside the
+  // background's 500 ms debounce, so a direct read there would be STALE.
+  const nextEntries = source === "storage" ? await getListDirect() : await getList();
+  if (epoch !== listEpoch) return;
+  entries = nextEntries;
+  // Reaching here means a real transport answered, so the list is no longer a
+  // cache/defaults guess — even on a tab that started degraded.
+  stateAuthoritative = true;
   refreshMatcher();
   updateCache();
 
   // The reconcile body lives in reconcilePageInPlace() so the post-cache-prime
   // path can share it verbatim rather than growing a second, subtly different
-  // copy of the restore/restamp rules.
-  await reconcilePageInPlace();
+  // copy of the restore/restamp rules. Suspended tabs skip it: processResults
+  // refuses to re-hide while inactive, and restamping nodes only to skip them
+  // would strip their Show/Unblock controls.
+  if (engineActive) await reconcilePageInPlace();
   // Keep :has() rules in sync with the updated list.
   updateHasRules();
+}
+
+/**
+ * The predicate every "release this node" path passes to restoreResult /
+ * restoreByDomain / revealPreloadHiding: an unblocked wrapper can still contain
+ * a result the preload hid for a DIFFERENT, still-blocked domain. Fails CLOSED
+ * when the adapter throws — keeping a node hidden is recoverable, revealing a
+ * blocked result is the regression this guard exists to stop.
+ */
+function isStillBlockedNode(el: Element): boolean {
+  if (!matcher || !engine) return true;
+  try {
+    const u = engine.getResultUrl(el);
+    return !!u && matcher.match(u).matched;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -2187,7 +2387,12 @@ function updateHasRules(): void {
   const fn = (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
     .__shhUpdateHas;
   if (typeof fn !== "function" || !prefs) return;
-  const blocked = entries.filter(e => e.enabled).map(e => e.domain);
+  // Suspended ⇒ EMPTY list. The preload's :has() sheet and its JS `tryHide`
+  // read the same array; leaving the block list in place on a paused page
+  // pre-hides newly hydrated results that no observer is left to re-process.
+  const blocked = engineActive
+    ? entries.filter((e) => e.enabled).map((e) => e.domain)
+    : [];
   fn(blocked, prefs.subdomainWildcard);
 }
 
@@ -2291,6 +2496,16 @@ function updateCache(): void {
   // cache with `{"domains":[]}`, and since the preload cannot tell the two
   // apart, pre-paint hiding would stay dead on this origin for good — long
   // after the background woke up. See content/cache-state.ts.
+  //
+  // PREFS AUTHORITY is required unconditionally. buildCache() derives
+  // `paused`, `wildcard` and `debug` from prefs; publishing a cache-primed /
+  // defaulted guess could flip a genuinely paused origin to `paused:false`
+  // (pre-hiding for a suspended user) or widen the wildcard. Entries authority
+  // alone is not enough.
+  if (!prefsAuthoritative) {
+    shhLog("cache write skipped — non-authoritative prefs (guessed)");
+    return;
+  }
   if (!canPublishCache(cache, stateAuthoritative)) {
     shhLog("cache write skipped — non-authoritative empty state (degraded)");
     return;

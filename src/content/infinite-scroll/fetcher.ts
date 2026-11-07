@@ -18,9 +18,11 @@ export async function fetchPage(
   init?: RequestInit
 ): Promise<FetchResult | null> {
   if (delayMs > 0) {
-    // Add ±50% jitter to avoid detection patterns
+    // Add ±50% jitter to avoid detection patterns. Abort-aware: a plain
+    // setTimeout ignored destroy()'s abort, so a torn-down manager's fetch
+    // could outlive its successor and clear the NEW fetch's isLoading guard.
     const jitter = delayMs * (0.5 + Math.random());
-    await sleep(jitter);
+    await sleep(jitter, signal);
   }
 
   try {
@@ -241,6 +243,20 @@ function looksLikeSoftBlock(doc: Document, requestUrl: string): boolean {
   return !hasSearchResultsShape(doc, requestUrl);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }

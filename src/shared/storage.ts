@@ -1,5 +1,11 @@
-import type { BlockEntry, Prefs } from "./types";
-import { DEFAULT_PREFS, STORAGE_KEY_LIST, STORAGE_KEY_PREFS, STORAGE_KEY_UNDO } from "./types";
+import type { BlockEntry, Prefs, PrefsPatch } from "./types";
+import {
+  DEFAULT_PREFS,
+  STORAGE_KEY_LIST,
+  STORAGE_KEY_PREFS,
+  STORAGE_KEY_PREFS_LOCAL,
+  STORAGE_KEY_UNDO,
+} from "./types";
 
 // ============================================================
 // storage.local — block list (no quota limit)
@@ -34,8 +40,8 @@ export async function loadPrefs(): Promise<Prefs> {
   // (savePrefs writes here when sync throws). Without this read the
   // fallback key is write-only and those prefs are silently lost.
   try {
-    const local = await browser.storage.local.get(STORAGE_KEY_PREFS + "_local");
-    const raw = local[STORAGE_KEY_PREFS + "_local"];
+    const local = await browser.storage.local.get(STORAGE_KEY_PREFS_LOCAL);
+    const raw = local[STORAGE_KEY_PREFS_LOCAL];
     if (raw && typeof raw === "object") {
       return deepMerge(DEFAULT_PREFS, raw as Partial<Prefs>);
     }
@@ -48,13 +54,15 @@ export async function savePrefs(prefs: Prefs): Promise<void> {
     await browser.storage.sync.set({ [STORAGE_KEY_PREFS]: prefs });
   } catch {
     // Fallback to local if sync unavailable
-    await browser.storage.local.set({ [STORAGE_KEY_PREFS + "_local"]: prefs });
+    await browser.storage.local.set({ [STORAGE_KEY_PREFS_LOCAL]: prefs });
   }
 }
 
-export async function patchPrefs(patch: Partial<Prefs>): Promise<Prefs> {
+export async function patchPrefs(patch: PrefsPatch): Promise<Prefs> {
   const current = await loadPrefs();
-  const updated = deepMerge(current, patch);
+  // deepMerge merges nested records per key, which is what makes a minimal
+  // `engineToggles: { [id]: value }` patch safe against concurrent writers.
+  const updated = deepMerge(current, patch as Partial<Prefs>);
   await savePrefs(updated);
   return updated;
 }

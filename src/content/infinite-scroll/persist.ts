@@ -21,7 +21,15 @@ export function loadScrollState(): ScrollState | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ScrollState;
-    if (parsed && typeof parsed.url === "string" && typeof parsed.scrollY === "number") {
+    // A partial record (e.g. loadedPages missing) would otherwise pass the
+    // url/scrollY gate and make `saved.loadedPages <= 1` compare undefined.
+    if (
+      parsed &&
+      typeof parsed.url === "string" &&
+      typeof parsed.scrollY === "number" &&
+      typeof parsed.loadedPages === "number" &&
+      typeof parsed.timestamp === "number"
+    ) {
       return parsed;
     }
     return null;

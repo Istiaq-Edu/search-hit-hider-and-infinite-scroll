@@ -8,6 +8,12 @@ import { getDomainLevels, normalizeDomain } from "../../shared/domain-utils";
 type DialogCallback = (domain: string, mode: BlockMode) => void;
 
 let activeDialog: HTMLElement | null = null;
+// Arming is delayed so the click that OPENED the dialog cannot immediately
+// close it. That timer used to be fire-and-forget: a dialog dismissed inside
+// the 50 ms window still attached a document-level listener afterwards, and
+// the `{ once: true }` listener outlived its dialog. Track both and tear them
+// down in dismissDialog().
+let outsideArmTimer: number | null = null;
 
 export function showBlockDialog(
   url: string,
@@ -106,10 +112,7 @@ function showDomainChoiceDialog(
   document.body.appendChild(dialog);
   activeDialog = dialog;
 
-  // Close on outside click
-  setTimeout(() => {
-    document.addEventListener("click", outsideClickHandler, { once: true });
-  }, 50);
+  armOutsideClick();
 }
 
 function showModeDialog(
@@ -157,9 +160,7 @@ function showModeDialog(
   document.body.appendChild(dialog);
   activeDialog = dialog;
 
-  setTimeout(() => {
-    document.addEventListener("click", outsideClickHandler, { once: true });
-  }, 50);
+  armOutsideClick();
 }
 
 function createDialog(): HTMLElement {
@@ -176,13 +177,31 @@ function positionDialog(dialog: HTMLElement, anchor: HTMLElement): void {
   dialog.style.cssText = `position:absolute;top:${top}px;left:${left}px`;
 }
 
+function armOutsideClick(): void {
+  if (outsideArmTimer !== null) clearTimeout(outsideArmTimer);
+  outsideArmTimer = window.setTimeout(() => {
+    outsideArmTimer = null;
+    if (!activeDialog) return;
+    document.addEventListener("click", outsideClickHandler);
+  }, 50);
+}
+
 function outsideClickHandler(e: MouseEvent): void {
-  if (activeDialog && !activeDialog.contains(e.target as Node)) {
+  if (!activeDialog) {
+    document.removeEventListener("click", outsideClickHandler);
+    return;
+  }
+  if (!activeDialog.contains(e.target as Node)) {
     dismissDialog();
   }
 }
 
 export function dismissDialog(): void {
+  if (outsideArmTimer !== null) {
+    clearTimeout(outsideArmTimer);
+    outsideArmTimer = null;
+  }
+  document.removeEventListener("click", outsideClickHandler);
   activeDialog?.remove();
   activeDialog = null;
 }

@@ -47,6 +47,16 @@ export interface Prefs {
   infiniteScrollPersist: boolean;
 }
 
+/**
+ * Deep-partial patch for SET_PREFS. `patchPrefs` deep-merges nested records,
+ * so a caller changing ONE engine toggle must send only that key — sending a
+ * full `engineToggles` record built from stale UI state clobbers a concurrent
+ * change from another popup / device.
+ */
+export type PrefsPatch = Omit<Partial<Prefs>, "engineToggles"> & {
+  engineToggles?: Partial<Record<EngineId, boolean>>;
+};
+
 export const ALL_ENGINE_IDS: EngineId[] = [
   "google",
   "duckduckgo",
@@ -161,7 +171,7 @@ export interface GetPrefsResponse {
 
 export interface SetPrefsMsg {
   type: "SET_PREFS";
-  patch: Partial<Prefs>;
+  patch: PrefsPatch;
 }
 
 export interface UndoLastMsg {
@@ -184,4 +194,6 @@ export type ExtMessage =
 // ============================================================
 export const STORAGE_KEY_LIST = "shh_entries";
 export const STORAGE_KEY_PREFS = "shh_prefs";
+/** Local mirror written when storage.sync is unavailable (see savePrefs). */
+export const STORAGE_KEY_PREFS_LOCAL = STORAGE_KEY_PREFS + "_local";
 export const STORAGE_KEY_UNDO = "shh_undo";

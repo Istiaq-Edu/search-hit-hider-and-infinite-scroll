@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useState, useEffect, useRef } from "preact/hooks";
 import type { BlockEntry } from "../../shared/types";
 import {
   exportToJSON,
@@ -18,10 +18,21 @@ export function ImportExport({ entries }: Props) {
   const [feedback, setFeedback]         = useState("");
   const [exportScope, setExportScope]   = useState<ExportScope>("all");
   const [exportFormat, setExportFormat] = useState<ExportFormat>("json");
+  const flashTimer                      = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+    };
+  }, []);
 
   function flash(msg: string) {
     setFeedback(msg);
-    setTimeout(() => setFeedback(""), 4000);
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => {
+      flashTimer.current = null;
+      setFeedback("");
+    }, 4000);
   }
 
   function getExportEntries(): BlockEntry[] {

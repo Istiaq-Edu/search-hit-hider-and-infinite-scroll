@@ -1,6 +1,11 @@
 import { useState, useEffect } from "preact/hooks";
-import type { BlockEntry, Prefs } from "../../shared/types";
-import { DEFAULT_PREFS } from "../../shared/types";
+import type { BlockEntry, Prefs, PrefsPatch } from "../../shared/types";
+import {
+  DEFAULT_PREFS,
+  STORAGE_KEY_LIST,
+  STORAGE_KEY_PREFS,
+  STORAGE_KEY_PREFS_LOCAL,
+} from "../../shared/types";
 import { QuickControls } from "./QuickControls";
 import { BlockList } from "./BlockList";
 import { PermabanList } from "./PermabanList";
@@ -26,15 +31,33 @@ export function App() {
     void loadData();
   }, []);
 
-  // Auto-refresh entries when the import/export page writes to storage
+  // Live-view storage. The OptionsPage / import page and Firefox Sync write
+  // storage directly, and GET_LIST/GET_PREFS can be served from the
+  // background's cache. Reading `newValue` here is closer to the source and
+  // removes the cache-ordering race. Prefs live in sync, with a local mirror
+  // written when sync is unavailable — watch both.
   useEffect(() => {
+    function applyPrefs(newValue: unknown) {
+      if (newValue && typeof newValue === "object") {
+        setPrefs((prev) => ({ ...prev, ...(newValue as Partial<Prefs>) }));
+      }
+    }
     function onStorageChanged(
       changes: Record<string, browser.storage.StorageChange>,
       area: string,
     ) {
-      if (area === "local" && "shh_entries" in changes) {
-        void refreshEntries();
+      if (area === "local") {
+        if (STORAGE_KEY_LIST in changes) {
+          const v = changes[STORAGE_KEY_LIST].newValue;
+          setEntries(Array.isArray(v) ? (v as BlockEntry[]) : []);
+        }
+        const prefsChange = changes[STORAGE_KEY_PREFS_LOCAL];
+        if (prefsChange) applyPrefs(prefsChange.newValue);
+        return;
       }
+      if (area !== "sync") return;
+      const prefsChange = changes[STORAGE_KEY_PREFS];
+      if (prefsChange) applyPrefs(prefsChange.newValue);
     }
     browser.storage.onChanged.addListener(onStorageChanged);
     return () => browser.storage.onChanged.removeListener(onStorageChanged);
@@ -61,7 +84,7 @@ export function App() {
     }
   }
 
-  async function updatePrefs(patch: Partial<Prefs>) {
+  async function updatePrefs(patch: PrefsPatch) {
     const res = await browser.runtime.sendMessage({ type: "SET_PREFS", patch }) as { prefs: Prefs };
     setPrefs(res.prefs);
   }

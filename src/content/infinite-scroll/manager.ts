@@ -114,9 +114,16 @@ export class InfiniteScrollManager {
   private currentUrl: string;
 
   private scrollSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private observerDeferTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private isTriggerEngine = false;
   private consecutiveErrors = 0;
+  // Generation token for in-flight fetches (B1): destroy() and every new
+  // fetchNextPage() bump it, so a stale continuation (jitter sleep outliving
+  // an abort, SPA re-search) can never write state — or clear the guard —
+  // of the CURRENT fetch. `destroyed` alone cannot express this: init()
+  // resets it on the same instance after handleNavigation().
+  private fetchEpoch = 0;
 
   constructor(
     engine: EngineAdapter,
@@ -153,6 +160,17 @@ export class InfiniteScrollManager {
     }
     this.currentPage = 1;
     this.consecutiveEmptyPages = 0;
+    // B2: soft-block strikes must not leak across searches — two errors on
+    // SERP A plus one transient null on SERP B would hit the 3-strike stop
+    // and kill the new query with no retry button.
+    this.consecutiveErrors = 0;
+
+    // B3: arm navigation detection BEFORE the pager-less early return — a
+    // manager born on a last page (or a not-yet-rendered pager) must still
+    // hear about SPA navigation to a multi-page SERP, or infinite scroll
+    // stays dead for the whole document session. Self-cleaning: it removes
+    // any previous listener pair first; destroy() tears it down.
+    this.startNavigationDetection();
 
     if (!this.hasMore) {
       return;
@@ -173,7 +191,6 @@ export class InfiniteScrollManager {
 
     this.createSentinel();
     this.startObserver();
-    this.startNavigationDetection();
     this.bindScrollSave();
 
     if (this.config.persist) {
@@ -185,6 +202,8 @@ export class InfiniteScrollManager {
 
   destroy(): void {
     this.destroyed = true;
+    // B1: kill stale fetch continuations even when no re-init follows.
+    this.fetchEpoch++;
     this.observer?.disconnect();
     this.observer = null;
     this.sentinel?.remove();
@@ -198,6 +217,10 @@ export class InfiniteScrollManager {
     if (this.scrollSaveTimer) {
       clearTimeout(this.scrollSaveTimer);
       this.scrollSaveTimer = null;
+    }
+    if (this.observerDeferTimer) {
+      clearTimeout(this.observerDeferTimer);
+      this.observerDeferTimer = null;
     }
     if (this.faviconRetryTimer) {
       clearTimeout(this.faviconRetryTimer);
@@ -230,7 +253,10 @@ export class InfiniteScrollManager {
   }
 
   handleNavigation(): void {
-    this.saveScrollStateInternal();
+    // B6a: location ALREADY points at the new SERP — save under the OLD url
+    // (currentUrl is updated only after destroy), or a later reload of the
+    // new URL passes the url-match gate with the old session's page count.
+    this.writeScrollState(this.currentUrl);
     this.deduper.reset();
     this.destroy();
     this.currentUrl = window.location.href;
@@ -373,8 +399,12 @@ export class InfiniteScrollManager {
     );
     if (this.sentinel) {
       // Defer by 2s so the sentinel doesn't fire immediately on short
-      // first pages where it's already within the threshold.
-      setTimeout(() => {
+      // first pages where it's already within the threshold. Tracked (B7):
+      // an untracked timer survived destroy() and observed the NEXT
+      // session's sentinel early; rapid navigations stacked timers.
+      if (this.observerDeferTimer) clearTimeout(this.observerDeferTimer);
+      this.observerDeferTimer = setTimeout(() => {
+        this.observerDeferTimer = null;
         if (this.observer && this.sentinel) {
           this.observer.observe(this.sentinel.element);
         }
@@ -420,6 +450,9 @@ export class InfiniteScrollManager {
       return;
     }
 
+    // B1: claim a generation. Every post-await write below (and the finally
+    // guard release) applies only while this is still the newest generation.
+    const epoch = ++this.fetchEpoch;
     this.isLoading = true;
     this.sentinel?.setState("loading");
 
@@ -428,7 +461,7 @@ export class InfiniteScrollManager {
       try {
         const beforeCount = this.engine.getResultNodes(document).length;
         await this.engine.triggerNextPage!(document);
-        if (this.destroyed) return;
+        if (epoch !== this.fetchEpoch) return;
 
         const allNodes = this.engine.getResultNodes(document);
         const newNodes = allNodes.slice(beforeCount);
@@ -442,9 +475,8 @@ export class InfiniteScrollManager {
         const btn = document.querySelector('button[data-testid="more-results"], button.result--more__btn, .results--more button, a.result--more__link');
         this.hasMore = !!btn && this.currentPage < this.config.maxPages;
         this.sentinel?.setState(this.hasMore ? "idle" : "done");
-        this.sentinel?.setState(this.hasMore ? "idle" : "done");
       } catch (err) {
-        if (this.destroyed) return;
+        if (epoch !== this.fetchEpoch) return;
         // Button not found = no more pages, not an error
         if ((err as Error)?.message?.includes("No")) {
           this.hasMore = false;
@@ -453,7 +485,9 @@ export class InfiniteScrollManager {
           this.sentinel?.setState("error", () => this.retryFetch());
         }
       } finally {
-        this.isLoading = false;
+        // Epoch-gated: a stale continuation must not clear the guard of the
+        // fetch that the re-initialized session is running right now.
+        if (epoch === this.fetchEpoch) this.isLoading = false;
       }
       return;
     }
@@ -483,7 +517,7 @@ export class InfiniteScrollManager {
         backoffMs,
         this.nextPageRequest?.init
       );
-      if (this.destroyed) return;
+      if (epoch !== this.fetchEpoch) return;
 
       if (!result) {
         this.consecutiveErrors++;
@@ -563,7 +597,7 @@ export class InfiniteScrollManager {
       if (!this.hasMore) this.restorePagination();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      if (this.destroyed) return;
+      if (epoch !== this.fetchEpoch) return;
       // Thrown network failures count toward the same 3-strike budget as
       // null results — otherwise a dead connection retries once per
       // sentinel crossing forever (unbounded cycle, no backoff).
@@ -577,7 +611,9 @@ export class InfiniteScrollManager {
         this.sentinel?.setState("error", () => this.retryFetch());
       }
     } finally {
-      this.isLoading = false;
+      // Epoch-gated for the same reason as the trigger branch above: a stale
+      // continuation must not release the CURRENT fetch's isLoading guard.
+      if (epoch === this.fetchEpoch) this.isLoading = false;
     }
   }
 
@@ -2233,16 +2269,21 @@ export class InfiniteScrollManager {
     this.scrollSaveTimer = setTimeout(() => this.saveScrollStateInternal(), 1000);
   };
 
+  /** Live saves use the current href; handleNavigation passes the OLD one. */
   private saveScrollStateInternal = (): void => {
+    this.writeScrollState(window.location.href);
+  };
+
+  private writeScrollState(url: string): void {
     if (!this.config.persist) return;
     saveScrollState({
-      url: window.location.href,
+      url,
       scrollY: window.scrollY,
       loadedUrls: [],
       loadedPages: this.currentPage,
       timestamp: Date.now(),
     });
-  };
+  }
 
   private tryRestoreScroll(): void {
     const saved = loadScrollState();
@@ -2271,8 +2312,10 @@ export class InfiniteScrollManager {
       clearScrollState();
       return;
     }
-    // Defer scroll restoration after DOM is stable
+    // Defer scroll restoration after DOM is stable — but not past teardown:
+    // toggling the pref off in the same frame must cancel the jump.
     requestAnimationFrame(() => {
+      if (this.destroyed) return;
       window.scrollTo(0, saved.scrollY);
     });
   }

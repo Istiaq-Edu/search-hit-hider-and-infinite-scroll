@@ -13,6 +13,7 @@ import {
   popUndoEntry,
 } from "../shared/storage";
 import { addEntry, removeEntry, updateEntry, applyBulkOp } from "../shared/list-utils";
+import { STORAGE_KEY_PREFS_LOCAL } from "../shared/types";
 import { broadcastToTabs, shouldEvictTab } from "./broadcast";
 
 // ============================================================
@@ -22,23 +23,69 @@ import { broadcastToTabs, shouldEvictTab } from "./broadcast";
 let cachedEntries: BlockEntry[] | null = null;
 let cachedPrefs: Prefs | null = null;
 
+// Cache generations, one per cache. Bumped on every invalidation
+// (storage.onChanged) and every local commit. A cold read that was already in
+// flight when its generation changed must NOT install its snapshot: the read
+// may have started before the write that invalidated, and adopting it would
+// resurrect a stale list/prefs — which a later handler would then write back
+// over the newer state. The old `if (!cached…)` check only covered the commit
+// half of the race, not the invalidation half. Separate counters so a list
+// commit cannot force a (possibly slow, sync-backed) prefs read to restart.
+let entriesGen = 0;
+let prefsGen = 0;
+
+// Serialize all message handling. Handlers are read-modify-write cycles over
+// shared state (cold cache reads, unlocked patchPrefs in storage.ts); running
+// them concurrently lets two callers load the same snapshot and last-write-
+// wins the other's mutation (slider drags, double imports, cold-cache adds).
+// A rejected task must not poison the chain, hence the double task/recovery.
+let opQueue: Promise<unknown> = Promise.resolve();
+function enqueue<T>(task: () => Promise<T>): Promise<T> {
+  const run = opQueue.then(task, task);
+  opQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 // Debounced storage writes to avoid sequential writes for rapid changes
 let pendingSave: ReturnType<typeof setTimeout> | null = null;
 let pendingEntries: BlockEntry[] | null = null;
 
 async function getEntries(): Promise<BlockEntry[]> {
-  if (!cachedEntries) cachedEntries = await loadEntries();
-  return cachedEntries;
+  for (;;) {
+    if (cachedEntries) return cachedEntries;
+    const gen = entriesGen;
+    const loaded = await loadEntries();
+    // Retry when a commit or invalidation landed mid-read: `loaded` may
+    // predate it. A commit also sets cachedEntries, so the next iteration
+    // returns immediately.
+    if (gen === entriesGen) {
+      cachedEntries = loaded;
+      return loaded;
+    }
+  }
 }
 
 async function getPrefs(): Promise<Prefs> {
-  if (!cachedPrefs) cachedPrefs = await loadPrefs();
-  return cachedPrefs;
+  for (;;) {
+    if (cachedPrefs) return cachedPrefs;
+    const gen = prefsGen;
+    const loaded = await loadPrefs();
+    if (gen === prefsGen) {
+      cachedPrefs = loaded;
+      return loaded;
+    }
+  }
 }
 
 async function persistEntries(entries: BlockEntry[]): Promise<void> {
   cachedEntries = entries;
+  entriesGen++;
   scheduleSave(entries);
+}
+
+function commitPrefs(prefs: Prefs): void {
+  cachedPrefs = prefs;
+  prefsGen++;
 }
 
 function scheduleSave(entries: BlockEntry[]): void {
@@ -56,8 +103,14 @@ function scheduleSave(entries: BlockEntry[]): void {
 // Flush pending writes on extension shutdown
 if (browser.runtime.onSuspend) {
   browser.runtime.onSuspend.addListener(() => {
+    if (pendingSave) {
+      clearTimeout(pendingSave);
+      pendingSave = null;
+    }
     if (pendingEntries) {
-      saveEntries(pendingEntries);
+      const entries = pendingEntries;
+      pendingEntries = null;
+      saveEntries(entries);
     }
   });
 }
@@ -66,9 +119,17 @@ if (browser.runtime.onSuspend) {
 browser.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && "shh_entries" in changes) {
     cachedEntries = null;
+    entriesGen++;
   }
   if (area === "sync" && "shh_prefs" in changes) {
     cachedPrefs = null;
+    prefsGen++;
+  }
+  // Local mirror written when storage.sync is unavailable. Watching only the
+  // sync key left a SET_PREFS fallback write invisible to a warm cache.
+  if (area === "local" && STORAGE_KEY_PREFS_LOCAL in changes) {
+    cachedPrefs = null;
+    prefsGen++;
   }
 });
 
@@ -119,7 +180,10 @@ browser.runtime.onMessage.addListener(
     }
 
     const msg = message as ExtMessage;
-    return handleMessage(msg, sender.tab?.id);
+    // Serialized: handleMessage bodies are read-modify-write cycles over the
+    // cache and storage (see enqueue's comment). Returning the queued promise
+    // keeps the sender's response tied to its own operation completing.
+    return enqueue(() => handleMessage(msg, sender.tab?.id));
   }
 );
 
@@ -197,7 +261,6 @@ async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unk
 
       if (added > 0) {
         await persistEntries(current);
-        cachedEntries = current;
         void broadcastToContentScripts({ type: "LIST_UPDATED" });
       }
 
@@ -212,7 +275,7 @@ async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unk
 
     case "SET_PREFS": {
       const updated = await patchPrefs(msg.patch);
-      cachedPrefs = updated;
+      commitPrefs(updated);
       // Broadcast. Without this, refreshPrefs() in the content script is dead
       // code: nothing ever sends PREFS_UPDATED, so pause/unpause, the
       // subdomain-wildcard setting and engine toggles never reach an open tab.
@@ -293,8 +356,12 @@ async function broadcastToContentScripts(
 // ============================================================
 
 async function init(): Promise<void> {
-  cachedEntries = await loadEntries();
-  cachedPrefs = await loadPrefs();
+  // Warm-up reads run outside the message queue, so a mutation or an
+  // onChanged invalidation can land during the await. getEntries/getPrefs
+  // use the cache generation: an in-flight read is discarded and retried
+  // when that happens, instead of installing (or skipping) a stale snapshot
+  // on a bare `if (!cached…)` check.
+  await Promise.all([getEntries(), getPrefs()]);
 }
 
 void init();

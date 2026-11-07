@@ -1,4 +1,4 @@
-import type { Prefs } from "../../shared/types";
+import type { Prefs, PrefsPatch } from "../../shared/types";
 import { ALL_ENGINE_IDS } from "../../shared/types";
 import { EngineSettings } from "./EngineSettings";
 import { BlockingSettings } from "./BlockingSettings";
@@ -8,7 +8,7 @@ import { InfiniteScrollSettings } from "./InfiniteScrollSettings";
 
 interface Props {
   prefs: Prefs;
-  onUpdatePrefs: (patch: Partial<Prefs>) => Promise<void>;
+  onUpdatePrefs: (patch: PrefsPatch) => Promise<void>;
 }
 
 function Section({ title, children }: { title: string; children: preact.ComponentChildren }) {
