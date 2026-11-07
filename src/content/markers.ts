@@ -66,6 +66,151 @@ export const GOOGLE_COVER_SELECTOR = [
   "div.tF2Cxc:not(.tF2Cxc .tF2Cxc):not([data-shh-ok]):not([data-shh-preloaded])",
 ].join(",");
 
+// ============================================================
+// "Show once" — the ONE state every hide layer must respect
+// ============================================================
+// Field report 2026-11-05: on a single SERP, clicking Show revealed SOME
+// blocked results and left others blank. The differing factor is DOM SHAPE, not
+// timing: when the preload hid an INNER div.g/div.tF2Cxc but the adapter
+// stamped the OUTER wrapper, three independent layers still hide that inner
+// node after showOnce() has done its work:
+//
+//   1. the marker-free `:has()` adopted sheet (display:none !important);
+//   2. the preload MutationObserver's Case D self-heal, which reads showOnce's
+//      deliberate `data-shh-preloaded` REMOVAL as "the page stripped our
+//      marker" and re-hides the node in the post-click microtask;
+//   3. the preload.css `[data-shh-preloaded]` rule, re-armed by (2).
+//
+// All three are lifted by ONE authoritative marker on the result the user
+// explicitly asked to see. Lives here because preload.ts and blocking/hider.ts
+// are separate bundles that must agree on the string (the cover selector's
+// three-copy drift is documented above).
+export const ATTR_SHH_MODE = "data-shh-mode";
+export const SHOWN_ONCE = "shown-once";
+export const SHOWN_ONCE_SELECTOR = `[${ATTR_SHH_MODE}="${SHOWN_ONCE}"]`;
+/**
+ * The visual class showOnce() puts on the revealed result. The preload's
+ * self-heal keys on it (mode stripped + class present ⇒ re-stamp), so the two
+ * bundles MUST share one string — a rename in hider.ts alone silently kills
+ * the heal with every mirror-free test still green.
+ */
+export const SHOWN_ONCE_CLASS = "shh-shown-result";
+
+/**
+ * Append to a hiding rule's SUBJECT. Exempts the revealed result itself AND
+ * everything inside it — `display` does not inherit, so an inner node with its
+ * own `display:none !important` stays hidden no matter what the parent sets.
+ *
+ * Only ever used on a `:has()` rule that ALREADY requires Firefox 121+; complex
+ * selectors in `:not()` ship in Firefox 84, so this adds no new version floor.
+ * Verified against Firefox Developer Edition via CSS.supports().
+ */
+export const SHOWN_ONCE_EXEMPTION =
+  `:not(${SHOWN_ONCE_SELECTOR}):not(${SHOWN_ONCE_SELECTOR} *)`;
+
+// ============================================================
+// Per-engine subjects for the :has() hiding layer
+// ============================================================
+// `:has()` rules are re-evaluated by the style engine whenever the DOM mutates
+// anywhere they could reach, so the SUBJECT list decides how much invalidation
+// work every mutation costs. The preload's JS-side SELS covers every engine's
+// markup and stays engine-agnostic — but a Yandex page can never match a Bing
+// subject, and carrying all ~30 subjects on every site makes the style engine
+// pay for selectors that can never match (measured in Firefox Developer
+// Edition on a churn-heavy Yandex-shaped page: frame p95 2× the no-extension
+// baseline, scaling with block-list size; the JS selector work itself was
+// ~3 ms per 10 s — the CSS breadth is the cost).
+//
+// The `:has()` layer only ever needs the subjects of the engine THIS PAGE is
+// on. Hosts this map does not know (SearXNG instances, Ecosia, Qwant — engines
+// with selectors in SELS but no adapter) keep the full list: unchanged
+// behaviour where nothing is scoped.
+//
+// KEPT IN SYNC WITH `SELS` in preload.ts and the adapters' own selectors by
+// tests/content/has-subjects-sync.test.ts, which runs each SHIPPED adapter's
+// getResultNodes against these selectors.
+export const CSS_SUBJECTS_BY_ENGINE: Record<string, string> = {
+  google:
+    "div.g:not(.g .g)," +
+    "div.tF2Cxc:not(.tF2Cxc .tF2Cxc)",
+  duckduckgo:
+    "ol.react-results--main > li[data-layout='organic']," +
+    "div#links div.results_links_deep div.links_main," +
+    "div#links div.nrn-react-div," +
+    "div#links > div.result",
+  yandex:
+    "li.serp-item," +
+    "div.serp-item," +
+    "div.Organic," +
+    "div.organic",
+  bing: "#b_content ol#b_results > li.b_algo",
+  baidu:
+    "#content_left > div.result.c-container," +
+    "#content_left > div.result-op.c-container",
+  brave:
+    'div.snippet[data-type="web"],' +
+    'div.snippet[data-type="news"],' +
+    'div.snippet[data-type="videos"]',
+  startpage:
+    "#main div.w-gl > div.result," +
+    "#main div.w-bg > div.result," +
+    "div.w-gl > div.result," +
+    "div.w-gl__result," +
+    "section#main div.css-ndwlbg > div.article," +
+    "[data-view='results'] li.search-result",
+};
+
+/**
+ * The engine a hostname resolves to, by the SAME host rules the adapters use.
+ * Returns null for anything the adapters would also reject — in which case the
+ * caller must fall back to the full selector list.
+ */
+export function engineIdForHost(hostname: string): string | null {
+  const h = hostname.toLowerCase();
+  if (
+    h === "www.google.com" ||
+    h.startsWith("www.google.") ||
+    h.startsWith("google.co") ||
+    h === "news.google.com" ||
+    h.startsWith("news.google.") ||
+    h === "encrypted.google.com"
+  ) return "google";
+  if (
+    h === "duckduckgo.com" ||
+    h === "noai.duckduckgo.com" ||
+    h === "start.duckduckgo.com" ||
+    h === "safe.duckduckgo.com"
+  ) return "duckduckgo";
+  if (
+    h === "ya.ru" ||
+    h === "yandex.com" ||
+    h === "www.yandex.com" ||
+    h.endsWith(".yandex.com") ||
+    h.endsWith(".ya.ru") ||
+    /^yandex\.(ru|by|kz|ua|tr|eu|fr|de|lt|lv|ee|md|tj|uz|tm|kg|az|ge|am)$/.test(h)
+  ) return "yandex";
+  if (h === "www.bing.com") return "bing";
+  if (h === "www.baidu.com") return "baidu";
+  if (
+    h === "search.brave.com" ||
+    h === "search.brave4u7jddbv7cyvyptnt5corw0tamlzo53lwd5s7vm223nr3ro2ryd.onion"
+  ) return "brave";
+  if (
+    h !== "us-browse.startpage.com" &&
+    (h === "startpage.com" || h === "www.startpage.com" || h.endsWith(".startpage.com"))
+  ) return "startpage";
+  return null;
+}
+
+/**
+ * The `:has()` subject selector for this host, or null when the host is not a
+ * recognised engine and the caller must keep the full list.
+ */
+export function hasSubjectsFor(hostname: string): string | null {
+  const id = engineIdForHost(hostname);
+  return id ? CSS_SUBJECTS_BY_ENGINE[id] ?? null : null;
+}
+
 /** The same cover, WITHOUT the safety markers — i.e. "what could be covered". */
 export const GOOGLE_COVER_CANDIDATE_SELECTOR = [
   "div.g:not(.g .g)",

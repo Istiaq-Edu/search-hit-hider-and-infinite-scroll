@@ -7,6 +7,12 @@ import {
 } from "./engines/google-dom";
 import {
   isOwnEchoRecord,
+  ATTR_SHH_MODE,
+  SHOWN_ONCE,
+  SHOWN_ONCE_SELECTOR,
+  SHOWN_ONCE_EXEMPTION,
+  SHOWN_ONCE_CLASS,
+  hasSubjectsFor,
   GOOGLE_COVER_SELECTOR,
   GOOGLE_COVER_CANDIDATE_SELECTOR,
   revealCoverCandidate,
@@ -992,6 +998,17 @@ import {
       const rules: string[] = [];
       const BATCH_SIZE = 50; // domains per :is() group to avoid selector length limits
 
+      // SUBJECT SCOPING (Yandex slowness field report 2026-11-07): the style
+      // engine re-evaluates :has() rules on DOM mutations, so the subject list
+      // is a per-mutation cost. SELS must stay broad (the JS paths are
+      // engine-agnostic), but CSS rules for a Bing subject can never match on
+      // a Yandex page. Scope the subjects to the engine THIS host resolves to;
+      // fall back to full SELS only where nothing is known — markers.ts has
+      // the measurement and the sync test that keeps the lists aligned.
+      // Resolved ONCE per rebuild: hostname cannot change without a navigation,
+      // which re-runs this whole script.
+      const subjects = hasSubjectsFor(location.hostname) ?? SELS;
+
       for (let i = 0; i < curLc.length; i += BATCH_SIZE) {
         const batch = curLc.slice(i, i + BATCH_SIZE);
         const hrefs: string[] = [];
@@ -1013,7 +1030,18 @@ import {
           }
         }
         try {
-          rules.push(`:is(${SELS}):has(:is(${hrefs.join(",") })){display:none!important}`);
+          // SHOW-ONCE EXEMPTION (field report 2026-11-05, verified in Firefox):
+          // this rule has NO marker predicate, so it keeps hiding an INNER
+          // div.g / div.tF2Cxc of a result the user just clicked Show on. An
+          // inline `display:block !important` on the outer wrapper cannot
+          // rescue a descendant with its own stylesheet rule. The exemption
+          // belongs on the SUBJECT (added once per rule, not per href selector).
+          // showOnce() sets the marker synchronously; removing it (Hide Again,
+          // Unblock, Perma) re-arms this rule with no JS needed.
+          rules.push(
+            `:is(${subjects})${SHOWN_ONCE_EXEMPTION}:has(:is(${hrefs.join(",")}))` +
+              `{display:none!important}`
+          );
         } catch { /* selector invalid in this browser — skip batch */ }
       }
 
@@ -1339,6 +1367,45 @@ import {
       // ── Case D: attribute mutation (href set/changed on existing element) ──
       if (m.type === "attributes") {
         const el = m.target as Element;
+
+        // ── Shown-once guard (2026-11-05 field report) ─────────────────────
+        // showOnce() deliberately REMOVES `data-shh-preloaded` from the result
+        // and its descendants. `isOwnEchoRecord` only classifies a record whose
+        // marker is PRESENT as our own SET, so a removal looked exactly like
+        // "the page stripped our marker": Case D walked up, removed data-shh-ok
+        // and re-ran tryHide(), which re-applied inline display:none !important
+        // in the microtask right after the click. Confirmed in real Firefox:
+        // flat result -> display:block, nested result -> preloaded=true again.
+        // That is precisely "Show works for SOME results in the same batch".
+        //
+        // NARROW ON PURPOSE: only `data-shh-preloaded` REMOVAL records. ChildList
+        // cases (a genuinely NEW blocked result), href changes, and the
+        // data-shh-ok self-heal still run unchanged.
+        if (
+          m.attributeName === "data-shh-preloaded" &&
+          !el.hasAttribute("data-shh-preloaded") &&
+          el.closest?.(SHOWN_ONCE_SELECTOR)
+        ) {
+          continue;
+        }
+
+        // ── Shown-once marker self-heal ───────────────────────────────────
+        // Google's reconciliation can strip data-* attributes. Losing
+        // data-shh-mode would drop the CSS exemption and blank the result out
+        // again. Re-stamp it only while the visual state class is still there
+        // (rehide/restore/convert all remove that class first, so this never
+        // resurrects a shown state the user just left). Every mode record is
+        // inert here — SET records included — so no own-echo loop is possible.
+        if (m.attributeName === ATTR_SHH_MODE) {
+          if (
+            !el.hasAttribute(ATTR_SHH_MODE) &&
+            el.classList?.contains(SHOWN_ONCE_CLASS)
+          ) {
+            el.setAttribute(ATTR_SHH_MODE, SHOWN_ONCE);
+          }
+          continue;
+        }
+
         // ── Own-echo gate (2026-09-07 crash field report on 1.8.10) ────────
         // See markers.ts: reacting to our own SET echoes of data-shh-ok
         // (remove ok → tryHide → re-stamp → new record → …) is an unbounded
@@ -1461,7 +1528,10 @@ import {
     // forever. Case D's walk-up + tryHide() re-derives the domain and
     // re-stamps either ok (unblocked) or preloaded+hidden (blocked), the
     // same self-heal loop that already covers data-shh-preloaded.
-    attributeFilter: ["href", "data-href", "data-shh-preloaded", "data-shh-ok"],
+    // data-shh-mode joins the filter so a page-side strip of the shown-once
+    // marker can be healed (see Case D above). It is NOT an own-echo marker:
+    // every record for it is handled explicitly and never reaches tryHide().
+    attributeFilter: ["href", "data-href", "data-shh-preloaded", "data-shh-ok", ATTR_SHH_MODE],
   });
 
 })();

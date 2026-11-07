@@ -4,7 +4,7 @@ import { detectEngine } from "./engines/registry";
 import type { EngineAdapter } from "./engines/base";
 import type { MatchResult } from "./blocking/matcher";
 import { DomainMatcher } from "./blocking/matcher";
-import { hideResult, showOnce, rehideResult, restoreByDomain, getHiddenNodes, convertHiddenToPermaban, restoreResult, hasPreloadHiding, revealPreloadHiding } from "./blocking/hider";
+import { hideResult, showOnce, rehideResult, restoreByDomain, getHiddenNodes, convertHiddenToPermaban, restoreResult, hasPreloadHiding, revealPreloadHiding, isShownOnce } from "./blocking/hider";
 import { ResultObserver } from "./blocking/observer";
 import { containsProcessed, isInsideProcessedTerritory, looksLikeResultList, overlapsProcessed } from "./blocking/dedupe";
 import { reconcileAgainstBlockList } from "./blocking/reconcile";
@@ -1287,6 +1287,12 @@ async function reconcilePageInPlace(): Promise<void> {
   // point.
   const clearedNodes: Element[] = [];
   for (const node of toRestamp) {
+    // A result the user explicitly clicked Show on must STAY shown. Re-stamping
+    // it here (any LIST_UPDATED from another tab, an import, a prefs change)
+    // used to silently re-hide it and drop its notice bar. Only "Hide Again"
+    // may put it back. A shown result whose domain was removed is still handled
+    // by the toRestore pass above, via restoreResult().
+    if (isShownOnce(node)) continue;
     const prev = node.previousElementSibling;
     if (prev?.getAttribute("data-shh-placeholder")) prev.remove();
     node.removeAttribute("data-shh-result");
@@ -1592,7 +1598,25 @@ function invalidateNodeCache(): void {
 function processResultNodes(nodes: Element[]): void {
   const resultNodes: Element[] = [];
   let skippedContainers = 0;
+  let earlySkipped = 0;
   for (const node of nodes) {
+    // ── EARLY SKIP (Yandex slowness field report 2026-11-07) ────────────
+    // A node that already carries our stamp, or lives inside one, can never
+    // produce new UI — processResults rejects both cases anyway, but only
+    // AFTER paying the adapter's selector queries (Yandex's getResultNodes is
+    // 4 subtree queries per node, getResultUrl up to 11 more). Hydration churn
+    // mutates hundreds of nodes INSIDE already-hidden results, so paying the
+    // adapter first made every blocked result's re-render a full scan.
+    //
+    // Deliberately NOT bumpRejection: these run on the observer's microtask,
+    // outside any processResults batch, so they would land in the STALE
+    // "last scan" delta table and misattribute that report. The outcomes are
+    // identical to the in-batch rejections either way.
+    if (node.getAttribute("data-shh-result") || isInsideProcessedTerritory(node)) {
+      earlySkipped++;
+      continue;
+    }
+
     const engineNodes = engine!.getResultNodes(node);
     if (engineNodes.length > 0) {
       resultNodes.push(...engineNodes);
@@ -1630,6 +1654,13 @@ function processResultNodes(nodes: Element[]): void {
     console.log(
       `[SHH] duplicate-UI guard: skipped ${skippedContainers} container node(s) ` +
         `from ${nodes.length} added node(s)`
+    );
+  }
+  if (earlySkipped > 0 && isDebugMode()) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[SHH] early skip: ${earlySkipped} already-stamped/covered node(s) ` +
+        `never reached the adapter (perf guard, no UI outcome)`
     );
   }
   if (resultNodes.length > 0) {

@@ -1,5 +1,11 @@
 import type { MatchResult } from "./matcher";
-import { GOOGLE_COVER_CANDIDATE_SELECTOR, revealCoverSubtree } from "../markers";
+import {
+  ATTR_SHH_MODE,
+  SHOWN_ONCE,
+  SHOWN_ONCE_CLASS,
+  GOOGLE_COVER_CANDIDATE_SELECTOR,
+  revealCoverSubtree,
+} from "../markers";
 
 // ============================================================
 // DOM hide/show/restore logic for search result nodes
@@ -40,7 +46,6 @@ function isGoogleHost(node: Element): boolean {
 }
 
 const ATTR_SHH_RESULT = "data-shh-result";
-const ATTR_SHH_MODE = "data-shh-mode";
 const ATTR_SHH_PLACEHOLDER = "data-shh-placeholder";
 const CLASS_HIDDEN = "shh-hidden";
 const CLASS_PBAN = "shh-pban";
@@ -48,7 +53,13 @@ const CLASS_PLACEHOLDER = "shh-placeholder";
 const CLASS_SHOWN_NOTICE = "shh-shown-notice";
 // Applied to the result node itself when temporarily shown — creates the
 // visual wrapper box so all result content appears contained together.
-const CLASS_SHOWN_RESULT = "shh-shown-result";
+// One shared definition in markers.ts: the preload's self-heal keys on it.
+const CLASS_SHOWN_RESULT = SHOWN_ONCE_CLASS;
+
+/** True while a result is being shown because the user explicitly asked. */
+export function isShownOnce(node: Element): boolean {
+  return node.getAttribute(ATTR_SHH_MODE) === SHOWN_ONCE;
+}
 
 export interface HideContext {
   node: Element;
@@ -135,10 +146,15 @@ export function showOnce(
   node.querySelector("." + CLASS_SHOWN_NOTICE)?.remove();
 
   // Use display:block!important (inline) rather than just removeProperty.
-  // Inline style !important wins over any stylesheet !important regardless of
-  // selector specificity — including the :has() rules we inject via
-  // adoptedStyleSheets.  This lets the "Show" button work even when a
-  // persistent :has() rule targets the result container.
+  // Inline !important beats any stylesheet !important on THIS node regardless
+  // of selector specificity — including the marker-free `:has()` rule the
+  // preload injects via adoptedStyleSheets.
+  //
+  // SCOPE LIMIT (the 2026-11-05 "some results stay blank" root cause): this
+  // only rescues the node the adapter stamped. `display` does not inherit, so
+  // a DESCENDANT with its own `display:none !important` is untouched. Those are
+  // lifted declaratively by SHOWN_ONCE_EXEMPTION on the hide rules themselves
+  // (see markers.ts) and by the preload observer's shown-once guard.
   (node as HTMLElement).style.setProperty("display", "block", "important");
   // Release the preload attribute-based CSS rule too.
   node.removeAttribute("data-shh-preloaded");
@@ -193,7 +209,10 @@ export function showOnce(
       if (!el.hasAttribute(ATTR_SHH_PRELOADED)) el.setAttribute(ATTR_SHH_OK, "true");
     }
   }
-  node.setAttribute(ATTR_SHH_MODE, "shown-once");
+  // Set LAST in the click task: the preload's MutationObserver delivers its
+  // attribute records in a microtask AFTER this returns, so every marker this
+  // function removed is already inside a shown-once subtree when Case D runs.
+  node.setAttribute(ATTR_SHH_MODE, SHOWN_ONCE);
 
   // Insert the slim notice strip at the very top of the now-visible result.
   const bar = buildShownNoticeBar(domain, onHideAgain, onUnblock);
@@ -258,15 +277,17 @@ export function preloadHiddenDescendants(node: Element): HTMLElement[] {
  * directly, because it is only ever called for a node the user has explicitly
  * unblocked.
  */
+/** Lift the preload hide on ONE node only — never sweeps its subtree. */
+function clearPreloadHidingSelf(el: Element): void {
+  (el as HTMLElement).style.removeProperty("display");
+  el.removeAttribute("data-shh-preloaded");
+  el.classList.remove(CLASS_HIDDEN);
+}
+
 export function clearPreloadHiding(node: Element): void {
-  const targets: Element[] = [
-    node,
-    ...Array.from(node.querySelectorAll("[data-shh-preloaded]")),
-  ];
-  for (const el of targets) {
-    (el as HTMLElement).style.removeProperty("display");
-    el.removeAttribute("data-shh-preloaded");
-    el.classList.remove(CLASS_HIDDEN);
+  clearPreloadHidingSelf(node);
+  for (const el of node.querySelectorAll("[data-shh-preloaded]")) {
+    clearPreloadHidingSelf(el);
   }
 }
 
@@ -310,10 +331,17 @@ export function revealPreloadHiding(
   node: Element,
   isStillBlocked: (el: Element) => boolean
 ): void {
-  if (node.hasAttribute("data-shh-preloaded")) clearPreloadHiding(node);
+  // SELF-ONLY. This used to call clearPreloadHiding(node), which sweeps the
+  // ENTIRE subtree unconditionally — so a marked self silently lifted every
+  // marked descendant too, bypassing isStillBlocked below and revealing a
+  // genuinely blocked inner result. Same for clearPreloadHiding(inner): its
+  // own subtree sweep could clear a nested descendant before the loop reached
+  // and tested it. Snapshot + one self-only clear per tested node is the guard
+  // this function's contract promises.
+  if (node.hasAttribute("data-shh-preloaded")) clearPreloadHidingSelf(node);
   for (const inner of preloadHiddenDescendants(node)) {
     if (isStillBlocked(inner)) continue;
-    clearPreloadHiding(inner);
+    clearPreloadHidingSelf(inner);
   }
 }
 
