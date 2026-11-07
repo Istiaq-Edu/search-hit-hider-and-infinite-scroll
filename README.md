@@ -3,9 +3,9 @@
 > A Firefox extension that hides unwanted domains from search results — one click to block, one click to undo — with automatic infinite scroll to load more results as you scroll.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Firefox](https://img.shields.io/badge/Firefox-112%2B-orange)](https://www.mozilla.org/firefox/)
+[![Firefox](https://img.shields.io/badge/Firefox-121%2B-orange)](https://www.mozilla.org/firefox/)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-green)](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json)
-[![Version](https://img.shields.io/badge/version-1.6.1-informational)](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
+[![Version](https://img.shields.io/github/v/release/Istiaq-Edu/Search-Hit-Hider?label=version&color=informational)](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
 
 [![Get it on Firefox Add-ons](https://img.shields.io/badge/Get%20it%20on-Firefox%20Add--ons-FF7139?style=for-the-badge&logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/)
 
@@ -15,7 +15,7 @@
 
 When you search on Google, DuckDuckGo, Bing, Yandex, Baidu, Brave Search, or Startpage, a small **block** button appears next to each result. Click it to hide that domain from all future searches. Blocked results are replaced with a quiet placeholder that lets you show or unblock them any time. Scroll to the bottom and more results load automatically — no pagination clicks needed.
 
-No accounts. No servers. No tracking. Everything lives in your browser.
+No accounts. No tracking. No servers operated by us. Everything lives in your browser.
 
 ---
 
@@ -44,7 +44,7 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 - **PSL-aware parsing** — correctly handles `co.uk`, `com.au`, and other compound TLDs
 
 ### List Management
-- Full-featured popup (440 × 620 px) with **Blocked** and **Perma-ban** tabs
+- Full-featured popup (440 × 600 px) with **Blocked** and **Perma-ban** tabs
 - Search, sort (alphabetical or by date), and bulk-select entries
 - Bulk actions: delete, enable/disable, convert between modes, sort, deduplicate, strip www.
 - Add entries manually by typing a domain
@@ -99,20 +99,22 @@ No accounts. No servers. No tracking. Everything lives in your browser.
 Install Search Hit Hider and Infinite Scroll from [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/).
 
 ### Manual (from a release zip)
-1. Download the latest `search-hit-hider-vX.X.X.zip` from [Releases](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
-2. Open Firefox → `about:addons` → gear icon → **Install Add-on From File…**
-3. Select the downloaded `.zip`
+Release zips on GitHub are **unsigned**, so Firefox release builds will refuse a permanent install. Use the AMO build above for normal use, or:
+1. Download the latest `search-hit-hider-and-infinite-scroll-X.X.X.zip` from [Releases](https://github.com/Istiaq-Edu/Search-Hit-Hider/releases)
+2. In Firefox Developer Edition or Nightly, set `xpinstall.signatures.required` to `false` in `about:config`
+3. Open Firefox → `about:addons` → gear icon → **Install Add-on From File…** and select the `.zip`
 
 ### Temporary install (for testing)
-1. Open Firefox → `about:debugging` → **This Firefox** → **Load Temporary Add-on…**
-2. Select `dist/manifest.json` from the built output
+1. Unzip the release, or build locally with `npm run build`
+2. Open Firefox → `about:debugging` → **This Firefox** → **Load Temporary Add-on…**
+3. Select `manifest.json` (temporary add-ons are removed when Firefox closes)
 
 ---
 
 ## Development
 
 ### Prerequisites
-- Node.js 18+
+- Node.js 20+
 - The build script uses only Node.js built-ins + bundled `esbuild` — no global installs needed
 
 ### Build
@@ -126,7 +128,7 @@ The build script compiles TypeScript via `esbuild`, copies assets, and writes ev
 
 ### Package for submission
 
-Uses the GitHub workflow (`.github/workflows/manual-package.yml`) to create extension and source zips. Trigger it from the Actions tab with the desired version number.
+Uses the GitHub workflow (`.github/workflows/release.yml`, mode **release**) to create the extension and AMO source-review zips. Trigger it from the Actions tab with the desired version number. For a local build, `npm run package` writes a zip to `releases/`.
 
 ### Project structure
 
@@ -181,6 +183,7 @@ npm run webext:lint   # AMO linter (addons-linter)
 ## Privacy
 
 - Block list stored in `browser.storage.local` (device-local, never synced)
+- A size-capped pre-paint copy of the enabled domains is kept in the search page's own `localStorage` (`_shh_cache`) so blocked results can be hidden before first paint — see the privacy policy for what that means
 - Preferences stored in `browser.storage.sync` (synced via Firefox Sync if enabled)
 - No requests to any server operated by us at runtime (engine-native favicon endpoints excepted — see privacy-policy.md)
 - No analytics, no crash reporting, no telemetry of any kind

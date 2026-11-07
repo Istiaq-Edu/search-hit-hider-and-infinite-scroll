@@ -25,11 +25,11 @@ import {
   serializeCache,
 } from "./cache-state";
 import { injectBaseStyles } from "./ui/styles";
-import { injectBlockButton } from "./ui/block-button";
+import { injectBlockButton, prepareButtonTarget } from "./ui/block-button";
 import { showBlockDialog } from "./ui/block-dialog";
 import { showToast } from "./ui/toast";
 import { getList, getPrefs, getListDirect, getPrefsDirect, addEntry, removeEntry, updateEntry, undoLast } from "./messaging";
-import { InfiniteScrollManager } from "./infinite-scroll/manager";
+import { InfiniteScrollManager, type InfiniteScrollPrefs } from "./infinite-scroll/manager";
 import { setDebugMode, isDebugMode, seedDebugFromCache, collectDiagnostics, bumpRejection, beginRejectionBatch, diagMark, setDiagResolver, setDiagMatcherInfo } from "./debug";
 
 // ============================================================
@@ -58,9 +58,22 @@ class ResultActions {
   };
 
   doUnblock = async (): Promise<void> => {
-    // ORDER: rebuild the matcher FIRST. The restore predicate below consults
-    // the LIVE matcher, so restoring before the unblock was applied would
-    // still see the domain as blocked and skip every descendant reveal.
+    // Persist FIRST. The old order restored the result, removed the
+    // placeholder/notice bar, and dropped the local entry before awaiting the
+    // background — so a failed write left the page claiming the domain was
+    // unblocked while storage still blocked it (hidden again on reload), with
+    // no control left to retry. Claiming success before durability is how the
+    // mutation silently disappears.
+    try {
+      await removeEntry(this.domain);
+    } catch {
+      showToast(`Could not unblock ${this.domain}`, () => {}, "", 4000);
+      return;
+    }
+    // ORDER: rebuild the matcher before restoring. The restore predicate
+    // below consults the LIVE matcher, so restoring before the unblock was
+    // applied would still see the domain as blocked and skip descendant
+    // reveals.
     entries = entries.filter((e) => e.domain !== this.domain);
     refreshMatcher();
     const releasedRoots = restoreByDomain(this.domain, isStillBlockedNode);
@@ -76,20 +89,40 @@ class ResultActions {
       if (nodeUrl) injectButtonForResult(n, nodeUrl);
     }
 
-    await removeEntry(this.domain);
     showToast(`Unblocked ${this.domain}`, async () => {
-      const restored = await undoLast();
-      if (restored) {
-        entries = [...entries, restored];
-        refreshMatcher();
-        updateCache();
-        processResults(this.engine.getResultNodes(document));
-        updateHasRules();
+      // Scoped to THIS domain: the toast must not replay an unrelated
+      // add/remove that happened after this unblock.
+      let res: Awaited<ReturnType<typeof undoLast>>;
+      try {
+        res = await undoLast(this.domain);
+      } catch {
+        showToast(`Could not undo unblock of ${this.domain}`, () => {}, "", 4000);
+        return;
       }
+      if (!res.restored) return;
+      if (res.action === "remove") {
+        entries = [...entries.filter((e) => e.domain !== res.restored!.domain), res.restored];
+      } else {
+        // Undo of an add is a removal; nothing to restore here.
+        entries = entries.filter((e) => e.domain !== res.restored!.domain);
+      }
+      refreshMatcher();
+      updateCache();
+      processResults(this.engine.getResultNodes(document));
+      updateHasRules();
     });
   };
 
   doPermaban = async (): Promise<void> => {
+    // Persist FIRST, like doUnblock. The write-through background can reject;
+    // mutating entries/matcher/cache before that await made the page claim a
+    // permaban that storage would revert on reload, with no way to retry.
+    try {
+      await updateEntry(this.domain, { mode: "pban", enabled: true });
+    } catch {
+      showToast(`Could not perma-ban ${this.domain}`, () => {}, "", 4000);
+      return;
+    }
     entries = entries.map((entry) =>
       entry.domain === this.domain ? { ...entry, mode: "pban" as const, enabled: true } : entry
     );
@@ -97,8 +130,15 @@ class ResultActions {
     updateCache();
     updateHasRules();
     convertHiddenToPermaban(this.node);
-    await updateEntry(this.domain, { mode: "pban", enabled: true });
     showToast(`Perma-banned ${this.domain}`, async () => {
+      // Undo the permaban durably BEFORE touching local state, so a rejected
+      // write cannot leave the page showing a domain storage still bans.
+      try {
+        await updateEntry(this.domain, { mode: "block", enabled: true });
+      } catch {
+        showToast(`Could not undo perma-ban of ${this.domain}`, () => {}, "", 4000);
+        return;
+      }
       entries = entries.map((entry) =>
         entry.domain === this.domain ? { ...entry, mode: "block" as const, enabled: true } : entry
       );
@@ -118,7 +158,6 @@ class ResultActions {
         this.doUnblock,
         this.doPermaban
       );
-      await updateEntry(this.domain, { mode: "block", enabled: true });
     });
   };
 }
@@ -1375,6 +1414,12 @@ async function reconcilePageInPlace(): Promise<void> {
     // A released WRAPPER may still contain a preload-hidden result for a
     // different, still-blocked domain — never sweep the subtree blindly.
     restoreResult(node, isStillBlockedNode);
+    // A restored node was hidden by the preload or by an earlier scan, so it
+    // was stamped and processResults skips it forever. Without this it comes
+    // back with no block button — the one action the user is most likely to
+    // want immediately after an undo.
+    const url = engine.getResultUrl(node);
+    if (url) injectButtonForResult(node, url);
   }
 
   // Domains still blocked — or newly blocked and still on screen: clear the
@@ -1590,6 +1635,36 @@ function getCachedResultNodes(): Element[] {
 }
 
 // â”€â”€ tryStartInfiniteScroll â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Shared config for the manager's create and live-update paths, so the two
+// cannot drift (a stale fetchDelay/threshold used to need a page reload).
+function infiniteScrollPrefsFor(
+  adapter: EngineAdapter,
+  p: Prefs
+): Partial<InfiniteScrollPrefs> {
+  return {
+    threshold: p.infiniteScrollThreshold,
+    maxPages: p.infiniteScrollMaxPages,
+    persist: p.infiniteScrollPersist,
+    freshnessMinutes: 30,
+    // Anti-bot sleep before each fetch, per engine (±50% jitter on top):
+    // Startpage is captcha-prone and keeps the cautious 1500ms; the other
+    // engines tolerate ~600ms without tripping detection.
+    fetchDelay: adapter.id === "startpage" ? 1500 : 600,
+    debugMode: p.debugMode,
+    // Startpage's fetched SSR markup uses class names the live
+    // client-rendered stylesheet never defines.
+    portFetchedStyles: adapter.id === "startpage",
+    // Third-party icon service OFF: it would disclose every auto-loaded
+    // destination to icons.duckduckgo.com via the URL path, violating
+    // README "zero external network requests", privacy-policy.md, and
+    // the AMO data_collection:none declaration. Startpage — the engine
+    // that needs favicons most — is force-off regardless (its CSP
+    // blocks the request); other engines fall back to monograms. Revisit
+    // only with a user-facing toggle.
+    allowThirdPartyIcons: false,
+  };
+}
+
 // Creates the manager when a results container exists; retries briefly when
 // the container hasn't been built yet (client-rendered engines at
 // document_start). Idempotent — safe against double invocation.
@@ -1607,28 +1682,7 @@ function tryStartInfiniteScroll(retriesLeft = 25): void {
       engine,
       container,
       (nodes) => processResults(nodes),
-      {
-        threshold: prefs.infiniteScrollThreshold,
-        maxPages: prefs.infiniteScrollMaxPages,
-        persist: prefs.infiniteScrollPersist,
-        freshnessMinutes: 30,
-        // Anti-bot sleep before each fetch, per engine (Â±50% jitter on top):
-        // Startpage is captcha-prone and keeps the cautious 1500ms; the
-        // other engines tolerate ~600ms without tripping detection.
-        fetchDelay: engine.id === "startpage" ? 1500 : 600,
-        debugMode: prefs.debugMode,
-        // Startpage's fetched SSR markup uses class names the live
-        // client-rendered stylesheet never defines.
-        portFetchedStyles: engine.id === "startpage",
-        // Third-party icon service OFF: it would disclose every auto-loaded
-        // destination to icons.duckduckgo.com via the URL path, violating
-        // README "zero external network requests", privacy-policy.md, and
-        // the AMO data_collection:none declaration. Startpage — the engine
-        // that needs favicons most — is force-off regardless (its CSP
-        // blocks the request); other engines fall back to monograms, which
-        // 1.6.2 shipped happily. Revisit only with a user-facing toggle.
-        allowThirdPartyIcons: false,
-      }
+      infiniteScrollPrefsFor(engine, prefs)
     );
     infiniteScrollManager.init();
     return;
@@ -1888,20 +1942,12 @@ function injectButtonForResult(node: Element, url: string): void {
   let target = engine.getButtonTarget(node);
   if (!target) return;
 
-  // Brave: a.l1 is a full-width flex row. Appending the button inside it
-  // causes the flex layout to push the button to the far right. Instead,
-  // wrap the anchor in a tight flex row and prepend the button to the wrapper
-  // (before the anchor) so it sits to the left of the favicon.
-  let insertPosition: "after" | "before" = "after";
-  if (engine.id === "brave" && target.tagName.toLowerCase() === "a") {
-    const wrapper = document.createElement("span");
-    wrapper.style.cssText =
-      "display:inline-flex;align-items:center;gap:6px;width:fit-content;max-width:100%;";
-    target.replaceWith(wrapper);
-    wrapper.appendChild(target);
-    target = wrapper;
-    insertPosition = "before";
-  }
+  // Brave: a.l1 is a full-width flex row. prepareButtonTarget wraps it in a
+  // tight flex row (once — it steps out of an existing wrapper) and puts the
+  // button before the anchor so it sits to the left of the favicon.
+  const prepared = prepareButtonTarget(target, engine.id);
+  target = prepared.target;
+  const insertPosition = prepared.insertPosition;
 
   // Append inside headings (h2/h3/h4) rather than inserting after cite.
   // The cite row on Google is a flex container that also holds the three-dot
@@ -1931,7 +1977,8 @@ function injectButtonForResult(node: Element, url: string): void {
           url,
           clickedBtn,
           (domain, mode) => { void handleBlock(url, mode, node, domain); },
-          prefs!.domainChoiceMode
+          prefs!.domainChoiceMode,
+          prefs!.stripWww
         );
       }
     }
@@ -1978,9 +2025,34 @@ async function handleBlock(
     }
   }
 
-  const result = await addEntry(domain, mode);
+  // Write-through persistence propagates storage failures (quota, a suspended
+  // worker). handleBlock is invoked fire-and-forget from click handlers, so an
+  // uncaught rejection here leaves the user with no feedback and, for the
+  // permaban path, a page claiming success while storage still says "block".
+  let result: Awaited<ReturnType<typeof addEntry>>;
+  try {
+    result = await addEntry(domain, mode);
+  } catch {
+    showToast(`Could not block ${domain}`, () => {}, "", 4000);
+    return;
+  }
   if (result.duplicate) {
-    showToast(`${domain} already blocked`, () => {}, "", 2500);
+    if (result.entry) {
+      // The entry existed but was disabled; the background re-enabled it.
+      // Reflect that locally and re-run the page, otherwise the click looks
+      // like a no-op: the matcher ignores disabled entries.
+      const reactivated = result.entry;
+      entries = entries.some((e) => e.domain === reactivated.domain)
+        ? entries.map((e) => (e.domain === reactivated.domain ? reactivated : e))
+        : [...entries, reactivated];
+      refreshMatcher();
+      updateCache();
+      updateHasRules();
+      processResults(getCachedResultNodes());
+      showToast(`Re-enabled: ${reactivated.domain}`, () => {}, "", 2500);
+    } else {
+      showToast(`${domain} already blocked`, () => {}, "", 2500);
+    }
     return;
   }
 
@@ -1996,14 +2068,27 @@ async function handleBlock(
     showToast(
       `${mode === "pban" ? "Perma-banned" : "Blocked"}: ${domain}`,
       async () => {
-        const restored = await undoLast();
-        if (restored) {
-          await removeEntry(domain!);
-          entries = entries.filter((e) => e.domain !== domain);
+        let res: Awaited<ReturnType<typeof undoLast>>;
+        try {
+          res = await undoLast(domain);
+        } catch {
+          showToast(`Could not undo block of ${domain}`, () => {}, "", 4000);
+          return;
+        }
+        if (res.restored) {
+          // Undo of this add = remove the entry (the background already did).
+          entries = entries.filter((e) => e.domain !== res.restored!.domain);
           refreshMatcher();
-          restoreByDomain(domain!, isStillBlockedNode);
+          updateCache();
+          const releasedRoots = restoreByDomain(res.restored!.domain, isStillBlockedNode);
           // Remove the :has() rule so the just-unblocked results become visible.
           updateHasRules();
+          // Hidden results carry no block button (only visible ones get one).
+          // Without this the undo leaves them restored but unblockable.
+          for (const n of releasedRoots) {
+            const nodeUrl = engine?.getResultUrl(n);
+            if (nodeUrl) injectButtonForResult(n, nodeUrl);
+          }
         }
       }
     );
@@ -2035,8 +2120,9 @@ function makeSuspendDeps(): SuspendDeps {
     // Updating only the sheet would leave them disagreeing, and a paused page
     // whose observer is stopped would pre-hide new nodes with no Show control.
     clearHasRules: () => {
-      (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
-        .__shhUpdateHas?.([], prefs!.subdomainWildcard);
+      (window as Window & {
+        __shhUpdateHas?: (d: string[], w: boolean, s?: boolean) => void;
+      }).__shhUpdateHas?.([], prefs!.subdomainWildcard, prefs!.stripWww);
     },
     // revealGoogleCover — without this, anything the preload cover left at
     // opacity:0 stays invisible AND unclickable (pointer-events:none) for a
@@ -2225,25 +2311,16 @@ async function refreshPrefs(source: "message" | "storage" = "message"): Promise<
           engine,
           container,
           (nodes) => processResults(nodes),
-          {
-            threshold: prefs.infiniteScrollThreshold,
-            maxPages: prefs.infiniteScrollMaxPages,
-            persist: prefs.infiniteScrollPersist,
-            freshnessMinutes: 30,
-            // See tryStartInfiniteScroll: per-engine anti-bot delay.
-            fetchDelay: engine.id === "startpage" ? 1500 : 600,
-            debugMode: prefs.debugMode,
-            // Startpage's fetched SSR markup uses class names the live
-            // client-rendered stylesheet never defines.
-            portFetchedStyles: engine.id === "startpage",
-            // See tryStartInfiniteScroll: third-party tier stays off to
-            // honor the zero-external-requests privacy promise.
-            allowThirdPartyIcons: false,
-          }
+          infiniteScrollPrefsFor(engine, prefs)
         );
         infiniteScrollManager.init();
       }
     }
+  } else if (infiniteScrollManager && engine) {
+    // The infinite-scroll toggle itself did not change, but threshold,
+    // maxPages, persistence or debug can still have changed. Pushing them
+    // into the live manager avoids "change the setting, reload the page".
+    infiniteScrollManager.updateConfig(infiniteScrollPrefsFor(engine, prefs));
   }
 }
 
@@ -2295,7 +2372,7 @@ function isStillBlockedNode(el: Element): boolean {
  */
 function refreshMatcher(): void {
   if (prefs) {
-    matcher = new DomainMatcher(entries, prefs.subdomainWildcard);
+    matcher = new DomainMatcher(entries, prefs.subdomainWildcard, prefs.stripWww);
   }
   syncDiag();
 }
@@ -2384,8 +2461,9 @@ function safeResultNodeCount(): number {
 // Safe no-op on Firefox < 121 (where __shhUpdateHas is never set) or when
 // prefs/entries are not yet loaded.
 function updateHasRules(): void {
-  const fn = (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
-    .__shhUpdateHas;
+  const fn = (window as Window & {
+    __shhUpdateHas?: (d: string[], w: boolean, s?: boolean) => void;
+  }).__shhUpdateHas;
   if (typeof fn !== "function" || !prefs) return;
   // Suspended ⇒ EMPTY list. The preload's :has() sheet and its JS `tryHide`
   // read the same array; leaving the block list in place on a paused page
@@ -2393,7 +2471,7 @@ function updateHasRules(): void {
   const blocked = engineActive
     ? entries.filter((e) => e.enabled).map((e) => e.domain)
     : [];
-  fn(blocked, prefs.subdomainWildcard);
+  fn(blocked, prefs.subdomainWildcard, prefs.stripWww);
 }
 
 // â”€â”€ injectHidingStyles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2434,7 +2512,11 @@ function earlyHideFromCache(): void {
     if (cache.paused) return;
     if (cache.domains.length === 0) return;
 
-    const cacheMatcher = new DomainMatcher(entriesFromCache(cache), cache.wildcard);
+    const cacheMatcher = new DomainMatcher(
+      entriesFromCache(cache),
+      cache.wildcard,
+      cache.stripWww
+    );
 
     for (const node of engine.getResultNodes(document)) {
       // Skip nodes the preload already marked or the content script stamped.

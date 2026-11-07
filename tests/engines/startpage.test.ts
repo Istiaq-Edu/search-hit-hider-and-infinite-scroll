@@ -146,6 +146,18 @@ describe("StartpageAdapter", () => {
       const doc = parseHTML(`<div class="result"><a class="result-title" href="/sp/search?query=x">internal</a></div>`);
       expect(adapter.getResultUrl(doc.querySelector(".result")!)).toBeNull();
     });
+
+    it("returns null for an absolute startpage.com link", () => {
+      // A link back into the engine is page furniture, not a destination;
+      // returning it would make the block button target Startpage.
+      const doc = parseHTML(`<div class="result"><a class="result-title" href="https://www.startpage.com/sp/search?query=x">internal</a></div>`);
+      expect(adapter.getResultUrl(doc.querySelector(".result")!)).toBeNull();
+    });
+
+    it("returns null for an unwrappable proxy link instead of the proxy URL", () => {
+      const doc = parseHTML(`<div class="result"><a class="result-title" href="https://us-browse.startpage.com/av/proxy?u=not-a-url">proxied</a></div>`);
+      expect(adapter.getResultUrl(doc.querySelector(".result")!)).toBeNull();
+    });
   });
 
   describe("getButtonTarget", () => {

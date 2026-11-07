@@ -1,5 +1,11 @@
 import type { BlockEntry, Prefs, EngineId } from "../shared/types";
 import { DEFAULT_PREFS } from "../shared/types";
+import {
+  MAX_CACHE_DOMAINS,
+  MAX_CACHE_RAW_LENGTH,
+  readCachePayload,
+  sanitizeCacheDomains,
+} from "./cache-limits";
 import { isEngineActive } from "./prefs-transition";
 
 // ============================================================
@@ -44,6 +50,7 @@ export const CACHE_KEY = "_shh_cache";
 export interface ShhCache {
   domains: string[];
   wildcard: boolean;
+  stripWww: boolean;
   paused: boolean;
   debug: boolean;
 }
@@ -53,17 +60,14 @@ export interface ShhCache {
  *
  * Returns null for absent or unparseable input — the caller must treat that as
  * "no idea", never as "the user has no blocks".
+ *
+ * The payload is UNTRUSTED: it sits in localStorage on the page's origin, so
+ * any script that ran there can rewrite it. Size, entry count and per-entry
+ * shape are all validated in cache-limits.ts.
  */
 export function parseCache(raw: string | null): ShhCache | null {
-  if (!raw) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null; // corrupt JSON — same as absent
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const c = parsed as Record<string, unknown>;
+  const c = readCachePayload(raw);
+  if (!c) return null;
 
   // A payload whose `domains` is absent or not an array is MALFORMED, and
   // malformed must mean "no idea" — never "the user has nothing blocked".
@@ -77,9 +81,17 @@ export function parseCache(raw: string | null): ShhCache | null {
   // is an array, so it parses. That is the distinction this check exists for.
   if (!Array.isArray(c.domains)) return null;
 
+  const stripWww = c.stripWww !== false;
+
   return {
-    domains: c.domains.filter((d): d is string => typeof d === "string"),
+    // Same sanitizer the preload uses, so the content script's cache-derived
+    // matcher cannot disagree with what the preload pre-hid (IDN punycoding,
+    // www handling, dotless/junk rejection, entry cap).
+    domains: sanitizeCacheDomains(c.domains, stripWww),
     wildcard: c.wildcard !== false,
+    // Absent in caches written before this field existed. Those were built
+    // while www-stripping was hard-coded on, so `true` is the correct default.
+    stripWww,
     paused: c.paused === true,
     debug: c.debug === true,
   };
@@ -89,6 +101,7 @@ export function serializeCache(cache: ShhCache): string {
   return JSON.stringify({
     domains: cache.domains,
     wildcard: cache.wildcard,
+    stripWww: cache.stripWww,
     paused: cache.paused,
     debug: cache.debug,
   });
@@ -108,12 +121,36 @@ export function buildCache(entries: BlockEntry[], prefs: Prefs, engineId: Engine
   // triplication the consolidation was meant to remove, reintroduced 600 lines
   // away. If you need this check, import the one.
   const active = isEngineActive(prefs, engineId);
-  return {
-    domains: active ? entries.filter((e) => e.enabled).map((e) => e.domain) : [],
+  const cache: ShhCache = {
+    domains: [],
     wildcard: prefs.subdomainWildcard,
+    stripWww: prefs.stripWww,
     paused: !active,
     debug: prefs.debugMode,
   };
+  if (!active) return cache;
+
+  // Bounded on the WRITE side, by BOTH caps the reader enforces. Counting
+  // entries alone was not enough: MAX_CACHE_DOMAINS entries of up to 253
+  // characters serialize to well over MAX_CACHE_RAW_LENGTH, and `readCachePayload`
+  // rejects the whole payload at that size. The cache was then rewritten with
+  // the same oversized list on every content-script pass, so pre-paint hiding
+  // stayed permanently inert for exactly the users with the largest lists.
+  // Measure the ACTUAL serialized length (JSON escaping included) instead of
+  // estimating; the first entry's cost overcounts by one comma, which only
+  // makes the bound stricter.
+  const domains = entries
+    .filter((e) => e.enabled)
+    .map((e) => e.domain)
+    .slice(0, MAX_CACHE_DOMAINS);
+  let size = serializeCache(cache).length;
+  for (const domain of domains) {
+    const cost = JSON.stringify(domain).length + 1;
+    if (size + cost > MAX_CACHE_RAW_LENGTH) break;
+    cache.domains.push(domain);
+    size += cost;
+  }
+  return cache;
 }
 
 /**
@@ -161,6 +198,7 @@ export function prefsFromCache(cache: ShhCache): Prefs {
     engineToggles: { ...DEFAULT_PREFS.engineToggles },
     pausedEngines: [...DEFAULT_PREFS.pausedEngines],
     subdomainWildcard: cache.wildcard,
+    stripWww: cache.stripWww,
     // Without this, a cold-start (degraded) load would silently turn Debug
     // mode off even though the user enabled it — and a cold start is one of
     // the situations most worth diagnosing.

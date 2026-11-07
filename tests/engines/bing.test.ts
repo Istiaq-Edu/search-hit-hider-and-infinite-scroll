@@ -90,4 +90,86 @@ describe("BingAdapter", () => {
       expect(adapter.getInsertionAnchor!(container)).toBeNull();
     });
   });
+
+  describe("getResultUrl", () => {
+    it("reads the real destination from the attribution cite", () => {
+      // Regression: the old selector required a NESTED li.b_algo inside the
+      // result and could never match, leaving every result on the redirect href.
+      const doc = parseHTML(`
+        <ol id="b_results">
+          <li class="b_algo">
+            <h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc">r</a></h2>
+            <div class="b_attribution"><cite>example.com › docs</cite></div>
+          </li>
+        </ol>`);
+      const node = doc.querySelector("li.b_algo")!;
+      expect(adapter.getResultUrl(node)).toBe("https://example.com/");
+    });
+
+    it("returns null instead of an unresolvable bing.com/ck/a redirect", () => {
+      const doc = parseHTML(`
+        <ol id="b_results">
+          <li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc">r</a></h2></li>
+        </ol>`);
+      const node = doc.querySelector("li.b_algo")!;
+      expect(adapter.getResultUrl(node)).toBeNull();
+    });
+
+    it("keeps a direct external h2 href", () => {
+      const doc = parseHTML(`
+        <ol id="b_results">
+          <li class="b_algo"><h2><a href="https://example.net/page">r</a></h2></li>
+        </ol>`);
+      const node = doc.querySelector("li.b_algo")!;
+      expect(adapter.getResultUrl(node)).toBe("https://example.net/page");
+    });
+
+    it("decodes a ck/a u=a1 base64url destination", () => {
+      const doc = parseHTML(`
+        <ol id="b_results">
+          <li class="b_algo">
+            <h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS9kb2Nz">r</a></h2>
+          </li>
+        </ol>`);
+      const node = doc.querySelector("li.b_algo")!;
+      expect(adapter.getResultUrl(node)).toBe("https://example.com/docs");
+    });
+
+    it("returns null for a ck/a token that is not decodable", () => {
+      const doc = parseHTML(`
+        <ol id="b_results">
+          <li class="b_algo">
+            <h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;u=opaque-token">r</a></h2>
+          </li>
+        </ol>`);
+      const node = doc.querySelector("li.b_algo")!;
+      expect(adapter.getResultUrl(node)).toBeNull();
+    });
+
+    it("never targets Bing from a bing.com cite", () => {
+      // Bing's own properties appear as results too; the block button must
+      // not hide the engine when that happens.
+      const doc = parseHTML(`
+        <ol id="b_results">
+          <li class="b_algo">
+            <h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc">r</a></h2>
+            <div class="b_attribution"><cite>www.bing.com › maps</cite></div>
+          </li>
+        </ol>`);
+      const node = doc.querySelector("li.b_algo")!;
+      expect(adapter.getResultUrl(node)).toBeNull();
+    });
+
+    it("a decodable ck/a token that resolves to Bing is rejected", () => {
+      // base64url("https://www.bing.com/maps")
+      const doc = parseHTML(`
+        <ol id="b_results">
+          <li class="b_algo">
+            <h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;u=a1aHR0cHM6Ly93d3cuYmluZy5jb20vbWFwcw">r</a></h2>
+          </li>
+        </ol>`);
+      const node = doc.querySelector("li.b_algo")!;
+      expect(adapter.getResultUrl(node)).toBeNull();
+    });
+  });
 });

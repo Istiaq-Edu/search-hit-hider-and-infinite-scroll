@@ -1,5 +1,6 @@
 import type { EngineAdapter } from "./base";
 import type { EngineId } from "../../shared/types";
+import { isHostWithin, parseHttpUrl } from "./url-utils";
 
 // ============================================================
 // Startpage adapter — www.startpage.com
@@ -98,10 +99,16 @@ export class StartpageAdapter implements EngineAdapter {
     const unwrapped = this.unwrapProxy(href);
     if (unwrapped) return unwrapped;
 
-    // Absolute external links only; Startpage-internal paths ("/do/...",
-    // "/sp/...") are not result destinations.
-    if (href.startsWith("http")) return href;
-    return null;
+    // Absolute external links only. A link that resolves back to Startpage or
+    // its proxy hosts is page furniture, not a result destination — returning
+    // it would make the block button target the engine.
+    const url = parseHttpUrl(href, "https://www.startpage.com");
+    if (!url) return null;
+    if (
+      isHostWithin(url.hostname, "startpage.com") ||
+      isHostWithin(url.hostname, "ixquick-proxy.com")
+    ) return null;
+    return url.toString();
   }
 
   /**
@@ -120,7 +127,8 @@ export class StartpageAdapter implements EngineAdapter {
       const q = href.slice(href.indexOf("?") + 1);
       // URLSearchParams.get() already percent-decodes the value once.
       const u = new URLSearchParams(q).get("u");
-      if (u && u.startsWith("http")) return u;
+      if (!u) return null;
+      return parseHttpUrl(u)?.toString() ?? null;
     } catch { /* malformed proxy link — fall through */ }
     return null;
   }

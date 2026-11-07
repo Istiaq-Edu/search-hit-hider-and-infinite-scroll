@@ -2,7 +2,7 @@
 // esbuild build script for Search-Hit-Hider Firefox extension
 
 import * as esbuild from "esbuild";
-import { copyFileSync, mkdirSync, readdirSync, statSync, existsSync, readFileSync } from "fs";
+import { copyFileSync, mkdirSync, readdirSync, statSync, existsSync, readFileSync, rmSync } from "fs";
 import { createHash } from "crypto";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -104,6 +104,12 @@ const sharedConfig = {
 };
 
 async function build() {
+  // A rebuild must not inherit artefacts from a previous one. Without this an
+  // entry point that was renamed or deleted keeps its old bundle in dist/, and
+  // `web-ext build` packages it into the release zip — shipping code that no
+  // longer exists in src/. dist/ is generated output, so deleting it is safe.
+  rmSync("dist", { recursive: true, force: true });
+
   mkdirSync("dist/background", { recursive: true });
   mkdirSync("dist/content", { recursive: true });
   mkdirSync("dist/popup", { recursive: true });

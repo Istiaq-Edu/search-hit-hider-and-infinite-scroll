@@ -22,6 +22,7 @@ export function OptionsPage() {
   const [entries, setEntries]         = useState<BlockEntry[]>([]);
   const [prefs, setPrefs]             = useState<Prefs>(DEFAULT_PREFS);
   const [loading, setLoading]         = useState(true);
+  const [loadError, setLoadError]     = useState<string | null>(null);
   const [feedback, setFeedback]       = useState<Feedback | null>(null);
   const [exportScope, setExportScope] = useState<ExportScope>("all");
   const [exportFmt, setExportFmt]     = useState<ExportFormat>("json");
@@ -79,13 +80,19 @@ export function OptionsPage() {
   }, [prefs.theme]);
 
   async function load() {
+    setLoading(true);
     try {
       const [listRes, prefsRes] = await Promise.all([
         browser.runtime.sendMessage({ type: "GET_LIST" }),
         browser.runtime.sendMessage({ type: "GET_PREFS" }),
       ]) as [{ entries: BlockEntry[] }, { prefs: Prefs }];
-      setEntries(listRes.entries);
+      setEntries(Array.isArray(listRes.entries) ? listRes.entries : []);
       setPrefs(prefsRes.prefs);
+      setLoadError(null);
+    } catch (err) {
+      // Without this the page kept rendering an authoritative-looking empty
+      // list and "0 total" after a failed background read.
+      setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -133,7 +140,10 @@ export function OptionsPage() {
     a.download = filename;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    flash(`Exported ${scoped.length} entr${scoped.length === 1 ? "y" : "ies"} as ${filename}`);
+    // Plain/userscript exports omit disabled entries, so reporting
+    // `scoped.length` promised more than the file contained.
+    const exported = exportFmt === "json" ? scoped.length : scoped.filter((e) => e.enabled).length;
+    flash(`Exported ${exported} entr${exported === 1 ? "y" : "ies"} as ${filename}`);
   }
 
   // ── Import ──────────────────────────────────────────────────────────────
@@ -147,7 +157,15 @@ export function OptionsPage() {
 
     const res = await browser.runtime.sendMessage({
       type: "BULK_IMPORT",
-      entries: imported.map((e) => ({ domain: e.domain, mode: e.mode })),
+      // Preserve enabled/createdAt: a JSON backup is a full backup, not just
+      // a domain list. The background previously received only domain/mode
+      // and re-enabled every disabled entry at import time.
+      entries: imported.map((e) => ({
+        domain: e.domain,
+        mode: e.mode,
+        enabled: e.enabled,
+        createdAt: e.createdAt,
+      })),
     }) as BulkImportResponse | null | undefined;
 
     if (!res || typeof res.added !== "number") {
@@ -172,7 +190,7 @@ export function OptionsPage() {
     try {
       await processText(await file.text());
     } catch (err) {
-      flash(`Failed to read file: ${err instanceof Error ? err.message : "Unknown error"}`, false);
+      flash(`Import failed: ${err instanceof Error ? err.message : "Unknown error"}`, false);
     } finally {
       importingRef.current = false;
       setImporting(false);
@@ -244,6 +262,24 @@ export function OptionsPage() {
     return (
       <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-3)" }}>
         Loading…
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div style={{ maxWidth: "620px", margin: "60px auto", padding: "0 24px" }}>
+        <div style={{ ...card, borderColor: "rgba(217,83,79,0.4)" }}>
+          <div style={{ fontWeight: 700, fontSize: "16px", color: "var(--danger)", marginBottom: "8px" }}>
+            Could not load your settings
+          </div>
+          <div style={{ fontSize: "13px", color: "var(--text-2)", marginBottom: "16px" }}>
+            {loadError}
+          </div>
+          <button onClick={() => void load()} style={btn("var(--accent)", "#fff")}>
+            Retry
+          </button>
+        </div>
       </div>
     );
   }

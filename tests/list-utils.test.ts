@@ -57,6 +57,19 @@ describe("addEntry", () => {
     expect(duplicate).toBe(true);
   });
 
+  it("keeps www when stripWww is off, and treats the bare host as distinct", () => {
+    const first = addEntry([], "www.example.com", "block", "end", { stripWww: false });
+    expect(first.added?.domain).toBe("www.example.com");
+
+    const second = addEntry(first.entries, "example.com", "block", "end", { stripWww: false });
+    expect(second.duplicate).toBe(false);
+    expect(second.added?.domain).toBe("example.com");
+    expect(second.entries).toHaveLength(2);
+
+    const again = addEntry(second.entries, "www.example.com", "block", "end", { stripWww: false });
+    expect(again.duplicate).toBe(true);
+  });
+
   it("adds at end by default (position=end)", () => {
     const initial = [e("a.com", "block", 1), e("b.com", "block", 2)];
     const { entries } = addEntry(initial, "c.com", "block", "end");
@@ -285,11 +298,14 @@ describe("applyBulkOp — dedup", () => {
     expect(result).toHaveLength(3);
   });
 
-  it("keeps first occurrence on dedup", () => {
+  it("merges duplicate fields, keeping the first position", () => {
     const first  = { ...e("a.com", "block"), createdAt: 1000 };
     const second = { ...e("a.com", "pban"),  createdAt: 2000 };
     const result = applyBulkOp([first, second], "dedup");
-    expect(result[0]?.mode).toBe("block");
+    expect(result).toHaveLength(1);
+    // pban is the stronger intent and must not be downgraded by a duplicate.
+    expect(result[0]?.mode).toBe("pban");
+    expect(result[0]?.createdAt).toBe(1000);
   });
 });
 
@@ -307,18 +323,38 @@ describe("applyBulkOp — sort_date", () => {
 // deduplicateEntries
 // ============================================================
 describe("deduplicateEntries", () => {
-  it("removes exact duplicates, keeps first", () => {
+  it("removes exact duplicates, merging fields into the first", () => {
     const first  = { ...e("a.com", "block"), createdAt: 1000 };
     const second = { ...e("a.com", "pban"),  createdAt: 2000 };
     const result = deduplicateEntries([first, second]);
     expect(result).toHaveLength(1);
-    expect(result[0]?.mode).toBe("block");
+    expect(result[0]?.mode).toBe("pban");
+    expect(result[0]?.enabled).toBe(true);
+    expect(result[0]?.createdAt).toBe(1000);
+  });
+
+  it("does not let a disabled duplicate discard an enabled one", () => {
+    const disabled = { ...e("spam.com", "block", 1000, false) };
+    const enabledPban = { ...e("spam.com", "pban", 2000, true) };
+    const result = deduplicateEntries([disabled, enabledPban]);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.enabled).toBe(true);
+    expect(result[0]?.mode).toBe("pban");
   });
 
   it("preserves order of first occurrences", () => {
     const list = [e("b.com"), e("a.com"), e("b.com"), e("c.com")];
     const result = deduplicateEntries(list);
     expect(result.map((x) => x.domain)).toEqual(["b.com", "a.com", "c.com"]);
+  });
+
+  it("keeps www and bare entries distinct (exact-host targets)", () => {
+    // With "Strip www." off these are two different exact hosts. The old
+    // www-insensitive key merged them and silently dropped one on import or
+    // on the "dedup" bulk action.
+    const list = [e("www.example.com"), e("example.com")];
+    const result = deduplicateEntries(list);
+    expect(result.map((x) => x.domain)).toEqual(["www.example.com", "example.com"]);
   });
 
   it("returns same list when no duplicates", () => {

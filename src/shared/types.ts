@@ -154,7 +154,10 @@ export interface BulkOpMsg {
 
 export interface BulkImportMsg {
   type: "BULK_IMPORT";
-  entries: Array<{ domain: string; mode: BlockMode }>;
+  entries: Array<
+    Pick<BlockEntry, "domain" | "mode"> &
+      Partial<Pick<BlockEntry, "enabled" | "createdAt">>
+  >;
 }
 export interface BulkImportResponse {
   added: number;
@@ -176,6 +179,12 @@ export interface SetPrefsMsg {
 
 export interface UndoLastMsg {
   type: "UNDO_LAST";
+  /** Scopes the undo to the domain the toast belongs to. */
+  domain?: string | undefined;
+}
+export interface UndoLastResponse {
+  restored: BlockEntry | null;
+  action: "add" | "remove" | null;
 }
 
 export type ExtMessage =

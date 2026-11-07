@@ -1,4 +1,9 @@
 import {
+  MAX_CSS_DOMAINS,
+  readCachePayload,
+  sanitizeCacheDomains,
+} from "./cache-limits";
+import {
   resolveGoogleStream,
   isGoogleNonResult,
   looksLikeGoogleSection,
@@ -99,26 +104,56 @@ import {
 (function shh_preload(): void {
 
   // ── 1. Read the synchronous cache ────────────────────────────────────────
-  let domains: string[] = [];
+  let domains: unknown[] = [];
   let wildcard = true;
+  let stripWww = true;
   let paused = false;
 
   try {
-    const raw = localStorage.getItem("_shh_cache");
-    if (raw) {
-      const c = JSON.parse(raw) as { domains?: string[]; wildcard?: boolean; paused?: boolean };
+    // UNTRUSTED INPUT. This key lives in localStorage on the PAGE's origin,
+    // where any script that ran on the search engine can read or rewrite it.
+    // The parse is bounded by raw length, the entries by count and hostname
+    // shape — see cache-limits.ts for what each cap prevents.
+    const c = readCachePayload(localStorage.getItem("_shh_cache"));
+    if (c) {
       domains = Array.isArray(c.domains) ? c.domains : [];
       wildcard = c.wildcard !== false;
+      // Absent in caches written before the preference was honoured; those
+      // were produced while www-stripping was hard-coded on.
+      stripWww = c.stripWww !== false;
       paused = c.paused === true;
     }
-  } catch { /* localStorage unavailable or JSON corrupted */ }
+  } catch { /* localStorage unavailable */ }
+
+  // Pause / engine-disable must stop ALL preload hiding. The main content
+  // script writes this flag whenever blocking is suspended for this engine;
+  // without it, paused users see results vanish with no placeholder or way
+  // to show them (the main script also skips processing when paused).
+  if (paused) domains = [];
+
+  // Sanitized matcher list. This is the ONLY list the preload hides from and
+  // the only one the cover/observer gates consult — raw cache length is never
+  // used, so a poisoned payload of junk cannot arm the Google cover with
+  // nothing to hide (a blank SERP until the rescan reveals it).
+  //
+  // `let`, not `const`: __shhUpdateHas rebinds these at runtime so a
+  // mid-session block-list change reaches the preload's OWN JS hiding path
+  // (tryHide → hostMatches → lc) as well as the :has() sheet. Updating only
+  // the sheet would leave the two preload layers disagreeing for the rest of
+  // the page — and after a suspend, the CSS layer empty while tryHide still
+  // hides, i.e. a paused page with new nodes hidden and no placeholder,
+  // because the content observer is stopped.
+  let lc = sanitizeCacheDomains(domains, stripWww);
+  let lcWildcard = wildcard;
+  let lcStripWww = stripWww;
+
   const buildV =
     typeof __SHH_BUILD__ !== "undefined"
       ? __SHH_BUILD__
       : (browser.runtime.getManifest?.().version ?? "?");
   // `buildV` already carries its own "v" (the stamp is "v1.8.20+<hash>"), so
   // the template must not add a second one.
-  console.log(`[SHH-preload ${buildV}] host=${location.hostname} domains=${domains.length} paused=${paused}`);
+  console.log(`[SHH-preload ${buildV}] host=${location.hostname} domains=${lc.length} raw=${domains.length} paused=${paused}`);
 
   // ── Preload-side timeline ───────────────────────────────────────────────
   // Both this and the content script record against the SAME document
@@ -136,7 +171,13 @@ import {
   const preloadDiag = {
     version: buildV,
     host: location.hostname,
-    domains: domains.length,
+    // Sanitized count — what the observer and :has() layer actually use.
+    domains: lc.length,
+    // Raw cache array length before caps/filtering. `domains` well below
+    // `cacheDomainsRaw` means the payload was truncated or carried junk,
+    // which is evidence of tampering or an oversized imported list.
+    cacheDomainsRaw: domains.length,
+    cacheDomainsCapped: 0,
     paused,
     hasRulesBuilt: 0,
     coverAttached: false,
@@ -159,7 +200,7 @@ import {
       "data-shh-preload-run",
       // `buildV` already begins with "v" (the stamp is "v1.8.20+<hash>"), so
       // this template must not prepend another - it read "v=v1.8.20+...".
-      `build=${buildV};host=${location.hostname};domains=${domains.length};paused=${paused}`
+      `build=${buildV};host=${location.hostname};domains=${lc.length};paused=${paused}`
     );
   } catch { /* ignore */ }
 
@@ -177,11 +218,9 @@ import {
     contentMarks: readContentMarks(),
   });
 
-  // Pause / engine-disable must stop ALL preload hiding. The main content
-  // script writes this flag whenever blocking is suspended for this engine;
-  // without it, paused users see results vanish with no placeholder or way
-  // to show them (the main script also skips processing when paused).
-  if (paused) domains = [];
+  // Pause / engine-disable clearing happens above, BEFORE `lc` is derived:
+  // the cover, the observer and the :has() layer must all be gated on the same
+  // sanitized list, or a paused tab can arm a cover it never reveals.
 
   // ── 2. Google detection (needed before adoptedStyleSheets setup) ──────────
   const isGoogle = (
@@ -226,7 +265,7 @@ import {
   // empty block list (whose preload IIFE returned early, so no observer and no
   // reveal existed at all — a blank SERP after Back).
   let coverArmed = false;
-  if (domains.length > 0 && isGoogle) {
+  if (lc.length > 0 && isGoogle) {
     coverArmed = true;
     try {
       document.documentElement.setAttribute("data-shh-active", "true");
@@ -457,61 +496,14 @@ import {
   // that actually cost something, and with an empty list there is nothing to
   // hide anyway.
   //
-  // `buildHasRules`, `sanitizeDomains`, `revealRemainingGoogle` and
-  // `injectCoverCSS` are function DECLARATIONS, so hoisting makes them safe to
-  // reference from here; only the `let` bindings had to move.
-
-  // Convert every entry to ASCII (punycode) form — hostnames parsed from
-  // page URLs are always ASCII, so a unicode entry would never match — and
-  // drop anything that still contains characters outside the hostname-safe
-  // set. Junk entries (hand-edited or imported lists) containing quotes or
-  // braces would otherwise break out of the CSS attribute selectors below
-  // and could invalidate an entire :is() rule batch.
-  const HOSTNAME_SAFE = /^[a-z0-9.-]+$/;
-
-  function sanitizeDomains(list: unknown): string[] {
-    const out: string[] = [];
-    const seen = new Set<string>();
-    // The CONTAINER needs a guard too, not just the elements. `__shhUpdateHas`
-    // is reachable from `index.ts` with anything the caller likes, and
-    // `for (const raw of list)` throws `TypeError: list is not iterable` for
-    // undefined/null/number/boolean — which, before the element guard existed,
-    // escaped the whole IIFE and left the Google cover permanently up. The
-    // element check below is not a substitute for this one.
-    if (!Array.isArray(list)) return out;
-    for (const raw of list as unknown[]) {
-      // MUST be a string. `Array.isArray` on the cache payload validates the
-      // container, not the elements, and `_shh_cache` lives in localStorage on
-      // the PAGE's origin — writable by any script that has run there (the
-      // repo's own A4-FYI records this). A payload like {"domains":[{}]} used
-      // to throw `raw.trim is not a function` HERE, at module scope, which
-      // escaped the whole preload IIFE: __shhRevealGoogle was never installed,
-      // the observer never started, and every Google result stayed at the
-      // cover's `opacity:0 !important; pointer-events:none !important`. The
-      // visible result was a blank, unclickable SERP with no error anywhere.
-      if (typeof raw !== "string") continue;
-      let d = raw.trim().toLowerCase();
-      if (d.startsWith("www.")) d = d.slice(4);
-      try {
-        d = new URL("https://" + d).hostname;
-      } catch { /* unparseable — the safety check below rejects it */ }
-      if (!d || !HOSTNAME_SAFE.test(d) || seen.has(d)) continue;
-      seen.add(d);
-      out.push(d);
-    }
-    return out;
-  }
-
-  // `let`, not `const`: __shhUpdateHas rebinds these so a runtime block-list
-  // change reaches the preload's OWN JS hiding path (tryHide → hostMatches →
-  // lc) as well as the :has() sheet. Updating only the sheet would leave the
-  // two preload layers disagreeing for the rest of the page — and after a
-  // suspend, the CSS layer empty while tryHide still hides, i.e. a paused page
-  // with new nodes hidden and no placeholder, because the content observer is
-  // stopped. That is the failure the 2026-08-30 diagnosis named: no
-  // independent layers.
-  let lc = sanitizeDomains(domains);
-  let lcWildcard = wildcard;
+  // `buildHasRules`, `revealRemainingGoogle` and `injectCoverCSS` are function
+  // DECLARATIONS, so hoisting makes them safe to reference from here; only the
+  // `let` bindings had to move.
+  //
+  // Cache sanitization lives in cache-limits.ts (shared with cache-state.ts)
+  // and runs before this block; the local copy that used to sit here stripped
+  // `www.` unconditionally and had no bounds, so the content script and the
+  // preload could disagree about what an entry matched.
 
   // The `:has()` layer's sheet handle. Declared here (not next to
   // buildHasRules) so __shhUpdateHas can exist before the early return.
@@ -521,11 +513,17 @@ import {
   // Runtime list replacement from the content script. Rebinds `lc` as well as
   // rebuilding the sheet, so the preload's own JS hiding path and the CSS layer
   // can never disagree.
-  (window as Window & { __shhUpdateHas?: (d: string[], w: boolean) => void })
-    .__shhUpdateHas = (newDomains: string[], newWildcard: boolean): void => {
-    lc = sanitizeDomains(newDomains);
+  (window as Window & {
+    __shhUpdateHas?: (d: string[], w: boolean, s?: boolean) => void;
+  }).__shhUpdateHas = (
+    newDomains: string[],
+    newWildcard: boolean,
+    newStripWww = true
+  ): void => {
+    lc = sanitizeCacheDomains(newDomains, newStripWww);
     lcWildcard = newWildcard;
-    buildHasRules(lc, lcWildcard);
+    lcStripWww = newStripWww;
+    buildHasRules(lc, lcWildcard, lcStripWww);
   };
 
   // ── 7. Reveal helper ──────────────────────────────────────────────────────
@@ -764,19 +762,27 @@ import {
 
   // Nothing blocked in the cache. The hooks above are installed; the OBSERVER
   // and the scans are not, because with an empty list there is nothing to hide
-  // and both cost real per-mutation work.
-  if (domains.length === 0) {
+  // and both cost real per-mutation work. Gated on the SANITIZED list: a
+  // poisoned payload of junk entries must not start the observer (or, above,
+  // arm the cover) with nothing it could ever match.
+  if (lc.length === 0) {
     preloadDiag.preloadSkipReason = "no blocked domains in cache (hooks installed, observer not started)";
     return;
   }
   preloadDiag.preloadSkipReason = "ran fully";
 
   // ── 5. Build a fast in-memory matcher ────────────────────────────────────
-  // (sanitizeDomains, `lc`, `lcWildcard` and the four window hooks are declared
+  // (`lc`, `lcWildcard`, `lcStripWww` and the four window hooks are declared
   //  ABOVE the empty-list early return, so a paused-at-load tab can still be
-  // driven. Only the observer and the scans are gated.)
+  //  driven. Only the observer and the scans are gated.)
   function hostMatches(host: string): boolean {
-    const h = host.toLowerCase().replace(/^www\./, "");
+    // Trailing root-zone dots survive in href hostnames ("example.com.")
+    // while every cache entry is normalized without them (cache-limits.ts),
+    // so not stripping here silently failed to pre-hide that link.
+    const lowered = host.toLowerCase().replace(/\.+$/, "");
+    // With "Strip www." on, www is treated as an alias of the bare host. With
+    // it off, the www label is significant so an exact-host entry stays exact.
+    const h = lcStripWww ? lowered.replace(/^www\./, "") : lowered;
     return lc.some(d => h === d || (lcWildcard && h.endsWith("." + d)));
   }
 
@@ -991,12 +997,32 @@ import {
   //
   // `hasSheet` itself is declared ABOVE the empty-list early return, so
   // __shhUpdateHas can exist on a paused-at-load tab.
-  function buildHasRules(curLc: string[], curWild: boolean): void {
+  function buildHasRules(
+    curLc: string[],
+    curWild: boolean,
+    curStripWww: boolean
+  ): void {
     try {
       const isNew = !hasSheet;
       // Build all rules as a single string for batch replacement
       const rules: string[] = [];
       const BATCH_SIZE = 50; // domains per :is() group to avoid selector length limits
+      // BOUNDED SELECTOR COST. The cache is writable by the page, and each
+      // domain here costs up to nine selector fragments that the style engine
+      // re-evaluates on mutations. Above the cap the JS path still matches
+      // (tryHide uses the full list), so blocking is not lost — only the
+      // CSS fast path for the excess. Count exposed for field diagnosis.
+      const cssDomains = curLc.length > MAX_CSS_DOMAINS
+        ? curLc.slice(0, MAX_CSS_DOMAINS)
+        : curLc;
+      preloadDiag.cacheDomainsCapped = curLc.length - cssDomains.length;
+      // The explicit `www.` href patterns are an alias for the bare domain.
+      // They are only valid when www is not significant: stripping is on, or
+      // wildcard matching already covers the label. With strip-www OFF and
+      // wildcard OFF, adding them would hide www.example.com for an exact
+      // example.com entry — a result the JS matcher considers unblocked, so it
+      // would have no placeholder and no Show control.
+      const includeWwwAliases = curStripWww || curWild;
 
       // SUBJECT SCOPING (Yandex slowness field report 2026-11-07): the style
       // engine re-evaluates :has() rules on DOM mutations, so the subject list
@@ -1009,18 +1035,22 @@ import {
       // which re-runs this whole script.
       const subjects = hasSubjectsFor(location.hostname) ?? SELS;
 
-      for (let i = 0; i < curLc.length; i += BATCH_SIZE) {
-        const batch = curLc.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < cssDomains.length; i += BATCH_SIZE) {
+        const batch = cssDomains.slice(i, i + BATCH_SIZE);
         const hrefs: string[] = [];
         for (const d of batch) {
           hrefs.push(
             `a[href*="://${d}/"]`,
             `a[href*="://${d}?"]`,
-            `a[href*="://${d}&"]`,
-            `a[href*="://www.${d}/"]`,
-            `a[href*="://www.${d}?"]`,
-            `a[href*="://www.${d}&"]`
+            `a[href*="://${d}&"]`
           );
+          if (includeWwwAliases) {
+            hrefs.push(
+              `a[href*="://www.${d}/"]`,
+              `a[href*="://www.${d}?"]`,
+              `a[href*="://www.${d}&"]`
+            );
+          }
           if (curWild) {
             hrefs.push(
               `a[href*=".${d}/"]`,
@@ -1107,7 +1137,7 @@ import {
   }
 
   // Initial build from the preload cache domains.
-  buildHasRules(lc, lcWildcard);
+  buildHasRules(lc, lcWildcard, lcStripWww);
 
   // ── 8. Hide a single result element if its URL is blocked ────────────────
   function tryHide(el: Element): void {
@@ -1305,7 +1335,7 @@ import {
     // which hide a node the content script's matcher says is NOT blocked — with
     // no data-shh-preloaded attribute, so nothing can ever reveal it. That is
     // the A2-F2 shape ("hidden with NO placeholder, NO Show, NO Unblock").
-    buildHasRules(lc, lcWildcard);
+    buildHasRules(lc, lcWildcard, lcStripWww);
 
     // Google: clear any stale data-shh-ok markers so every result is
     // re-evaluated from scratch.  This handles the case where Google did a

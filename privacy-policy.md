@@ -10,6 +10,7 @@ Search-Hit-Hider does not collect, transmit, or share any personal data. Everyth
 
 - **Block lists** are stored locally in your browser using `storage.local`. They never leave your device unless you explicitly export them.
 - **Settings and preferences** are stored using `storage.sync`, which means Firefox may sync them to other devices signed into the same Firefox Account — this is handled entirely by Firefox/Mozilla, not by this extension.
+- **Pre-paint cache**: to hide blocked results before a search page first renders, a minimal copy of the enabled block list (the domain names, plus the wildcard, strip-www, paused and debug flags) is written to the search engine page's own `localStorage` under the key `_shh_cache`. JavaScript running on that search engine's page can read values in its own site storage, exactly as it can read any other `localStorage` entry. The cache is never transmitted over the network by this extension, carries no identifier, and can be removed at any time by clearing site data for that search engine (or by disabling the extension). It is limited in size and validated before use.
 
 ## Data Transmission
 

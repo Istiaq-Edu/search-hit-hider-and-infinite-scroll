@@ -73,15 +73,18 @@ describe("parsers reject junk entries", () => {
   });
 });
 
-describe("deduplicateEntries is case/www insensitive", () => {
-  it("collapses X.com / x.com / www.x.com into one", () => {
+describe("deduplicateEntries is case-insensitive but www-sensitive", () => {
+  it("collapses case variants while keeping www and bare hosts distinct", () => {
+    // With "Strip www." OFF, x.com and www.x.com are different exact-host
+    // targets; merging them silently dropped a block the user asked for.
+    // (The explicit un-www bulk action still collapses them on demand.)
     const out = deduplicateEntries([
       { domain: "X.com", mode: "block", enabled: true, createdAt: 1 },
       { domain: "x.com", mode: "block", enabled: true, createdAt: 2 },
       { domain: "www.x.com", mode: "block", enabled: true, createdAt: 3 },
       { domain: "y.com", mode: "block", enabled: true, createdAt: 4 },
     ]);
-    expect(out.map((e) => e.domain)).toEqual(["X.com", "y.com"]);
+    expect(out.map((e) => e.domain)).toEqual(["X.com", "www.x.com", "y.com"]);
   });
 });
 

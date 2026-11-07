@@ -331,4 +331,49 @@ describe("YandexAdapter", () => {
       expect(adapter.getFetchWrapper(doc)).toBeNull();
     });
   });
+
+  describe("getResultUrl", () => {
+    it("returns a direct external title link", () => {
+      const doc = parseHTML(`
+        <li class="serp-item">
+          <h2><a class="OrganicTitle-Link" href="https://example.com/page">r</a></h2>
+        </li>`);
+      expect(adapter.getResultUrl(doc.querySelector("li")!)).toBe("https://example.com/page");
+    });
+
+    it("unwraps a redirect whose url param holds the destination", () => {
+      const doc = parseHTML(`
+        <li class="serp-item">
+          <h2><a class="OrganicTitle-Link" href="https://yabs.yandex.ru/count/abc?url=https%3A%2F%2Fexample.org%2Fdoc">r</a></h2>
+        </li>`);
+      expect(adapter.getResultUrl(doc.querySelector("li")!)).toBe("https://example.org/doc");
+    });
+
+    it("returns null for an undecodable yandex redirect with no visible domain", () => {
+      // Regression: falling back to the redirect href made the block button
+      // target yandex.ru instead of the destination.
+      const doc = parseHTML(`
+        <li class="serp-item">
+          <h2><a class="OrganicTitle-Link" href="https://yabs.yandex.ru/count/abc">r</a></h2>
+        </li>`);
+      expect(adapter.getResultUrl(doc.querySelector("li")!)).toBeNull();
+    });
+
+    it("falls back to the displayed domain when the redirect carries no target", () => {
+      const doc = parseHTML(`
+        <li class="serp-item">
+          <a class="OrganicTitle-Link" href="https://yandex.ru/redirect?foo=1">r</a>
+          <div class="organic__path">example.net › docs</div>
+        </li>`);
+      expect(adapter.getResultUrl(doc.querySelector("li")!)).toBe("https://example.net/");
+    });
+
+    it("treats a yabs.yandex subdomain as a redirect, not a destination", () => {
+      const doc = parseHTML(`
+        <li class="serp-item">
+          <a class="OrganicTitle-Link" href="https://yabs.yandex.ru/count/abc?u=https%3A%2F%2Fexample.com%2Fx">r</a>
+        </li>`);
+      expect(adapter.getResultUrl(doc.querySelector("li")!)).toBe("https://example.com/x");
+    });
+  });
 });

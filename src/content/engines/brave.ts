@@ -102,22 +102,51 @@ export class BraveAdapter implements EngineAdapter {
   // ── Infinite scroll ──────────────────────────────────────────────────
 
   getNextPageUrl(doc: Document): string | null {
-    // Strategy 1: Find Next button href in the DOM
-    const selectors = [
-      'a[href*="offset="]:not([disabled])',
-      'a[aria-label="Next"]',
-      '.ml-15 a[href]',
-    ];
-    for (const sel of selectors) {
+    // Prefer the document's own URL when the environment supplies one; a
+    // DOMParser document reports "about:blank" and relies on the injected
+    // <base href> for baseURI. doc.baseURI alone is wrong in test/iframe
+    // environments whose window URL has nothing to do with the parsed page.
+    const docUrl = doc.URL;
+    const base = /^https?:/i.test(docUrl) ? docUrl : doc.baseURI;
+    if (!base || !/^https?:/i.test(base)) return null;
+
+    let currentOffset = 0;
+    try {
+      currentOffset = parseInt(new URL(base).searchParams.get("offset") ?? "0", 10) || 0;
+    } catch { /* unparsable base — fall through with offset 0 */ }
+
+    // An explicit Next control is the most reliable signal.
+    for (const sel of ['a[aria-label="Next page"]', 'a[aria-label="Next"]']) {
       const btn = doc.querySelector<HTMLAnchorElement>(sel);
-      if (btn?.href) return btn.href;
+      if (btn?.href && btn.getAttribute("aria-disabled") !== "true") return btn.href;
     }
 
-    // Strategy 2: Construct URL from offset parameter
+    // Offset links: choose the SMALLEST offset greater than the current one.
+    // `querySelector` used to take the first match, which is the pager's own
+    // "1" link on some builds — auto-load then re-fetched page 1 forever.
+    let bestOffset = Number.POSITIVE_INFINITY;
+    let bestHref: string | null = null;
+    for (const a of Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href*="offset="]'))) {
+      let u: URL;
+      try {
+        u = new URL(a.getAttribute("href") ?? "", base);
+      } catch {
+        continue;
+      }
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      const off = parseInt(u.searchParams.get("offset") ?? "", 10);
+      if (!Number.isFinite(off) || off <= currentOffset) continue;
+      if (off < bestOffset) {
+        bestOffset = off;
+        bestHref = u.toString();
+      }
+    }
+    if (bestHref) return bestHref;
+
+    // Last resort: construct the next offset. Brave caps it at 9.
     try {
-      const url = new URL(doc.URL);
-      const currentOffset = parseInt(url.searchParams.get("offset") ?? "0", 10);
-      if (currentOffset >= 9) return null; // Brave caps offset at 9
+      if (currentOffset >= 9) return null;
+      const url = new URL(base);
       url.searchParams.set("offset", String(currentOffset + 1));
       return url.toString();
     } catch {

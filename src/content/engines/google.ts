@@ -2,6 +2,7 @@ import type { EngineAdapter } from "./base";
 import type { EngineId } from "../../shared/types";
 import { isDebugMode } from "../debug";
 import { containsProcessed } from "../blocking/dedupe";
+import { isGoogleSearchHost } from "./google-hosts";
 import {
   collectGoogleResults,
   isGoogleNonResult,
@@ -29,15 +30,7 @@ export class GoogleAdapter implements EngineAdapter {
   private isNews = false;
 
   matches(url: URL): boolean {
-    const h = url.hostname;
-    return (
-      h === "www.google.com" ||
-      h.startsWith("www.google.") ||
-      h.startsWith("google.co") ||
-      h === "news.google.com" ||
-      h.startsWith("news.google.") ||
-      h === "encrypted.google.com"
-    );
+    return isGoogleSearchHost(url.hostname);
   }
 
   onInit(doc: Document): void {

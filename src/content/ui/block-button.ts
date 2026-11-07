@@ -60,6 +60,9 @@ export function injectBlockButton(
   btn.title = "Block this domain with Search-Hit-Hider";
   btn.setAttribute("aria-label", "Block domain from search results");
   btn.addEventListener("click", (e) => {
+    // Page scripts share the DOM and can dispatch synthetic clicks on our
+    // injected controls. Only a real user activation may mutate the blocklist.
+    if (!e.isTrusted) return;
     e.preventDefault();
     e.stopPropagation();
     onClick(e);
@@ -83,6 +86,43 @@ export function injectBlockButton(
   // so every later scan skipped it.
   container.setAttribute(ATTR_HAS_BTN, "1");
   return btn;
+}
+
+export interface ButtonTarget {
+  target: Element;
+  insertPosition: "after" | "before";
+}
+
+/**
+ * Resolve where the block button should go for `engineId`.
+ *
+ * Brave's `a.l1` is a full-width flex row: inserting the button inside it
+ * pushes the button to the far right. Wrapping the anchor in a tight flex row
+ * keeps it next to the favicon.
+ *
+ * The wrapper check makes this idempotent. Re-scans, restores and config
+ * updates re-enter this function for an anchor that is ALREADY wrapped;
+ * wrapping again nests flex rows and drifts the button left on every pass.
+ */
+export function prepareButtonTarget(target: Element, engineId: string): ButtonTarget {
+  if (engineId !== "brave" || target.tagName.toLowerCase() !== "a") {
+    return { target, insertPosition: "after" };
+  }
+
+  const parent = target.parentElement;
+  if (parent?.classList.contains("shh-btn-row")) {
+    // Step out to the wrapper. Continuing with the anchor would insert the
+    // button INSIDE the flex row but after the link, reversing the layout.
+    return { target: parent, insertPosition: "before" };
+  }
+
+  const wrapper = document.createElement("span");
+  wrapper.className = "shh-btn-row";
+  wrapper.style.cssText =
+    "display:inline-flex;align-items:center;gap:6px;width:fit-content;max-width:100%;";
+  target.replaceWith(wrapper);
+  wrapper.appendChild(target);
+  return { target: wrapper, insertPosition: "before" };
 }
 
 /**

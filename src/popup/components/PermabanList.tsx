@@ -16,6 +16,7 @@ export function PermabanList({ entries, onRefresh }: Props) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("date_desc");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [actionError, setActionError] = useState("");
 
   const pbanEntries = entries.filter((e) => e.mode === "pban");
   const filtered = useMemo(
@@ -24,19 +25,37 @@ export function PermabanList({ entries, onRefresh }: Props) {
   );
 
   async function handleRemove(domain: string) {
-    await browser.runtime.sendMessage({ type: "REMOVE_ENTRY", domain });
+    try {
+      await browser.runtime.sendMessage({ type: "REMOVE_ENTRY", domain });
+    } catch {
+      setActionError(`Could not remove ${domain}.`);
+      return;
+    }
+    setActionError("");
     setSelected((s) => { const n = new Set(s); n.delete(domain); return n; });
     await onRefresh();
   }
 
   async function handleToggle(domain: string, enabled: boolean) {
-    await browser.runtime.sendMessage({ type: "UPDATE_ENTRY", domain, patch: { enabled } });
+    try {
+      await browser.runtime.sendMessage({ type: "UPDATE_ENTRY", domain, patch: { enabled } });
+    } catch {
+      setActionError(`Could not update ${domain}.`);
+      return;
+    }
+    setActionError("");
     await onRefresh();
   }
 
   async function handleBulk(op: BulkOperation) {
     const domains = selected.size > 0 ? Array.from(selected) : undefined;
-    await browser.runtime.sendMessage({ type: "BULK_OP", op, domains });
+    try {
+      await browser.runtime.sendMessage({ type: "BULK_OP", op, domains });
+    } catch {
+      setActionError("Bulk action failed — extension background unavailable.");
+      return;
+    }
+    setActionError("");
     setSelected(new Set());
     await onRefresh();
   }
@@ -62,6 +81,19 @@ export function PermabanList({ entries, onRefresh }: Props) {
       }}>
         Perma-banned domains are <strong>completely invisible</strong> in search results — no placeholder shown. Managed only here.
       </div>
+
+      {actionError && (
+        <div role="alert" style={{
+          padding: "6px 12px",
+          background: "rgba(217,83,79,0.1)",
+          borderBottom: "1px solid var(--border)",
+          fontSize: "11px",
+          color: "var(--danger)",
+          flexShrink: 0,
+        }}>
+          {actionError}
+        </div>
+      )}
 
       {/* Search + sort */}
       <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)", display: "flex", gap: "6px", flexShrink: 0 }}>

@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { GOOGLE_HOSTS } from "../src/content/engines/google-hosts";
+import { YANDEX_HOSTS } from "../src/content/engines/yandex";
 
 // Read rather than import: the manifest sits outside tsconfig's `include`
 // (["src/**/*", "tests/**/*"]), so a JSON import would sit outside the tsc gate
@@ -15,39 +17,50 @@ const manifest = JSON.parse(
   manifest_version: number;
   background: { service_worker?: string; scripts: string[]; type: string };
   content_scripts: Array<{ matches: string[]; js: string[]; run_at?: string }>;
+  host_permissions: string[];
 };
 
 // ============================================================
-// manifest wiring
+// manifest background wiring
 //
-// E1: `manifest.json` declared `background.scripts` with NO `service_worker`
-// key. That is valid for Firefox MV3 (an event page) but Chrome MV3 REQUIRES
-// `background.service_worker` and ignores `background.scripts` — so on Chrome
-// the extension loads with no background context at all. Every sendMessage then
-// rejects, getList()/getPrefs() fail, and the popup reports an empty block list
-// while storage is full.
+// This is a Firefox-only extension: it uses the `browser.*` namespace with no
+// Chrome polyfill, and ships through AMO/web-ext. Firefox MV3 uses an event
+// page declared via `background.scripts`. `background.service_worker` is the
+// Chrome spelling; Firefox reports it as MANIFEST_FIELD_UNSUPPORTED.
 //
-// Both keys are now present: Firefox uses `scripts`, Chrome uses
-// `service_worker`.
+// Worse than a warning: before Firefox 120, a manifest that declared
+// `service_worker` caused Firefox NOT to start the background context at all.
+// The previous revision declared both "for Chrome compatibility" and a test
+// comment asserted Firefox ignored the extra key. MDN documents the opposite,
+// and `web-ext lint` flags it. Declaring an unsupported key provided no
+// benefit (the code cannot run on Chrome anyway) and broke the stated 112+
+// floor.
 // ============================================================
 
-describe("manifest background wiring (E1)", () => {
-  it("declares service_worker for Chrome MV3", () => {
-    expect(manifest.background).toHaveProperty("service_worker");
-    expect(manifest.background.service_worker).toBe("background/service-worker.js");
-  });
-
-  it("keeps scripts for Firefox MV3", () => {
+describe("manifest background wiring (Firefox MV3)", () => {
+  it("declares background.scripts", () => {
     expect(manifest.background.scripts).toContain("background/service-worker.js");
   });
 
-  it("points both at the same file", () => {
-    const bg = manifest.background as { service_worker: string; scripts: string[] };
-    expect(bg.scripts).toContain(bg.service_worker);
+  it("does not declare the Chrome-only service_worker key", () => {
+    expect(manifest.background).not.toHaveProperty("service_worker");
   });
 
-  it("is a module background in both dialects", () => {
+  it("is a module background", () => {
     expect(manifest.background.type).toBe("module");
+  });
+
+  it("declares a Firefox version floor that supports its required features", () => {
+    const manifestWithGecko = JSON.parse(
+      readFileSync(resolve(here, "..", "manifest.json"), "utf8")
+    ) as {
+      browser_specific_settings?: { gecko?: { strict_min_version?: string } };
+    };
+    const floor = manifestWithGecko.browser_specific_settings?.gecko?.strict_min_version;
+    expect(floor).toBeDefined();
+    // :has() ships enabled-by-default in Firefox 121. The pre-paint CSS layer
+    // depends on it; older versions fall back to JS but flicker.
+    expect(Number.parseInt(floor!, 10)).toBeGreaterThanOrEqual(121);
   });
 
   it("build.js copies manifest.json into dist/ verbatim", () => {
@@ -70,19 +83,13 @@ describe("manifest background wiring (E1)", () => {
   // `npm test`, and the guard is kept only as a safety net for a direct
   // `npx vitest run`.
   it.skipIf(!existsSync(distManifestPath))(
-    "dist/ manifest resolves BOTH background keys to real bundled files",
+    "dist/ manifest resolves the Firefox background file",
     () => {
       const d = JSON.parse(readFileSync(distManifestPath, "utf8")) as {
         background: { service_worker?: string; scripts: string[] };
       };
-      // `scripts` is what FIREFOX loads (this is a Firefox-only extension:
-      // `browser.*`, no chrome polyfill, target firefox109). `service_worker`
-      // is the Chrome spelling; `web-ext lint` reports it as
-      // MANIFEST_FIELD_UNSUPPORTED — a WARNING, i.e. Firefox ignores it, which
-      // is why declaring both is safe. Both are asserted so neither can
-      // silently start pointing at a file the build does not emit.
       expect(d.background.scripts).toEqual(["background/service-worker.js"]);
-      expect(d.background.service_worker).toBe("background/service-worker.js");
+      expect(d.background).not.toHaveProperty("service_worker");
       expect(
         existsSync(resolve(here, "..", "dist", "background", "service-worker.js"))
       ).toBe(true);
@@ -183,5 +190,84 @@ describe("manifest content-script run_at", () => {
       );
       expect(main, `no main content script for ${host}`).toBeDefined();
     }
+  });
+});
+
+describe("manifest engine-host alignment", () => {
+  const blocks = manifest.content_scripts;
+  const preload = blocks.find((b) => b.js.some((f) => f.includes("preload")))!;
+  const mainFor = (needle: string) =>
+    blocks.find(
+      (b) => b.js.some((f) => f.includes("index.js")) && b.matches.some((m) => m.includes(needle))
+    )!;
+  const googleMain = mainFor("google.");
+  const yandexMain = mainFor("yandex.");
+
+  const pattern = (host: string) => `*://*.${host}/*`;
+
+  it("preload coverage equals the union of every main script's coverage", () => {
+    // Drift here splits the two halves of the extension: the preload hides a
+    // result at document_start but no index.js ever runs to place a button,
+    // or index.js runs with preload CSS absent (flicker). Neither failure is
+    // visible on any other test.
+    const preloadSet = new Set(preload.matches);
+    const mainUnion = new Set(blocks.filter((b) => b !== preload).flatMap((b) => b.matches));
+    expect([...mainUnion].filter((m) => !preloadSet.has(m))).toEqual([]);
+    expect([...preloadSet].filter((m) => !mainUnion.has(m))).toEqual([]);
+  });
+
+  it("covers every Google host the adapter recognizes, in both scripts", () => {
+    for (const host of GOOGLE_HOSTS) {
+      expect(preload.matches, `preload missing ${host}`).toContain(pattern(host));
+      expect(googleMain.matches, `Google main script missing ${host}`).toContain(pattern(host));
+    }
+  });
+
+  it("covers every Yandex host the adapter recognizes, in both scripts", () => {
+    // Yandex's adapter list used to be more than twice the manifest list, so
+    // detection claimed support for portals where no content script ever ran.
+    for (const host of YANDEX_HOSTS) {
+      expect(preload.matches, `preload missing ${host}`).toContain(pattern(host));
+      expect(yandexMain.matches, `Yandex main script missing ${host}`).toContain(pattern(host));
+    }
+  });
+});
+
+describe("release version consistency", () => {
+  it("keeps manifest, package.json and package-lock.json in step", () => {
+    // The release workflow bumps all three together, but a manual bump (or a
+    // failed lock update) can leave AMO, npm and the source zip disagreeing.
+    // The lockfile's root entry is what `npm ci` reports and what reviewers
+    // compare against manifest.json.
+    const root = resolve(here, "..");
+    const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as {
+      version: string;
+    };
+    const lock = JSON.parse(readFileSync(resolve(root, "package-lock.json"), "utf8")) as {
+      version: string;
+      packages: Record<string, { version?: string }>;
+    };
+
+    expect(pkg.version).toBe(manifest.version);
+    expect(lock.version).toBe(manifest.version);
+    expect(lock.packages[""]?.version).toBe(manifest.version);
+  });
+});
+
+describe("host permission parity", () => {
+  it("grants host_permissions for exactly the preload match list", () => {
+    // BEFORE the host-list expansion these two arrays were byte-for-byte the
+    // same 60 patterns. Expanding content_scripts.matches without
+    // regenerating host_permissions leaves ~169 origins injected but
+    // unprivileged for any extension-origin operation, and keeps 9 orphaned
+    // bare-host Yandex patterns nobody needs. Pin the invariant here so the
+    // next host addition cannot drift silently again.
+    const preload = manifest.content_scripts.find((b) =>
+      b.js.some((f) => f.includes("preload"))
+    )!;
+    const missing = preload.matches.filter((m) => !manifest.host_permissions.includes(m));
+    const orphaned = manifest.host_permissions.filter((m) => !preload.matches.includes(m));
+    expect(missing).toEqual([]);
+    expect(orphaned).toEqual([]);
   });
 });

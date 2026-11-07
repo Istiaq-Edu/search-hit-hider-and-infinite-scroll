@@ -1,5 +1,6 @@
 import type { EngineAdapter } from "./base";
 import type { EngineId } from "../../shared/types";
+import { isHostWithin, parseHttpUrl } from "./url-utils";
 
 // ============================================================
 // Baidu adapter
@@ -25,19 +26,26 @@ export class BaiduAdapter implements EngineAdapter {
 
   getResultUrl(node: Element): string | null {
     // Baidu uses redirect URLs — extract from data-mu attribute or cite
-    const mu = node.getAttribute("mu");
-    if (mu) return mu;
+    const muUrl = parseHttpUrl(node.getAttribute("mu") ?? "");
+    // An mu pointing at baidu.com describes Baidu's own property; blocking it
+    // would hide the engine rather than the result.
+    if (muUrl && !isHostWithin(muUrl.hostname, "baidu.com")) return muUrl.toString();
 
     const cite = node.querySelector("a.c-showurl[href]");
     if (cite) {
       const text = cite.textContent?.trim();
       if (text && text.includes(".")) {
-        return text.startsWith("http") ? text : "https://" + text;
+        const url = parseHttpUrl(text.startsWith("http") ? text : "https://" + text);
+        if (url && !isHostWithin(url.hostname, "baidu.com")) return url.toString();
       }
     }
 
+    // h3 hrefs are usually /link?url=<opaque> redirects that name no
+    // destination; blocking one would block Baidu itself.
     const a = node.querySelector("h3 > a[href]");
-    return a?.getAttribute("href") ?? null;
+    const url = parseHttpUrl(a?.getAttribute("href") ?? "", "https://www.baidu.com");
+    if (!url || isHostWithin(url.hostname, "baidu.com")) return null;
+    return url.toString();
   }
 
   getButtonTarget(node: Element): Element | null {

@@ -1,4 +1,5 @@
 import type { MatchResult } from "./matcher";
+import { normalizeDomain, toASCIIDomain } from "../../shared/domain-utils";
 import {
   ATTR_SHH_MODE,
   SHOWN_ONCE,
@@ -462,11 +463,17 @@ export function restoreByDomain(
   isStillBlocked?: (el: Element) => boolean
 ): Element[] {
   const restored: Element[] = [];
+  // Stored entries can be Unicode (IDN) or carry a www prefix, while the
+  // hidden URL's hostname is always lowercased punycode. Comparing them
+  // raw left IDN blocks hidden forever after the user unblocked them.
+  const wanted = toASCIIDomain(normalizeDomain(domain, false));
+  if (!wanted) return restored;
+  const suffix = "." + wanted;
   for (const node of getHiddenNodes()) {
     const url = node.getAttribute(ATTR_SHH_URL) ?? "";
     try {
-      const host = new URL(url).hostname;
-      if (host === domain || host.endsWith("." + domain)) {
+      const host = toASCIIDomain(normalizeDomain(new URL(url).hostname, false));
+      if (host === wanted || host.endsWith(suffix)) {
         // The caller removed ONE entry; a broader (or more specific) entry can
         // still match this node — unblocking a.example.com while example.com
         // stays blocked, or the reverse for a subdomain result. Restoring self
@@ -516,6 +523,7 @@ function buildPlaceholder(
   showBtn.className = "shh-btn shh-btn-show";
   showBtn.textContent = "Show";
   showBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     e.stopPropagation();
     div.remove();
     onShowOnce();
@@ -526,8 +534,11 @@ function buildPlaceholder(
   unblockBtn.className = "shh-btn shh-btn-unblock";
   unblockBtn.textContent = "Unblock";
   unblockBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     e.stopPropagation();
-    div.remove();
+    // The placeholder must stay until restoreResult actually removes it:
+    // doUnblock() is async and can fail before the node is revealed, and an
+    // eagerly removed placeholder leaves a hidden result with no control.
     onUnblock();
   });
 
@@ -536,8 +547,11 @@ function buildPlaceholder(
   permaBtn.className = "shh-btn shh-btn-perma";
   permaBtn.textContent = "Perma";
   permaBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     e.stopPropagation();
-    div.remove();
+    // Same rule as the Unblock button: doPermaban persists first and
+    // convertHiddenToPermaban() removes this placeholder only after the write
+    // succeeds. Removing it here would leave a failed write with no control.
     onPermaban();
   });
 
@@ -576,6 +590,7 @@ function buildShownNoticeBar(
   hideBtn.className = "shh-btn shh-btn-rehide";
   hideBtn.textContent = "Hide Again";
   hideBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     e.stopPropagation();
     e.preventDefault();
     onHideAgain();
@@ -586,9 +601,12 @@ function buildShownNoticeBar(
   unblockBtn.className = "shh-btn shh-btn-unblock";
   unblockBtn.textContent = "Unblock";
   unblockBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     e.stopPropagation();
     e.preventDefault();
-    bar.remove();
+    // The bar stays until the unblock is durable: restoreResult() removes it
+    // on success. Removing it eagerly left the shown result with no control
+    // when the background write failed, while the domain was still blocked.
     onUnblock(domain);
   });
 

@@ -27,9 +27,11 @@ describe("parseUserscriptFormat", () => {
     expect(entries.find((e) => e.domain === "bad.org")?.mode).toBe("block");
   });
 
-  it("strips www. prefix during import", () => {
+  it("preserves www. prefix during import", () => {
+    // Imports are an exact round-trip: the "Strip www." preference applies to
+    // new blocks created from the UI, not to domains the user already saved.
     const entries = parseUserscriptFormat("|www.example.com:t|");
-    expect(entries[0]?.domain).toBe("example.com");
+    expect(entries[0]?.domain).toBe("www.example.com");
   });
 
   it("normalizes uppercase domains", () => {
@@ -42,9 +44,9 @@ describe("parseUserscriptFormat", () => {
     expect(entries).toHaveLength(2);
   });
 
-  it("keeps first occurrence on duplicate", () => {
+  it("merges duplicate modes toward the stronger intent", () => {
     const entries = parseUserscriptFormat("|a.com:t|a.com:p|");
-    expect(entries[0]?.mode).toBe("block");
+    expect(entries[0]?.mode).toBe("pban");
   });
 
   it("skips entry with empty domain", () => {
@@ -121,9 +123,9 @@ describe("parsePlainList", () => {
     expect(entries[0]?.mode).toBe("pban");
   });
 
-  it("strips www during parse", () => {
+  it("preserves www during parse", () => {
     const entries = parsePlainList("www.example.com");
-    expect(entries[0]?.domain).toBe("example.com");
+    expect(entries[0]?.domain).toBe("www.example.com");
   });
 
   it("normalizes uppercase", () => {
@@ -168,10 +170,10 @@ describe("parseJSONBackup", () => {
     expect(entries).toHaveLength(1);
   });
 
-  it("normalizes domain during import", () => {
+  it("normalizes case but preserves the host during import", () => {
     const input = JSON.stringify([{ domain: "WWW.EXAMPLE.COM", mode: "block" }]);
     const entries = parseJSONBackup(input);
-    expect(entries[0]?.domain).toBe("example.com");
+    expect(entries[0]?.domain).toBe("www.example.com");
   });
 
   it("defaults enabled=true when missing", () => {

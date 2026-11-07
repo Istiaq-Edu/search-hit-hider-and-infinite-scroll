@@ -12,9 +12,8 @@
     <meta property="og:type" content="website">
     <title>Search Hit Hider and Infinite Scroll - Firefox Extension</title>
     <link rel="icon" type="image/png" href="assets/images/icon-128.png">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- No web-font fetch: the page uses the system font stack, so opening it
+         contacts nothing but the server hosting it. -->
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -44,9 +43,9 @@
         <section class="hero" id="hero">
             <div class="container hero-container">
                 <div class="hero-content">
-                    <span class="hero-badge">Firefox Extension v1.6.1</span>
+                    <span class="hero-badge">Firefox Extension</span>
                     <h1 class="hero-title">Take Control of Your Search Results</h1>
-                    <p class="hero-subtitle">Hide unwanted domains with one click. Auto-load more results as you scroll. No accounts, no servers, no tracking — everything lives in your browser.</p>
+                    <p class="hero-subtitle">Hide unwanted domains with one click. Auto-load more results as you scroll. No accounts, no tracking — everything lives in your browser.</p>
                     <div class="hero-actions">
                         <a href="https://addons.mozilla.org/en-US/firefox/addon/search-hh_and_infinite-scroll/" class="btn btn-primary" target="_blank" rel="noopener">
                             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -138,7 +137,7 @@
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                         </div>
                         <h3 class="feature-title">100% Private</h3>
-                        <p class="feature-desc">Zero external requests, zero data collection, zero telemetry. Block lists stored locally. Preferences synced via Firefox Sync only if you enable it.</p>
+                        <p class="feature-desc">No extension-operated servers, zero data collection, zero telemetry. Block lists stored locally. Preferences synced via Firefox Sync only if you enable it.</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon feature-icon-orange">
@@ -191,7 +190,7 @@
                         <div class="step-number">1</div>
                         <div class="step-content">
                             <h3 class="step-title">Install the Extension</h3>
-                            <p class="step-desc">Get it from Firefox Add-ons or install manually from GitHub. Works with Firefox 112+.</p>
+                            <p class="step-desc">Get it from Firefox Add-ons or install manually from GitHub. Works with Firefox 121+.</p>
                         </div>
                     </div>
                     <div class="step-connector"></div>
@@ -289,7 +288,7 @@
                     </div>
                     <div class="privacy-content">
                         <h3 class="privacy-title">Your Privacy Matters</h3>
-                        <p class="privacy-desc">No accounts. No servers. No tracking. Block lists stored locally in your browser. Zero external network requests. No analytics, no crash reporting, no telemetry. Fully open source — auditable by anyone.</p>
+                        <p class="privacy-desc">No accounts. No servers operated by us. No tracking. Block lists are stored locally in your browser. The extension talks only to the search engine you are already using. No analytics, no crash reporting, no telemetry. Fully open source — auditable by anyone.</p>
                     </div>
                 </div>
             </div>
@@ -317,7 +316,7 @@
                             <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                         </button>
                         <div class="faq-answer">
-                            <p>Absolutely. The extension makes zero external network requests. Block lists are stored locally in your browser. Preferences can optionally sync via Firefox Sync if you have it enabled. There is no analytics, no crash reporting, and no telemetry of any kind.</p>
+                            <p>Absolutely. The extension makes no requests to any server we operate. Block lists are stored locally in your browser, and preferences can optionally sync via Firefox Sync if you have it enabled. The only network traffic it causes is to the search engine you are already browsing — for example, Yandex's own favicon service when its results render. There is no analytics, no crash reporting, and no telemetry of any kind.</p>
                         </div>
                     </div>
                     <div class="faq-item">
@@ -420,7 +419,7 @@
                     <h4 class="footer-heading">Resources</h4>
                     <ul>
                         <li><a href="https://github.com/Istiaq-Edu/Search-Hit-Hider" target="_blank" rel="noopener">GitHub Repository</a></li>
-                        <li><a href="privacy-policy.md" target="_blank" rel="noopener">Privacy Policy</a></li>
+                        <li><a href="https://github.com/Istiaq-Edu/Search-Hit-Hider/blob/main/privacy-policy.md" target="_blank" rel="noopener">Privacy Policy</a></li>
                         <li><a href="LICENSE" target="_blank" rel="noopener">MIT License</a></li>
                         <li><a href="https://github.com/Istiaq-Edu/Search-Hit-Hider/releases" target="_blank" rel="noopener">Releases</a></li>
                     </ul>

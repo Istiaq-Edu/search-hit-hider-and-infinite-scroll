@@ -15,11 +15,13 @@ export class DomainMatcher {
   private blockSet: Map<string, BlockEntry> = new Map();
   private pbanSet: Map<string, BlockEntry> = new Map();
   private subdomainWildcard: boolean;
+  private stripWww: boolean;
   private cache = new Map<string, MatchResult>();
   private readonly CACHE_MAX = 1000;
 
-  constructor(entries: BlockEntry[], subdomainWildcard = true) {
+  constructor(entries: BlockEntry[], subdomainWildcard = true, stripWww = true) {
     this.subdomainWildcard = subdomainWildcard;
+    this.stripWww = stripWww;
     this.rebuild(entries);
   }
 
@@ -32,7 +34,17 @@ export class DomainMatcher {
       // Store keys in ASCII (punycode) form: hostnames extracted from URLs are
       // always ASCII, so a unicode-typed entry (münchen.de) would otherwise
       // never match its punycode form (xn--mnchen-3ya.de).
-      const key = toASCIIDomain(normalizeDomain(entry.domain));
+      //
+      // The entry is normalized with the LIVE preference, exactly like the
+      // preload's `toCacheDomain(raw, stripWww)`. Hard-coding `false` here made
+      // the two layers disagree whenever an entry carried a `www.` label
+      // (legacy data, or an import made while the preference was off): the
+      // preload stripped it and pre-hid the bare host, while this matcher kept
+      // it exact and then revealed that host at idle — a flash, an Unblock
+      // control for a domain the list does not match, and a lost pre-paint
+      // block for the www host. With stripping ON, an entry and a host with
+      // `www.` are aliases; with it OFF, the label stays significant.
+      const key = toASCIIDomain(normalizeDomain(entry.domain, this.stripWww));
       if (entry.mode === "pban") {
         this.pbanSet.set(key, entry);
       } else {
@@ -84,20 +96,25 @@ export class DomainMatcher {
     hostname: string,
     set: Map<string, BlockEntry>
   ): BlockEntry | null {
-    const normalized = normalizeDomain(hostname, true);
+    const normalized = normalizeDomain(hostname, this.stripWww);
+    const raw = normalizeDomain(hostname, false);
 
-    // Direct match
+    // Direct match. Both variants are checked: with www-stripping on, a
+    // legacy entry may still be stored WITH `www.` (preference changed, or an
+    // import), and it must match the host it names.
     if (set.has(normalized)) return set.get(normalized) ?? null;
+    if (raw !== normalized && set.has(raw)) return set.get(raw) ?? null;
 
-    // ASCII variant (single call, reused for all levels)
+    // ASCII variants (single conversion each, reused below)
     const ascii = toASCIIDomain(normalized);
     if (ascii !== normalized && set.has(ascii)) return set.get(ascii) ?? null;
+    const rawAscii = toASCIIDomain(raw);
+    if (rawAscii !== raw && set.has(rawAscii)) return set.get(rawAscii) ?? null;
 
     if (!this.subdomainWildcard) return null;
 
     // Walk up the domain hierarchy — derive ASCII by slicing, no URL parsing
     let current = normalized;
-    let currentAscii = ascii;
     while (current.includes(".")) {
       const dotIdx = current.indexOf(".");
       current = current.slice(dotIdx + 1);
@@ -109,8 +126,8 @@ export class DomainMatcher {
       }
     }
 
-    // Also try root domain (PSL-aware) — only as last resort
-    const root = getRootDomain(normalized);
+    // Also try the PSL-aware root domain — only as last resort
+    const root = toASCIIDomain(getRootDomain(normalized));
     if (root !== normalized && set.has(root)) return set.get(root) ?? null;
 
     return null;

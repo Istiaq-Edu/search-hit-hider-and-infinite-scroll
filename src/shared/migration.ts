@@ -22,7 +22,7 @@ export function parseUserscriptFormat(raw: string): BlockEntry[] {
     const domain = part.slice(0, colonIdx).trim();
     const flag = part.slice(colonIdx + 1).trim().toLowerCase();
 
-    const normalized = normalizeDomain(domain);
+    const normalized = normalizeDomain(domain, false);
     if (!isValidDomain(normalized)) continue;
 
     const mode: BlockMode = flag === "p" ? "pban" : "block";
@@ -67,7 +67,7 @@ export function parsePlainList(raw: string, mode: BlockMode = "block"): BlockEnt
     }
 
     if (!domainPart) continue;
-    const normalized = normalizeDomain(domainPart);
+    const normalized = normalizeDomain(domainPart, false);
     if (!isValidDomain(normalized)) continue;
     entries.push({ domain: normalized, mode: entryMode, enabled: true, createdAt: now });
   }
@@ -176,7 +176,9 @@ function isBlockEntryLike(v: unknown): v is Record<string, unknown> {
 }
 
 function normalizeImportedEntry(raw: Record<string, unknown>): BlockEntry | null {
-  const domain = normalizeDomain(String(raw["domain"] ?? ""));
+  // `false`: JSON backup domains round-trip exactly. Stripping www here would
+  // silently rewrite an exact-host entry on export → import.
+  const domain = normalizeDomain(String(raw["domain"] ?? ""), false);
   if (!isValidDomain(domain)) return null;
   const mode: BlockMode =
     raw["mode"] === "pban" ? "pban" : "block";

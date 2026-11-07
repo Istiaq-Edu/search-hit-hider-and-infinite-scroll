@@ -5,7 +5,7 @@ version (see `manifest.json`).
 
 ## Build
 
-Requires Node.js >= 18 and npm.
+Requires Node.js >= 20 and npm.
 
 ```sh
 npm install

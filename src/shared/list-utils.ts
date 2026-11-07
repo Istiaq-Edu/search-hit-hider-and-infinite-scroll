@@ -9,14 +9,23 @@ import { isValidDomain, normalizeDomain, stripWww } from "./domain-utils";
  * Add a new entry to the list. Returns updated list and whether it was a duplicate.
  * Rejects strings that cannot be real hostnames — junk entries would otherwise
  * be stored and later interpolated into CSS selectors by the preload.
+ *
+ * `options.stripWww` must come from the live preference. It was previously
+ * hard-coded to true, so the "Strip www." setting did nothing and an exact
+ * host block of www.example.com silently became example.com.
  */
 export function addEntry(
   entries: BlockEntry[],
   domain: string,
   mode: BlockMode,
-  position: "end" | "top" | "sort" = "end"
+  position: "end" | "top" | "sort" = "end",
+  options: {
+    stripWww?: boolean | undefined;
+    enabled?: boolean | undefined;
+    createdAt?: number | undefined;
+  } = {}
 ): { entries: BlockEntry[]; added: BlockEntry | null; duplicate: boolean } {
-  const normalized = normalizeDomain(domain);
+  const normalized = normalizeDomain(domain, options.stripWww ?? true);
   if (!isValidDomain(normalized)) {
     return { entries, added: null, duplicate: false };
   }
@@ -29,8 +38,8 @@ export function addEntry(
   const newEntry: BlockEntry = {
     domain: normalized,
     mode,
-    enabled: true,
-    createdAt: Date.now(),
+    enabled: options.enabled ?? true,
+    createdAt: options.createdAt ?? Date.now(),
   };
 
   let updated: BlockEntry[];
@@ -129,18 +138,54 @@ export function applyBulkOp(
 }
 
 /**
- * Remove duplicate domains, keeping the first occurrence.
- * Comparison is case-insensitive and www-insensitive so "X.com" and "x.com"
- * (or "www.x.com" left over from older imports) collapse into one entry.
+ * Merge a duplicate into the entry being kept.
+ *
+ * "Keep the first and drop the rest" lost user intent: an enabled perma-ban
+ * behind a disabled block disappeared entirely, leaving the domain unblocked.
+ * A duplicate is the same blocking target, so the merged entry must be at
+ * least as strong as either input:
+ *   • enabled if EITHER copy is enabled (disabling one copy must not discard
+ *     the other's active block),
+ *   • pban if either copy is a perma-ban (the stronger intent),
+ *   • the earliest known creation time (stable, not "now").
+ */
+function mergeDuplicate(first: BlockEntry, other: BlockEntry): BlockEntry {
+  const createdAt = Math.min(
+    first.createdAt || Number.POSITIVE_INFINITY,
+    other.createdAt || Number.POSITIVE_INFINITY
+  );
+  return {
+    ...first,
+    enabled: first.enabled || other.enabled,
+    mode: first.mode === "pban" || other.mode === "pban" ? "pban" : "block",
+    createdAt: Number.isFinite(createdAt) ? createdAt : first.createdAt,
+  };
+}
+
+/**
+ * Remove duplicate domains, keeping the first occurrence's position.
+ * Comparison is case-insensitive but www-SENSITIVE: with "Strip www." off,
+ * `example.com` and `www.example.com` are two distinct exact-host targets, and
+ * the old www-insensitive key silently discarded one of them on import or on
+ * the "dedup" bulk action. The explicit "Un-www" bulk action still collapses
+ * www variants because it rewrites the domains BEFORE calling this.
+ * Fields are merged rather than discarded — see mergeDuplicate().
  */
 export function deduplicateEntries(entries: BlockEntry[]): BlockEntry[] {
-  const seen = new Set<string>();
-  return entries.filter((e) => {
-    const key = normalizeDomain(e.domain);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const byKey = new Map<string, number>();
+  const out: BlockEntry[] = [];
+  for (const entry of entries) {
+    const key = normalizeDomain(entry.domain, false);
+    const existingIdx = byKey.get(key);
+    if (existingIdx === undefined) {
+      byKey.set(key, out.length);
+      out.push(entry);
+    } else {
+      const existing = out[existingIdx]!;
+      out[existingIdx] = mergeDuplicate(existing, entry);
+    }
+  }
+  return out;
 }
 
 /**

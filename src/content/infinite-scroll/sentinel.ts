@@ -51,6 +51,7 @@ export class Sentinel {
         `;
         if (onRetry) {
           this.element.querySelector("#is-retry-btn")?.addEventListener("click", (e) => {
+            if (!e.isTrusted) return;
             e.preventDefault();
             onRetry();
           });

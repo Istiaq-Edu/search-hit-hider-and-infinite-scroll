@@ -60,13 +60,16 @@ export function ImportExport({ entries }: Props) {
     }
 
     downloadFile(content, filename, mime);
-    flash(`Exported ${scoped.length} entr${scoped.length === 1 ? "y" : "ies"}`);
+    // Plain/userscript exports omit disabled entries; the count must describe
+    // the file, not the in-memory scope.
+    const exported = exportFormat === "json" ? scoped.length : scoped.filter((e) => e.enabled).length;
+    flash(`Exported ${exported} entr${exported === 1 ? "y" : "ies"}`);
   }
 
   function openImportPage() {
-    void browser.tabs.create({
+    browser.tabs.create({
       url: browser.runtime.getURL("popup/options.html"),
-    });
+    }).catch(() => flash("Could not open the import/export page."));
   }
 
   const selectStyle: preact.JSX.CSSProperties = {

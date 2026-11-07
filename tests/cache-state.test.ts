@@ -105,7 +105,7 @@ describe("parseCache — absent and corrupt input are 'no idea', not 'empty'", (
   });
 
   it("round-trips through serialize", () => {
-    const original: ShhCache = { domains: ["a.com"], wildcard: false, paused: true, debug: true };
+    const original: ShhCache = { domains: ["a.com"], wildcard: false, stripWww: true, paused: true, debug: true };
     expect(parseCache(serializeCache(original))).toEqual(original);
   });
 });
@@ -129,10 +129,31 @@ describe("buildCache", () => {
     expect(c.wildcard).toBe(false);
     expect(c.debug).toBe(true);
   });
+
+  it("bounds the payload by BYTES as well as by entry count", () => {
+    // 5000 maximum-length hostnames serialize to roughly 1.2 MB, far above
+    // the reader's 256 KiB limit. The old count-only cap wrote a payload that
+    // parseCache() rejected outright, so pre-paint hiding was silently dead
+    // for large lists — and re-serialized the same rejected payload forever.
+    const label = "a".repeat(60);
+    const long = `${label}.${label}.${label}.example.com`; // < 253 chars
+    const entries = Array.from({ length: 5000 }, (_, i) =>
+      entry(`${i}.${label}.${label}.${label}.example.com`)
+    );
+    expect(long.length).toBeLessThan(253);
+
+    const c = buildCache(entries, prefs(), ENGINE);
+    const raw = serializeCache(c);
+    expect(raw.length).toBeLessThanOrEqual(256 * 1024);
+    expect(c.domains.length).toBeGreaterThan(0);
+    expect(c.domains.length).toBeLessThan(entries.length);
+    // The payload the writer produced must be a payload the reader accepts.
+    expect(parseCache(raw)).not.toBeNull();
+  });
 });
 
 describe("canPublishCache — the D5 guard", () => {
-  const empty: ShhCache = { domains: [], wildcard: true, paused: false, debug: false };
+  const empty: ShhCache = { domains: [], wildcard: true, stripWww: true, paused: false, debug: false };
 
   it("REFUSES an empty list derived from a non-authoritative state", () => {
     // The regression. A degraded start holds [] because messaging failed.
@@ -173,7 +194,7 @@ describe("entriesFromCache / prefsFromCache", () => {
   it("rebuilds entries as enabled blocks", () => {
     // The cache stores no mode, so a perma-ban degrades to a regular block
     // while the background is cold. Documented consequence, not an oversight.
-    const entries = entriesFromCache({ domains: ["a.com", "b.com"], wildcard: true, paused: false, debug: false });
+    const entries = entriesFromCache({ domains: ["a.com", "b.com"], wildcard: true, stripWww: true, paused: false, debug: false });
     expect(entries).toHaveLength(2);
     expect(entries[0]).toMatchObject({ domain: "a.com", mode: "block", enabled: true, createdAt: 0 });
   });
@@ -182,13 +203,13 @@ describe("entriesFromCache / prefsFromCache", () => {
     // The result of prefsFromCache becomes the module-level `prefs` in
     // content/index.ts. If it aliased the defaults, one write through it would
     // poison DEFAULT_PREFS for the whole process.
-    const p = prefsFromCache({ domains: [], wildcard: true, paused: false, debug: false });
+    const p = prefsFromCache({ domains: [], wildcard: true, stripWww: true, paused: false, debug: false });
     expect(p.engineToggles).not.toBe(DEFAULT_PREFS.engineToggles);
     expect(p.pausedEngines).not.toBe(DEFAULT_PREFS.pausedEngines);
   });
 
   it("does not let a write through the result corrupt DEFAULT_PREFS", () => {
-    const p = prefsFromCache({ domains: [], wildcard: true, paused: false, debug: false });
+    const p = prefsFromCache({ domains: [], wildcard: true, stripWww: true, paused: false, debug: false });
     p.engineToggles.google = false;
     p.pausedEngines.push("google");
     expect(DEFAULT_PREFS.engineToggles.google).toBe(true);
@@ -196,7 +217,7 @@ describe("entriesFromCache / prefsFromCache", () => {
   });
 
   it("layers prefs over the defaults", () => {
-    const p = prefsFromCache({ domains: [], wildcard: false, paused: false, debug: true });
+    const p = prefsFromCache({ domains: [], wildcard: false, stripWww: true, paused: false, debug: true });
     expect(p.subdomainWildcard).toBe(false);
     expect(p.debugMode).toBe(true);
     // Untouched keys keep their defaults.

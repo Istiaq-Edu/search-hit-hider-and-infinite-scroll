@@ -12,12 +12,17 @@
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "prewebext:build": "npm run build",
     "webext:lint": "web-ext lint --source-dir=dist",
     "webext:build": "web-ext build --source-dir=dist --artifacts-dir=releases --overwrite-dest",
-    "package": "node build.js && web-ext build --source-dir=dist --artifacts-dir=releases --overwrite-dest"
+    "package": "npm run webext:build"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
-    "preact": "^10.22.0"
+    "preact": "^10.22.0",
+    "tldts": "^7.4.19"
   },
   "devDependencies": {
     "@types/firefox-webext-browser": "^120.0.4",

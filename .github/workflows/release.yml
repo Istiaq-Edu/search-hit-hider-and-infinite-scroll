@@ -1,7 +1,7 @@
 name: Release
 
-# The ONE workflow for this repo. Replaces deploy-website.yml and
-# manual-package.yml.
+# The release workflow for this repo. Push/PR verification lives in ci.yml;
+# this one replaces the old deploy-website.yml and manual-package.yml.
 #
 # Two modes, both MANUAL (Actions tab → Release → Run workflow):
 #

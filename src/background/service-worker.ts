@@ -13,6 +13,7 @@ import {
   popUndoEntry,
 } from "../shared/storage";
 import { addEntry, removeEntry, updateEntry, applyBulkOp } from "../shared/list-utils";
+import { normalizeDomain } from "../shared/domain-utils";
 import { STORAGE_KEY_PREFS_LOCAL } from "../shared/types";
 import { broadcastToTabs, shouldEvictTab } from "./broadcast";
 
@@ -46,9 +47,7 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
   return run;
 }
 
-// Debounced storage writes to avoid sequential writes for rapid changes
-let pendingSave: ReturnType<typeof setTimeout> | null = null;
-let pendingEntries: BlockEntry[] | null = null;
+// Debounced storage writes were removed with the write-through change above.
 
 async function getEntries(): Promise<BlockEntry[]> {
   for (;;) {
@@ -77,42 +76,23 @@ async function getPrefs(): Promise<Prefs> {
   }
 }
 
+// Write-through. A message's success response must mean the mutation is
+// durable. The previous 500 ms fire-and-forget debounce acknowledged before
+// the write and swallowed failures: a quota error or a worker suspension lost
+// the change while every caller believed it had been saved.
+//
+// Memory is committed only AFTER storage accepts the new list, so a failed
+// write leaves the cache describing exactly what is on disk. Handlers are
+// serialized by enqueue(), so no concurrent mutation can observe a torn state.
 async function persistEntries(entries: BlockEntry[]): Promise<void> {
+  await saveEntries(entries);
   cachedEntries = entries;
   entriesGen++;
-  scheduleSave(entries);
 }
 
 function commitPrefs(prefs: Prefs): void {
   cachedPrefs = prefs;
   prefsGen++;
-}
-
-function scheduleSave(entries: BlockEntry[]): void {
-  pendingEntries = entries;
-  if (pendingSave) clearTimeout(pendingSave);
-  pendingSave = setTimeout(() => {
-    if (pendingEntries) {
-      saveEntries(pendingEntries);
-      pendingEntries = null;
-    }
-    pendingSave = null;
-  }, 500);
-}
-
-// Flush pending writes on extension shutdown
-if (browser.runtime.onSuspend) {
-  browser.runtime.onSuspend.addListener(() => {
-    if (pendingSave) {
-      clearTimeout(pendingSave);
-      pendingSave = null;
-    }
-    if (pendingEntries) {
-      const entries = pendingEntries;
-      pendingEntries = null;
-      saveEntries(entries);
-    }
-  });
 }
 
 // Invalidate cache when storage changes externally (e.g. other device via sync)
@@ -202,15 +182,34 @@ async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unk
     case "ADD_ENTRY": {
       const prefs = await getPrefs();
       const entries = await getEntries();
-      const result = addEntry(entries, msg.domain, msg.mode, prefs.addPosition);
+      const result = addEntry(entries, msg.domain, msg.mode, prefs.addPosition, {
+        stripWww: prefs.stripWww,
+      });
       if (result.added) {
         await persistEntries(result.entries);
-        await saveUndoEntry(result.added);
+        await saveUndoEntry(result.added, "add").catch(() => { /* add itself is durable */ });
         // Other tabs must re-process so the new domain hides there too.
         // The sender already updated its own local state.
         void broadcastToContentScripts({ type: "LIST_UPDATED" }, senderTabId);
+        return { entry: result.added, duplicate: false };
       }
-      return { entry: result.added, duplicate: result.duplicate };
+      if (result.duplicate) {
+        // Re-adding a domain whose entry is DISABLED must restore the block.
+        // Returning "duplicate" without doing so makes the Block button look
+        // broken: the matcher ignores disabled entries, so the result stays
+        // visible and nothing changes.
+        const normalized = normalizeDomain(msg.domain, prefs.stripWww);
+        const existing = entries.find((e) => e.domain === normalized);
+        if (existing && !existing.enabled) {
+          const reactivated = { ...existing, enabled: true };
+          const updated = updateEntry(entries, existing.domain, { enabled: true });
+          await persistEntries(updated);
+          await saveUndoEntry(reactivated, "add").catch(() => { /* add itself is durable */ });
+          void broadcastToContentScripts({ type: "LIST_UPDATED" }, senderTabId);
+          return { entry: reactivated, duplicate: true };
+        }
+      }
+      return { entry: null, duplicate: result.duplicate };
     }
 
     case "REMOVE_ENTRY": {
@@ -218,7 +217,7 @@ async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unk
       const result = removeEntry(entries, msg.domain);
       if (result.removed) {
         await persistEntries(result.entries);
-        await saveUndoEntry(result.removed);
+        await saveUndoEntry(result.removed, "remove").catch(() => { /* remove itself is durable */ });
         void broadcastToContentScripts({ type: "LIST_UPDATED" }, senderTabId);
       }
       return { removed: result.removed };
@@ -248,7 +247,15 @@ async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unk
       let invalid = 0;
 
       for (const item of msg.entries) {
-        const result = addEntry(current, item.domain, item.mode, prefs.addPosition);
+        // The parser already normalized the domain; `stripWww: false` keeps a
+        // JSON backup an exact round-trip. enabled/createdAt are preserved —
+        // the previous handler dropped both, so importing a backup silently
+        // enabled every disabled entry and reset its history.
+        const result = addEntry(current, item.domain, item.mode, prefs.addPosition, {
+          stripWww: false,
+          enabled: item.enabled,
+          createdAt: item.createdAt,
+        });
         if (result.added) {
           current = result.entries;
           added++;
@@ -297,17 +304,36 @@ async function handleMessage(msg: ExtMessage, senderTabId?: number): Promise<unk
     }
 
     case "UNDO_LAST": {
-      const entry = await popUndoEntry();
-      if (!entry) return { restored: null };
-      // Re-add the entry
+      const prefs = await getPrefs();
+      const record = await popUndoEntry(msg.domain);
+      if (!record) return { restored: null, action: null };
       const entries = await getEntries();
-      const result = addEntry(entries, entry.domain, entry.mode);
-      await persistEntries(result.entries);
-      // Broadcast: undoing a block re-adds a domain, so other tabs must
-      // re-hide it. Without this they keep showing it until reload.
-      // `void` for the same reason as SET_PREFS — see the note there.
-      void broadcastToContentScripts({ type: "LIST_UPDATED" });
-      return { restored: entry };
+
+      if (record.action === "add") {
+        // The toast is undoing a block: the inverse is removing that entry.
+        const result = removeEntry(entries, record.entry.domain);
+        // The record was already popped, but nothing was removed (another tab
+        // or the popup removed it first). Report that honestly rather than
+        // claiming an undo that changed nothing.
+        if (!result.removed) return { restored: null, action: null };
+        await persistEntries(result.entries);
+        void broadcastToContentScripts({ type: "LIST_UPDATED" });
+        return { restored: record.entry, action: record.action };
+      }
+
+      // Undoing a removal: put the entry back with the metadata it had,
+      // instead of a fresh `enabled:true / createdAt:now` copy.
+      const result = addEntry(entries, record.entry.domain, record.entry.mode, prefs.addPosition, {
+        stripWww: false,
+        enabled: record.entry.enabled,
+        createdAt: record.entry.createdAt,
+      });
+      if (result.added) {
+        await persistEntries(result.entries);
+        void broadcastToContentScripts({ type: "LIST_UPDATED" });
+        return { restored: record.entry, action: record.action };
+      }
+      return { restored: null, action: null };
     }
 
     default:

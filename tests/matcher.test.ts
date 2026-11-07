@@ -57,8 +57,29 @@ describe("DomainMatcher — www handling", () => {
 
   it("matches blocked www.example.com against www.example.com URL", () => {
     const m = new DomainMatcher([entry("www.example.com")]);
-    // www.example.com normalises to example.com in the matcher
     expect(m.match("https://www.example.com/").matched).toBe(true);
+  });
+
+  it("with stripping ON, a www entry also blocks the bare host", () => {
+    // The preload strips www from BOTH the entry and the host under this
+    // preference, so it pre-hides either form. The matcher must agree or the
+    // content script reveals what the preload hid (flash + orphan Unblock).
+    const m = new DomainMatcher([entry("www.example.com")], true, true);
+    expect(m.match("https://example.com/").matched).toBe(true);
+    expect(m.match("https://www.example.com/").matched).toBe(true);
+  });
+
+  it("with stripping OFF, a www entry does NOT match the bare host", () => {
+    const m = new DomainMatcher([entry("www.example.com")], true, false);
+    expect(m.match("https://www.example.com/").matched).toBe(true);
+    expect(m.match("https://example.com/").matched).toBe(false);
+  });
+
+  it("with stripping OFF and wildcard OFF, a bare entry does NOT match www", () => {
+    // Exact-host semantics: www is a real label, not an alias.
+    const m = new DomainMatcher([entry("example.com")], false, false);
+    expect(m.match("https://example.com/").matched).toBe(true);
+    expect(m.match("https://www.example.com/").matched).toBe(false);
   });
 });
 

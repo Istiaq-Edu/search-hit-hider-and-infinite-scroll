@@ -1,5 +1,6 @@
 import type { EngineAdapter } from "./base";
 import type { EngineId } from "../../shared/types";
+import { isHostWithin, parseHttpUrl } from "./url-utils";
 
 // ============================================================
 // DuckDuckGo adapter — classic + React results
@@ -43,7 +44,28 @@ export class DuckDuckGoAdapter implements EngineAdapter {
       node.querySelector("h2 a[href]") ??
       node.querySelector("a.result__a[href]") ??
       node.querySelector("a[href]");
-    return a?.getAttribute("href") ?? null;
+    const raw = a?.getAttribute("href") ?? "";
+    if (!raw) return null;
+
+    // Relative and protocol-relative hrefs exist in the HTML (non-JS) build;
+    // resolve them so every caller receives an absolute destination.
+    const url = parseHttpUrl(raw, "https://duckduckgo.com");
+    if (!url) return null;
+
+    if (isHostWithin(url.hostname, "duckduckgo.com")) {
+      // /l/?uddg=<destination> is DDG's redirect wrapper. Without a decodable
+      // destination the only URL available is DDG itself — returning it would
+      // make the block button hide DuckDuckGo instead of the result.
+      const target = url.searchParams.get("uddg");
+      if (!target) return null;
+      const dest = parseHttpUrl(target);
+      // The wrapper's target can point back at DDG too (an internal link, or
+      // a crafted wrapper). Same rule applies: never target the engine.
+      if (!dest || isHostWithin(dest.hostname, "duckduckgo.com")) return null;
+      return dest.toString();
+    }
+
+    return url.toString();
   }
 
   getButtonTarget(node: Element): Element | null {
@@ -121,7 +143,9 @@ export class DuckDuckGoAdapter implements EngineAdapter {
   }
 
   getPaginationSelectors(): string[] {
-    return ['.results--footer', 'div.result--more', '#footer', 'form.results--more'];
+    // NOT #footer: that is DuckDuckGo's whole page footer (settings, privacy,
+    // terms), not pagination — hiding it removed unrelated page furniture.
+    return ['.results--footer', 'div.result--more', 'form.results--more'];
   }
 
   getResultId(node: Element): string | null {

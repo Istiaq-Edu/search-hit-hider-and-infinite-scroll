@@ -1,9 +1,37 @@
 import type { EngineAdapter } from "./base";
 import type { EngineId } from "../../shared/types";
+import { isHostWithin, parseHttpUrl } from "./url-utils";
 
 // ============================================================
 // Bing adapter
 // ============================================================
+
+/**
+ * Resolve a Bing result href to its destination.
+ *
+ * Bing wraps outbound links in /ck/a redirects; many carry the destination as
+ * `u=a1<base64url(url)>`. The old code discarded every such link because it
+ * could not see the destination — even when it was plainly decodable.
+ * Opaque tokens (no `a1` marker, malformed base64) still resolve to null:
+ * guessing would target bing.com itself.
+ */
+function resolveBingHref(url: URL): URL | null {
+  if (!isHostWithin(url.hostname, "bing.com")) return url;
+  if (!url.pathname.startsWith("/ck/a")) return null;
+  const u = url.searchParams.get("u");
+  if (!u || !u.startsWith("a1")) return null;
+  const token = u.slice(2);
+  if (!/^[A-Za-z0-9_-]+$/.test(token)) return null;
+  try {
+    const b64 = token.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const target = parseHttpUrl(atob(padded));
+    if (!target || isHostWithin(target.hostname, "bing.com")) return null;
+    return target;
+  } catch {
+    return null;
+  }
+}
 
 export class BingAdapter implements EngineAdapter {
   readonly id: EngineId = "bing";
@@ -20,16 +48,26 @@ export class BingAdapter implements EngineAdapter {
   }
 
   getResultUrl(node: Element): string | null {
-    // Real URL from cite element (more reliable than href which may be tracking)
-    const cite = node.querySelector("li.b_algo > div:not(.b_algo_group) cite");
+    // Real URL from the attribution cite (more reliable than href, which is a
+    // bing.com/ck/a redirect). The old selector required a NESTED li.b_algo
+    // inside the result, so it could never match and every Bing result fell
+    // through to the redirect href.
+    const cite = node.querySelector("div.b_attribution cite") ?? node.querySelector("cite");
     if (cite?.textContent) {
-      const text = cite.textContent.trim();
+      const text = cite.textContent.trim().split(/[\s›»]/)[0] ?? "";
       if (text.includes(".")) {
-        return text.startsWith("http") ? text : "https://" + text;
+        const url = parseHttpUrl(text.startsWith("http") ? text : "https://" + text);
+        // A cite naming bing.com describes Bing's own property, not a
+        // destination distinct from the engine; never target the engine.
+        if (url && !isHostWithin(url.hostname, "bing.com")) return url.toString();
       }
     }
+    // The href fallback is usually a bing.com/ck/a redirect. Decode it when
+    // possible; an opaque token names no destination and returns null.
     const a = node.querySelector("h2 > a[href]");
-    return a?.getAttribute("href") ?? null;
+    const url = parseHttpUrl(a?.getAttribute("href") ?? "", "https://www.bing.com");
+    const target = url ? resolveBingHref(url) : null;
+    return target ? target.toString() : null;
   }
 
   getButtonTarget(node: Element): Element | null {

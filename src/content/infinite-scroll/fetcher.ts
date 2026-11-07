@@ -25,11 +25,25 @@ export async function fetchPage(
     await sleep(jitter, signal);
   }
 
+  // A stalled request (hung server / dead connection) otherwise leaves the
+  // manager's isLoading guard set forever, permanently stopping paging. The
+  // timeout uses its own controller so a caller abort (navigation/destroy)
+  // stays distinguishable and still propagates as AbortError.
+  const internal = new AbortController();
+  let timedOut = false;
+  const onCallerAbort = (): void => internal.abort();
+  if (signal.aborted) internal.abort();
+  else signal.addEventListener("abort", onCallerAbort, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    internal.abort();
+  }, FETCH_TIMEOUT_MS);
+
   try {
     const response = await fetch(url, {
-      signal,
       credentials: "include",
       ...init,
+      signal: internal.signal,
       headers: {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": navigator.language,
@@ -108,10 +122,25 @@ export async function fetchPage(
 
     return { doc, nextUrl: null };
   } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    // Caller abort must propagate as AbortError so destroy()/navigation can
+    // tell "canceled" apart from "failed" and avoid counting strikes. A
+    // timeout is an ordinary failure: the manager retries/backs off.
+    if (signal.aborted) {
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
+      throw new DOMException("Aborted", "AbortError");
+    }
+    if (timedOut && isDebugMode()) {
+      // eslint-disable-next-line no-console
+      console.log(`[SHH] fetch timeout after ${FETCH_TIMEOUT_MS}ms: ${url.slice(0, 120)}`);
+    }
     return null;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onCallerAbort);
   }
 }
+
+const FETCH_TIMEOUT_MS = 15_000;
 
 /**
  * Copy that only ever appears on a bot gate / JS-redirect interstitial.

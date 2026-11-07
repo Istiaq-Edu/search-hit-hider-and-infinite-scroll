@@ -49,34 +49,66 @@ export function BlockList({ entries, prefs, onRefresh }: Props) {
   }, []);
 
   async function handleAdd() {
-    const domain = normalizeDomain(addDomain.trim());
+    const domain = normalizeDomain(addDomain.trim(), prefs.stripWww);
     if (!domain) return;
-    const res = await browser.runtime.sendMessage({
-      type: "ADD_ENTRY", domain, mode: "block",
-    }) as { duplicate: boolean };
+    let res: { entry: BlockEntry | null; duplicate: boolean };
+    try {
+      res = await browser.runtime.sendMessage({
+        type: "ADD_ENTRY", domain, mode: "block",
+      }) as { entry: BlockEntry | null; duplicate: boolean };
+    } catch {
+      flash("Could not reach the extension background.");
+      return;
+    }
     if (res.duplicate) {
-      flash(`"${domain}" is already in the list`);
+      if (res.entry) {
+        // The background re-enabled a disabled entry: the block IS now in
+        // effect, so "already in the list" would be misleading.
+        flash(`Re-enabled: ${res.entry.domain}`);
+        setAddDomain("");
+      } else {
+        flash(`"${domain}" is already in the list`);
+      }
+    } else if (!res.entry) {
+      // The background rejects hosts that cannot be real domains. Reporting
+      // success for those leaves the user believing a junk entry was saved.
+      flash(`"${domain}" is not a valid domain`);
     } else {
-      flash(`Added: ${domain}`);
+      flash(`Added: ${res.entry.domain}`);
       setAddDomain("");
     }
     await onRefresh();
   }
 
   async function handleRemove(domain: string) {
-    await browser.runtime.sendMessage({ type: "REMOVE_ENTRY", domain });
+    try {
+      await browser.runtime.sendMessage({ type: "REMOVE_ENTRY", domain });
+    } catch {
+      flash(`Could not remove ${domain}.`);
+      return;
+    }
     setSelected((s) => { const n = new Set(s); n.delete(domain); return n; });
     await onRefresh();
   }
 
   async function handleToggle(domain: string, enabled: boolean) {
-    await browser.runtime.sendMessage({ type: "UPDATE_ENTRY", domain, patch: { enabled } });
+    try {
+      await browser.runtime.sendMessage({ type: "UPDATE_ENTRY", domain, patch: { enabled } });
+    } catch {
+      flash(`Could not update ${domain}.`);
+      return;
+    }
     await onRefresh();
   }
 
   async function handleBulk(op: BulkOperation) {
     const domains = selected.size > 0 ? Array.from(selected) : undefined;
-    await browser.runtime.sendMessage({ type: "BULK_OP", op, domains });
+    try {
+      await browser.runtime.sendMessage({ type: "BULK_OP", op, domains });
+    } catch {
+      flash("Bulk action failed — extension background unavailable.");
+      return;
+    }
     setSelected(new Set());
     await onRefresh();
   }

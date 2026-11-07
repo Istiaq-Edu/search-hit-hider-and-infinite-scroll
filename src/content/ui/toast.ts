@@ -26,7 +26,8 @@ export function showToast(
   undoBtn.type = "button";
   undoBtn.className = "shh-toast-undo";
   undoBtn.textContent = undoLabel;
-  undoBtn.addEventListener("click", () => {
+  undoBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     dismissToast();
     onUndo();
   });

@@ -1,11 +1,12 @@
 import type { EngineAdapter } from "./base";
 import type { EngineId } from "../../shared/types";
+import { isHostWithin, parseHttpUrl } from "./url-utils";
 
 // ============================================================
 // Yandex adapter — organic results with redirect URL unwrapping
 // ============================================================
 
-const YANDEX_HOSTS = new Set([
+export const YANDEX_HOSTS = new Set([
   "ya.ru", "yandex.ru", "yandex.com", "yandex.by", "yandex.kz",
   "yandex.ua", "yandex.tr", "yandex.eu", "yandex.fr", "yandex.de",
   "yandex.lt", "yandex.lv", "yandex.ee", "yandex.md", "yandex.tj",
@@ -61,46 +62,42 @@ export class YandexAdapter implements EngineAdapter {
 
     // Fallback to displayed domain
     const displayed = this.getDisplayedDomain(node);
-    if (displayed) return "https://" + displayed + "/";
-
-    return null;
+    const displayUrl = displayed ? parseHttpUrl("https://" + displayed + "/") : null;
+    return displayUrl?.toString() ?? null;
   }
 
-  private unwrapRedirect(href: string, node: Element): string {
-    // Yandex may use redirect URLs — try to extract the real target
-    if (!this.isYandexUrl(href)) return href;
+  private unwrapRedirect(href: string, node: Element): string | null {
+    // Yandex may use redirect URLs — try to extract the real target.
+    const url = parseHttpUrl(href, "https://yandex.com");
+    if (!url) return null;
+    if (!this.isYandexUrl(url.href)) return url.toString();
 
     // Try query params
-    try {
-      const url = new URL(href, "https://yandex.com");
-      const target =
-        url.searchParams.get("url") ??
-        url.searchParams.get("u") ??
-        url.searchParams.get("target");
-      if (target && target.startsWith("http")) return target;
-    } catch {
-      // ignore
+    const target =
+      url.searchParams.get("url") ??
+      url.searchParams.get("u") ??
+      url.searchParams.get("target");
+    if (target) {
+      const dest = parseHttpUrl(target);
+      if (dest) return dest.toString();
     }
 
-    // Try displayed domain fallback
+    // Try displayed domain fallback. Never return the redirect URL itself:
+    // the only domain it names is Yandex, so blocking it would hide the
+    // engine's own links instead of the destination the user aimed at.
     const displayed = this.getDisplayedDomain(node);
-    if (displayed) return "https://" + displayed + "/";
-
-    return href;
+    const displayUrl = displayed ? parseHttpUrl("https://" + displayed + "/") : null;
+    return displayUrl?.toString() ?? null;
   }
 
   private isYandexUrl(href: string): boolean {
-    try {
-      const host = new URL(href).hostname;
-      return (
-        YANDEX_HOSTS.has(host) ||
-        host.endsWith(".yandex.") ||
-        host === "ya.ru" ||
-        host.endsWith(".ya.ru")
-      );
-    } catch {
-      return false;
+    const url = parseHttpUrl(href);
+    if (!url) return false;
+    const host = url.hostname;
+    for (const domain of YANDEX_HOSTS) {
+      if (isHostWithin(host, domain)) return true;
     }
+    return isHostWithin(host, "ya.ru");
   }
 
   private getDisplayedDomain(node: Element): string {

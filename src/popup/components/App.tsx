@@ -26,6 +26,10 @@ export function App() {
   const [entries, setEntries] = useState<BlockEntry[]>([]);
   const [prefs, setPrefs] = useState<Prefs>(DEFAULT_PREFS);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  // Distinguishes "loaded successfully at least once" from "initial load
+  // failed". The latter must not render stats/list from the empty defaults.
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     void loadData();
@@ -72,26 +76,51 @@ export function App() {
   }, [prefs.theme]);
 
   async function loadData() {
+    setLoading(true);
     try {
       const [listRes, prefsRes] = await Promise.all([
         browser.runtime.sendMessage({ type: "GET_LIST" }),
         browser.runtime.sendMessage({ type: "GET_PREFS" }),
       ]) as [{ entries: BlockEntry[] }, { prefs: Prefs }];
-      setEntries(listRes.entries);
+      setEntries(Array.isArray(listRes.entries) ? listRes.entries : []);
       setPrefs(prefsRes.prefs);
+      setError(null);
+      setLoaded(true);
+    } catch (err) {
+      // Previously `try/finally` only: a dead background rejected the
+      // promise and the popup rendered a confident, empty block list with no
+      // hint that nothing had been read. Never present failure as data.
+      setError(describeError(err));
     } finally {
       setLoading(false);
     }
   }
 
+  function describeError(err: unknown): string {
+    const raw = err instanceof Error ? err.message : String(err);
+    if (/Receiving end does not exist|Could not establish connection/i.test(raw)) {
+      return "The extension background is not responding. Reload the extension or this page.";
+    }
+    return raw || "Unexpected extension error.";
+  }
+
   async function updatePrefs(patch: PrefsPatch) {
-    const res = await browser.runtime.sendMessage({ type: "SET_PREFS", patch }) as { prefs: Prefs };
-    setPrefs(res.prefs);
+    try {
+      const res = await browser.runtime.sendMessage({ type: "SET_PREFS", patch }) as { prefs: Prefs };
+      setPrefs(res.prefs);
+      setError(null);
+    } catch (err) {
+      setError(describeError(err));
+    }
   }
 
   async function refreshEntries() {
-    const res = await browser.runtime.sendMessage({ type: "GET_LIST" }) as { entries: BlockEntry[] };
-    setEntries(res.entries);
+    try {
+      const res = await browser.runtime.sendMessage({ type: "GET_LIST" }) as { entries: BlockEntry[] };
+      setEntries(Array.isArray(res.entries) ? res.entries : []);
+    } catch (err) {
+      setError(describeError(err));
+    }
   }
 
   if (loading) {
@@ -104,6 +133,54 @@ export function App() {
         color: "var(--text-3)",
       }}>
         Loading…
+      </div>
+    );
+  }
+
+  // Initial load failed: there is no data to show. Rendering the normal shell
+  // would report "0 blocked · 0 total" and an empty list — both false
+  // statements about the user's actual block list.
+  if (error && !loaded) {
+    return (
+      <div id="app" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+        <div style={{
+          background: "var(--accent)",
+          color: "#fff",
+          padding: "10px 14px",
+          fontWeight: 700,
+          fontSize: "14px",
+          letterSpacing: "0.3px",
+          flexShrink: 0,
+        }}>
+          🔍 Search-Hit-Hider
+        </div>
+        <div role="alert" style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "flex-start",
+          gap: "10px",
+          padding: "16px 14px",
+          color: "var(--danger)",
+          fontSize: "12px",
+        }}>
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => void loadData()}
+            style={{
+              background: "var(--danger)",
+              color: "#fff",
+              border: "none",
+              borderRadius: "var(--radius-sm)",
+              padding: "5px 10px",
+              cursor: "pointer",
+              fontSize: "12px",
+              fontWeight: 600,
+            }}
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -183,6 +260,39 @@ export function App() {
           ))}
         </div>
       </div>
+
+      {/* Load / action failure — shown instead of a silently empty list */}
+      {error && (
+        <div role="alert" style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+          padding: "6px 10px",
+          background: "rgba(217,83,79,0.12)",
+          borderBottom: "1px solid rgba(217,83,79,0.4)",
+          color: "var(--danger)",
+          fontSize: "11px",
+          flexShrink: 0,
+        }}>
+          <span style={{ flex: 1 }}>{error}</span>
+          <button
+            type="button"
+            onClick={() => void loadData()}
+            style={{
+              background: "var(--danger)",
+              color: "#fff",
+              border: "none",
+              borderRadius: "var(--radius-sm)",
+              padding: "3px 8px",
+              cursor: "pointer",
+              fontSize: "11px",
+              fontWeight: 600,
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Tab body — flex: 1 fills all remaining space; overflow: hidden so
           each tab manages its own internal scrolling */}

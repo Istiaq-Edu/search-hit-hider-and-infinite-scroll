@@ -3,7 +3,7 @@ import { Sentinel } from "./sentinel";
 import { Deduper, unwrapProxyDestination } from "./deduper";
 import { fetchPage } from "./fetcher";
 import { extractFaviconDataAny } from "./favicon-data";
-import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type ScrollState } from "./persist";
+import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type ScrollState, type SavedPageRequest } from "./persist";
 import { revealCoverSubtree } from "../markers";
 
 /**
@@ -102,9 +102,18 @@ export class InfiniteScrollManager {
   private abortController: AbortController | null = null;
   private urlCheckInterval: ReturnType<typeof setInterval> | null = null;
   private pageContainers = new Map<number, HTMLElement>();
+  /** Owns click listeners on pager links; aborted on teardown instead of
+   *  cloning anchors (cloning destroyed the engine's own handlers). */
+  private pagerAbort: AbortController | null = null;
+  private scrollSaveBound = false;
 
   private isLoading = false;
+  /** True while saved pages are being re-fetched; scroll saves are frozen. */
+  private isReplaying = false;
   private currentPage = 1;
+  /** Requests for pages appended by auto-load, replayed on reload/back so a
+   *  persisted deep scroll offset can actually be reached. */
+  private loadedRequests: SavedPageRequest[] = [];
   private nextUrl: string | null = null;
   // Engines that paginate via POST (Startpage) supply a request descriptor
   // instead of a plain GET URL; nextUrl is kept in sync for the sentinel state.
@@ -118,6 +127,9 @@ export class InfiniteScrollManager {
   private destroyed = false;
   private isTriggerEngine = false;
   private consecutiveErrors = 0;
+  /** True when paging stopped because the old maxPages limit was reached
+   *  (distinguishes it from a genuine end so raising the limit resumes). */
+  private stoppedAtMaxPages = false;
   // Generation token for in-flight fetches (B1): destroy() and every new
   // fetchNextPage() bump it, so a stale continuation (jitter sleep outliving
   // an abort, SPA re-search) can never write state — or clear the guard —
@@ -160,6 +172,7 @@ export class InfiniteScrollManager {
     }
     this.currentPage = 1;
     this.consecutiveEmptyPages = 0;
+    this.stoppedAtMaxPages = false;
     // B2: soft-block strikes must not leak across searches — two errors on
     // SERP A plus one transient null on SERP B would hit the 3-strike stop
     // and kill the new query with no retry button.
@@ -202,6 +215,10 @@ export class InfiniteScrollManager {
 
   destroy(): void {
     this.destroyed = true;
+    // A replay's finally is epoch-gated and bails after teardown, so without
+    // this reset a SPA navigation mid-replay would leave the flag set forever
+    // and writeScrollState() would refuse to save for the whole tab session.
+    this.isReplaying = false;
     // B1: kill stale fetch continuations even when no re-init follows.
     this.fetchEpoch++;
     this.observer?.disconnect();
@@ -214,10 +231,7 @@ export class InfiniteScrollManager {
       clearInterval(this.urlCheckInterval);
       this.urlCheckInterval = null;
     }
-    if (this.scrollSaveTimer) {
-      clearTimeout(this.scrollSaveTimer);
-      this.scrollSaveTimer = null;
-    }
+    this.unbindScrollSave();
     if (this.observerDeferTimer) {
       clearTimeout(this.observerDeferTimer);
       this.observerDeferTimer = null;
@@ -226,9 +240,17 @@ export class InfiniteScrollManager {
       clearTimeout(this.faviconRetryTimer);
       this.faviconRetryTimer = null;
     }
-    window.removeEventListener("scroll", this.onScroll);
-    window.removeEventListener("beforeunload", this.saveScrollStateInternal);
-    window.removeEventListener("pagehide", this.saveScrollStateInternal);
+    // Ported styles and icon intel belong to the old search. Style tags are
+    // document-global (their [data-inf-page] scope stays valid but their
+    // rules accumulate on every SPA navigation); the icon maps are keyed by
+    // the old result hosts. Leaving them made long-lived tabs grow without
+    // bound and could paint stale rules onto the next search.
+    document.querySelectorAll("style[data-shh-fetched-style]").forEach((s) => s.remove());
+    this.portedStyleHashes.clear();
+    this.faviconInline.clear();
+    this.faviconIntel = null;
+    this.tier0SampleLogged = false;
+    this.loadedRequests = [];
     // Navigation listeners too (A1 7b): without this, a leaked closure fired
     // on the next popstate/hashchange would call handleNavigation() on this
     // DESTROYED manager — re-initializing infinite scroll the user had just
@@ -242,6 +264,47 @@ export class InfiniteScrollManager {
     // fresh results page.
     this.restorePagination();
     this.pageContainers.clear();
+  }
+
+  /**
+   * Apply live preference changes without tearing the session down.
+   * Recreating the manager on every popup keystroke would lose the dedupe
+   * set, appended pages, and scroll position.
+   */
+  updateConfig(prefs: Partial<InfiniteScrollPrefs>): void {
+    const prev = this.config;
+    this.config = { ...prev, ...prefs };
+
+    if (this.observer && this.sentinel && prev.threshold !== this.config.threshold) {
+      this.observer.disconnect();
+      this.observer = this.createObserver();
+      this.observer.observe(this.sentinel.element);
+    }
+
+    if (prev.persist !== this.config.persist) {
+      if (this.config.persist) {
+        if (this.hasMore) this.bindScrollSave();
+      } else {
+        this.unbindScrollSave();
+        clearScrollState();
+      }
+    }
+
+    if (this.hasMore && this.currentPage >= this.config.maxPages) {
+      this.stoppedAtMaxPages = true;
+      this.finishPaging();
+    } else if (this.stoppedAtMaxPages && this.currentPage < this.config.maxPages) {
+      // maxPages was raised after the auto-loader had already stopped at the
+      // old limit: resume (and re-observe so a visible sentinel fires now).
+      this.stoppedAtMaxPages = false;
+      this.hasMore = true;
+      this.sentinel?.setState("idle");
+      this.hidePagination();
+      if (this.observer && this.sentinel) {
+        this.observer.unobserve(this.sentinel.element);
+        this.observer.observe(this.sentinel.element);
+      }
+    }
   }
 
   private removeNavigationListeners(): void {
@@ -280,12 +343,13 @@ export class InfiniteScrollManager {
   // ── Private ─────────────────────────────────────────────────────────────
 
   private removePaginationListeners(): void {
-    const links = this.container.querySelectorAll<HTMLAnchorElement>('a[data-inf-intercept]');
-    for (const link of links) {
-      link.removeAttribute('data-inf-intercept');
-      const clone = link.cloneNode(true) as HTMLAnchorElement;
-      link.parentNode?.replaceChild(clone, link);
-    }
+    this.pagerAbort?.abort();
+    this.pagerAbort = null;
+    // Markers are document-wide (the pager can sit outside the results
+    // container, e.g. Google's #botstuff), so sweep the whole document.
+    document.querySelectorAll("a[data-inf-intercept]").forEach((link) => {
+      link.removeAttribute("data-inf-intercept");
+    });
   }
 
   /** Elements the native pager was hiding on — remembered so it can be
@@ -297,12 +361,11 @@ export class InfiniteScrollManager {
   private hidePagination(): void {
     const selectors = this.engine.getPaginationSelectors?.();
     if (!selectors) return;
-    this.hiddenPagerEls = [];
     for (const sel of selectors) {
       const els = document.querySelectorAll(sel);
       for (const el of els) {
         const html = el as HTMLElement;
-        this.hiddenPagerEls.push(html);
+        if (!this.hiddenPagerEls.includes(html)) this.hiddenPagerEls.push(html);
         html.style.display = "none";
       }
     }
@@ -315,32 +378,72 @@ export class InfiniteScrollManager {
       try { el.style.removeProperty("display"); } catch { /* detached */ }
     }
     this.hiddenPagerEls = [];
+    // The pager is visible again: page-number links for pages already in the
+    // DOM should scroll to them instead of reloading the SERP.
+    this.interceptPagination();
+  }
+
+  /** Terminal stop: no further automatic pages; hand the pager back. */
+  private finishPaging(): void {
+    this.hasMore = false;
+    this.sentinel?.setState("done");
+    this.restorePagination();
   }
 
   /**
-   * Intercept clicks on visible pagination page-number links so that
-   * if the page was already fetched by infinite scroll, we scroll to
-   * that content instead of navigating away (full page reload).
+   * Intercept clicks on page-number links for pages auto-load already
+   * appended: scroll to the loaded page instead of navigating away.
+   *
+   * Scoped to the engine's pagination selectors — the previous document-wide
+   * `a[href]` scan plus `parseInt(text)` hijacked ANY link whose text merely
+   * STARTED with a digit ("10 best VPNs", "3D printing") and called
+   * preventDefault() before checking that a loaded page existed. Listeners
+   * live on one AbortController so teardown never has to clone anchors
+   * (cloning silently discarded the engine's own click handlers).
    */
   private interceptPagination(): void {
-    const links = document.querySelectorAll<HTMLAnchorElement>(
-      'a[href]:not([data-inf-intercept])'
-    );
-    for (const link of links) {
-      const text = link.textContent?.trim() ?? '';
-      const pageNum = parseInt(text, 10);
-      if (isNaN(pageNum) || pageNum < 2) continue;
-      if (!this.container.querySelector(`[data-inf-page="${pageNum}"]`)) continue;
-      link.setAttribute('data-inf-intercept', '1');
-      link.addEventListener('click', (e) => {
-        e.preventDefault();
-        const target = this.container.querySelector<HTMLElement>(
-          `[data-inf-page="${pageNum}"]`
-        );
-        if (target) {
-          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (this.destroyed) return;
+    const selectors = this.engine.getPaginationSelectors?.() ?? [];
+    if (selectors.length === 0) return;
+    if (!this.pagerAbort) this.pagerAbort = new AbortController();
+    const signal = this.pagerAbort.signal;
+    const seen = new Set<Element>();
+    for (const sel of selectors) {
+      let roots: Element[];
+      try {
+        roots = Array.from(document.querySelectorAll(sel));
+      } catch {
+        continue; // engine-supplied selector, but never let a bad one throw
+      }
+      for (const root of roots) {
+        const links = root.matches("a[href]")
+          ? [root as HTMLAnchorElement]
+          : Array.from(root.querySelectorAll<HTMLAnchorElement>("a[href]"));
+        for (const link of links) {
+          if (seen.has(link) || link.hasAttribute("data-inf-intercept")) continue;
+          const text = link.textContent?.trim() ?? "";
+          if (!/^\d+$/.test(text)) continue;
+          const pageNum = Number(text);
+          if (pageNum < 2) continue;
+          if (!this.container.querySelector(`[data-inf-page="${pageNum}"]`)) continue;
+          seen.add(link);
+          link.setAttribute("data-inf-intercept", "1");
+          link.addEventListener(
+            "click",
+            (e) => {
+              const target = this.container.querySelector<HTMLElement>(
+                `[data-inf-page="${pageNum}"]`
+              );
+              // Page containers get discarded as the session grows; never
+              // swallow a click that has nowhere to go.
+              if (!target) return;
+              e.preventDefault();
+              target.scrollIntoView({ behavior: "smooth", block: "start" });
+            },
+            { signal }
+          );
         }
-      });
+      }
     }
   }
 
@@ -388,8 +491,8 @@ export class InfiniteScrollManager {
     }
   }
 
-  private startObserver(): void {
-    this.observer = new IntersectionObserver(
+  private createObserver(): IntersectionObserver {
+    return new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting) {
           void this.fetchNextPage();
@@ -397,6 +500,10 @@ export class InfiniteScrollManager {
       },
       { rootMargin: `${this.config.threshold}px` }
     );
+  }
+
+  private startObserver(): void {
+    this.observer = this.createObserver();
     if (this.sentinel) {
       // Defer by 2s so the sentinel doesn't fire immediately on short
       // first pages where it's already within the threshold. Tracked (B7):
@@ -442,11 +549,10 @@ export class InfiniteScrollManager {
     if (this.isLoading || !this.hasMore) return;
     if (!this.isTriggerEngine && !this.nextUrl) return;
     if (this.currentPage >= this.config.maxPages) {
-      this.hasMore = false;
-      this.sentinel?.setState("done");
       // Release the native pager (S2): at maxPages the auto-loader stops by
       // design — the user must be able to continue manually from here.
-      this.restorePagination();
+      this.stoppedAtMaxPages = true;
+      this.finishPaging();
       return;
     }
 
@@ -474,13 +580,13 @@ export class InfiniteScrollManager {
         this.currentPage++;
         const btn = document.querySelector('button[data-testid="more-results"], button.result--more__btn, .results--more button, a.result--more__link');
         this.hasMore = !!btn && this.currentPage < this.config.maxPages;
-        this.sentinel?.setState(this.hasMore ? "idle" : "done");
+        if (!this.hasMore) this.finishPaging();
+        else this.sentinel?.setState("idle");
       } catch (err) {
         if (epoch !== this.fetchEpoch) return;
         // Button not found = no more pages, not an error
         if ((err as Error)?.message?.includes("No")) {
-          this.hasMore = false;
-          this.sentinel?.setState("done");
+          this.finishPaging();
         } else {
           this.sentinel?.setState("error", () => this.retryFetch());
         }
@@ -511,11 +617,13 @@ export class InfiniteScrollManager {
         this.log(`backing off ${Math.round(backoffMs)}ms after ${this.consecutiveErrors} error(s)`);
       }
 
+      const requestUrl = this.nextUrl!;
+      const requestInit = this.nextPageRequest?.init;
       const result = await fetchPage(
-        this.nextUrl!,
+        requestUrl,
         this.abortController.signal,
         backoffMs,
-        this.nextPageRequest?.init
+        requestInit
       );
       if (epoch !== this.fetchEpoch) return;
 
@@ -523,8 +631,7 @@ export class InfiniteScrollManager {
         this.consecutiveErrors++;
         if (this.consecutiveErrors >= 3) {
           this.log("Too many consecutive errors, stopping");
-          this.hasMore = false;
-          this.sentinel?.setState("done");
+          this.finishPaging();
         } else {
           this.sentinel?.setState("error", () => this.retryFetch());
         }
@@ -536,6 +643,16 @@ export class InfiniteScrollManager {
       const rawCount = newNodes.length;
       const deduped = newNodes.filter((n) => !this.deduper.isDuplicate(n, this.engine));
 
+      // maxPages is live: updateConfig() may have lowered it while this
+      // request was in flight, and appending here would put a page past the
+      // limit the user just chose (and flip the sentinel back to idle after
+      // updateConfig already finished paging).
+      if (this.currentPage >= this.config.maxPages) {
+        this.stoppedAtMaxPages = true;
+        this.finishPaging();
+        return;
+      }
+
       // Increment BEFORE appending and building the next request: the page
       // container marker and the next page number must both reflect the page
       // that was just fetched (building first, incrementing later produced
@@ -545,6 +662,10 @@ export class InfiniteScrollManager {
       if (deduped.length > 0) {
         this.appendNodes(deduped, result.doc);
         this.consecutiveEmptyPages = 0;
+        this.loadedRequests.push(this.toSavedRequest(requestUrl, requestInit));
+        // Appending may leave the pager rendered/visible (engines that keep
+        // it); arm scroll-to-page interception for the new containers.
+        this.interceptPagination();
       } else {
         // A 200 page with zero extractable results is either a soft block
         // page or a client-hydrated response whose result markup never
@@ -586,15 +707,28 @@ export class InfiniteScrollManager {
           this.nextPageRequest = null;
         }
       }
-      this.hasMore = !!(this.nextPageRequest || this.nextUrl);
+      // The page limit is live: maxPages can be lowered while this request
+      // is in flight (updateConfig finishes paging at the new limit), so the
+      // continuation must not append one page past it or flip the sentinel
+      // back to idle. Mark the stop so raising maxPages can resume later.
+      this.hasMore =
+        !!(this.nextPageRequest || this.nextUrl) &&
+        this.currentPage < this.config.maxPages;
       if (this.consecutiveEmptyPages >= 2) {
         this.hasMore = false;
+      }
+      if (
+        !this.hasMore &&
+        this.currentPage >= this.config.maxPages &&
+        (this.nextPageRequest || this.nextUrl)
+      ) {
+        this.stoppedAtMaxPages = true;
       }
 
       this.sentinel?.setState(this.hasMore ? "idle" : "done");
       // Session over (genuine end / 2 empties / 3 strikes) → hand pagination
       // back to the engine's native pager (S2).
-      if (!this.hasMore) this.restorePagination();
+      if (!this.hasMore) this.finishPaging();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (epoch !== this.fetchEpoch) return;
@@ -605,8 +739,7 @@ export class InfiniteScrollManager {
       this.log("Fetch error:", err);
       if (this.consecutiveErrors >= 3) {
         this.log("Too many consecutive errors, stopping");
-        this.hasMore = false;
-        this.sentinel?.setState("done");
+        this.finishPaging();
       } else {
         this.sentinel?.setState("error", () => this.retryFetch());
       }
@@ -631,6 +764,16 @@ export class InfiniteScrollManager {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams(req.body).toString(),
       },
+    };
+  }
+
+  /** Serialize a fetch request for scroll-state replay (localStorage-safe). */
+  private toSavedRequest(url: string, init?: RequestInit): SavedPageRequest {
+    const body = typeof init?.body === "string" ? init.body : undefined;
+    return {
+      url,
+      ...(init?.method === "POST" ? { method: "POST" } : {}),
+      ...(body !== undefined ? { body } : {}),
     };
   }
 
@@ -2259,9 +2402,23 @@ export class InfiniteScrollManager {
   }
 
   private bindScrollSave(): void {
+    if (this.scrollSaveBound) return;
+    this.scrollSaveBound = true;
     window.addEventListener("scroll", this.onScroll, { passive: true });
     window.addEventListener("beforeunload", this.saveScrollStateInternal);
     window.addEventListener("pagehide", this.saveScrollStateInternal);
+  }
+
+  private unbindScrollSave(): void {
+    if (this.scrollSaveTimer) {
+      clearTimeout(this.scrollSaveTimer);
+      this.scrollSaveTimer = null;
+    }
+    if (!this.scrollSaveBound) return;
+    this.scrollSaveBound = false;
+    window.removeEventListener("scroll", this.onScroll);
+    window.removeEventListener("beforeunload", this.saveScrollStateInternal);
+    window.removeEventListener("pagehide", this.saveScrollStateInternal);
   }
 
   private onScroll = (): void => {
@@ -2276,12 +2433,23 @@ export class InfiniteScrollManager {
 
   private writeScrollState(url: string): void {
     if (!this.config.persist) return;
+    // A replay is rebuilding the very pages the record describes. Saving in
+    // that window wrote `loadedPages` while `loadedRequests` was still empty
+    // (it used to be assigned only after the loop), so the next load took the
+    // "legacy state" branch and cleared the record — deep restore worked at
+    // most once. Keep the old record until the replay finishes.
+    if (this.isReplaying) return;
+    // Trigger engines (native infinite scroll) cannot replay their loaded
+    // content: storing a page count with no requests would restore nothing
+    // and then clear the user's state on the next load.
+    if (this.isTriggerEngine) return;
     saveScrollState({
       url,
       scrollY: window.scrollY,
-      loadedUrls: [],
+      loadedUrls: this.loadedRequests.map((r) => r.url),
       loadedPages: this.currentPage,
       timestamp: Date.now(),
+      loadedRequests: this.loadedRequests.map((r) => ({ ...r })),
     });
   }
 
@@ -2303,21 +2471,177 @@ export class InfiniteScrollManager {
     }
     // Only restore if extra pages were loaded — avoids auto-scrolling
     // to the bottom on a fresh first-page visit.
-    if (saved.loadedPages <= 1) return;
-    // Never clamp-jump: auto-loaded pages are NOT re-fetched on load, so a
-    // saved offset beyond the current document height would be clamped by
-    // the browser to (bottom of page 1) — the exact "lands at bottom" bug.
-    const maxY = document.documentElement.scrollHeight - window.innerHeight;
-    if (saved.scrollY > maxY) {
+    if (saved.loadedPages <= 1) {
       clearScrollState();
       return;
     }
-    // Defer scroll restoration after DOM is stable — but not past teardown:
-    // toggling the pref off in the same frame must cancel the jump.
-    requestAnimationFrame(() => {
-      if (this.destroyed) return;
-      window.scrollTo(0, saved.scrollY);
-    });
+    // Native restoration succeeds when page 1 alone is tall enough for the
+    // saved offset. Deeper offsets need the appended pages back first.
+    const maxY = document.documentElement.scrollHeight - window.innerHeight;
+    if (saved.scrollY <= maxY) {
+      requestAnimationFrame(() => {
+        if (this.destroyed) return;
+        window.scrollTo(0, saved.scrollY);
+      });
+      return;
+    }
+    const requests = saved.loadedRequests ?? [];
+    if (requests.length === 0) {
+      // Legacy state (saved before requests were recorded) or a trigger
+      // engine: replay is impossible. Never clamp-jump to the end of page 1.
+      clearScrollState();
+      return;
+    }
+    void this.replayScrollState(saved, requests);
+  }
+
+  /**
+   * Re-fetch the auto-loaded pages recorded in the saved state, then restore
+   * the scroll offset. Runs before the sentinel's first observation and
+   * holds isLoading so no concurrent auto-fetch can interleave.
+   */
+  private async replayScrollState(
+    saved: ScrollState,
+    requests: SavedPageRequest[]
+  ): Promise<void> {
+    const epoch = ++this.fetchEpoch;
+    this.isReplaying = true;
+    this.isLoading = true;
+    this.sentinel?.setState("loading");
+    this.abortController?.abort();
+    this.abortController = new AbortController();
+    const signal = this.abortController.signal;
+    const cap = Math.max(0, Math.min(requests.length, this.config.maxPages - 1));
+    this.loadedRequests = [];
+
+    try {
+      for (let i = 0; i < cap; i++) {
+        if (this.destroyed || epoch !== this.fetchEpoch) return;
+        // maxPages is live (updateConfig can lower it mid-replay): never
+        // restore more pages than the current limit allows.
+        if (this.currentPage >= this.config.maxPages) {
+          this.stoppedAtMaxPages = true;
+          break;
+        }
+        const req = requests[i];
+        if (!req) break;
+        // The scroll record lives in PAGE-origin localStorage, so a script on
+        // the search engine can rewrite it. Only replay requests this engine
+        // could have produced; otherwise a poisoned record becomes a
+        // credentialed fetch (or an arbitrary POST body) against any host the
+        // extension has permissions for.
+        if (!this.isReplayableRequest(req)) {
+          this.log("Ignoring unreplayable saved request", req.url);
+          break;
+        }
+
+        let result: Awaited<ReturnType<typeof fetchPage>> = null;
+        try {
+          result = await fetchPage(
+            req.url,
+            signal,
+            i === 0 ? 0 : this.config.fetchDelay,
+            this.savedRequestInit(req)
+          );
+        } catch (err) {
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          break;
+        }
+        if (!result || this.destroyed || epoch !== this.fetchEpoch) break;
+
+        // Post-fetch work is inside the same guard as the normal path. This
+        // promise is fire-and-forgotten, so one throwing engine call used to
+        // reject silently and leave `isLoading` true for the rest of the
+        // session: the sentinel stayed on "Loading more results…" with no
+        // retry control.
+        try {
+          const nodes = this.filterResults(this.engine.getResultNodes(result.doc));
+          const deduped = nodes.filter((n) => !this.deduper.isDuplicate(n, this.engine));
+          this.currentPage++;
+          if (deduped.length > 0) {
+            this.appendNodes(deduped, result.doc);
+            this.interceptPagination();
+            this.loadedRequests.push({ ...req });
+          }
+          // Keep nextUrl aligned with the deepest page actually restored; a
+          // failure part-way leaves the previous page's link, which points at
+          // exactly the next page to fetch.
+          const nextReq = this.buildNextPageRequest(result.doc);
+          if (nextReq) {
+            this.nextPageRequest = nextReq;
+            this.nextUrl = nextReq.url;
+          } else {
+            this.nextPageRequest = null;
+            this.nextUrl = this.engine.getNextPageUrl?.(result.doc) ?? null;
+          }
+        } catch (err) {
+          this.log("Replay page could not be applied:", err);
+          break;
+        }
+
+        // Enough height to cover the saved offset: further pages are pure
+        // network cost. Measured AFTER the append, so it reflects the DOM.
+        if (document.documentElement.scrollHeight >= saved.scrollY + window.innerHeight) {
+          break;
+        }
+      }
+    } finally {
+      // Release OUR replay flag even on the early-return paths. Only touch it
+      // when no newer replay superseded this one, so a stale replay cannot
+      // clear the flag of the fetch that replaced it. destroy() also resets
+      // it, because teardown bumps the epoch before this finally runs.
+      if (epoch === this.fetchEpoch) this.isReplaying = false;
+      // Every other session-visible flag is released here, including after a
+      // throw. Epoch-gated like the normal path: a stale replay must not
+      // clear the state of the fetch that superseded it.
+      if (this.destroyed || epoch !== this.fetchEpoch) return;
+      this.hasMore =
+        !!(this.nextUrl || this.nextPageRequest) &&
+        this.currentPage < this.config.maxPages;
+      this.sentinel?.setState(this.hasMore ? "idle" : "done");
+      if (!this.hasMore) this.restorePagination();
+      this.isLoading = false;
+
+      requestAnimationFrame(() => {
+        if (this.destroyed || epoch !== this.fetchEpoch) return;
+        const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+        window.scrollTo(0, Math.min(saved.scrollY, maxY));
+      });
+    }
+  }
+
+  /**
+   * A saved request is only replayable when it targets this engine over
+   * http(s), uses a method this extension emits, and carries a bounded body.
+   * `_shh_*` scroll state is page-origin and therefore untrusted input.
+   */
+  private isReplayableRequest(req: SavedPageRequest): boolean {
+    let url: URL;
+    try {
+      url = new URL(req.url);
+    } catch {
+      return false;
+    }
+    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+    if (req.method !== undefined && req.method !== "GET" && req.method !== "POST") {
+      return false;
+    }
+    if (req.body !== undefined && req.body.length > 8192) return false;
+    try {
+      return this.engine.matches(url);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Rebuild the fetch init for a saved replay request (POST engines). */
+  private savedRequestInit(req: SavedPageRequest): RequestInit | undefined {
+    if (req.method !== "POST") return undefined;
+    return {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      ...(req.body !== undefined ? { body: req.body } : {}),
+    };
   }
 
   /**

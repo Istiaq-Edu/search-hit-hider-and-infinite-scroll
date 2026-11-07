@@ -4,6 +4,7 @@ import type {
   BulkOperation,
   Prefs,
   ExtMessage,
+  UndoLastResponse,
 } from "../shared/types";
 
 // ============================================================
@@ -83,7 +84,6 @@ export async function getPrefs(): Promise<Prefs> {
   return res.prefs;
 }
 
-export async function undoLast(): Promise<BlockEntry | null> {
-  const res = await send<{ restored: BlockEntry | null }>({ type: "UNDO_LAST" });
-  return res.restored;
+export async function undoLast(domain?: string): Promise<UndoLastResponse> {
+  return send<UndoLastResponse>({ type: "UNDO_LAST", domain });
 }

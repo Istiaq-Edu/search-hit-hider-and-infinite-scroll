@@ -8,6 +8,10 @@ import { getDomainLevels, normalizeDomain } from "../../shared/domain-utils";
 type DialogCallback = (domain: string, mode: BlockMode) => void;
 
 let activeDialog: HTMLElement | null = null;
+// The element that had focus when the dialog opened. Restoring it on close is
+// what keeps keyboard interaction from dropping back to <body>.
+let previousFocus: HTMLElement | null = null;
+let dialogSeq = 0;
 // Arming is delayed so the click that OPENED the dialog cannot immediately
 // close it. That timer used to be fire-and-forget: a dialog dismissed inside
 // the 50 ms window still attached a document-level listener afterwards, and
@@ -19,15 +23,22 @@ export function showBlockDialog(
   url: string,
   anchor: HTMLElement,
   onConfirm: DialogCallback,
-  domainChoiceMode: "exact" | "root" | "ask" = "ask"
+  domainChoiceMode: "exact" | "root" | "ask" = "ask",
+  stripWww = true
 ): void {
+  const trigger =
+    document.activeElement instanceof HTMLElement ? document.activeElement : anchor;
   dismissDialog();
+  previousFocus = trigger;
 
   const hostname = extractHostname(url);
-  if (!hostname) return;
+  if (!hostname) {
+    previousFocus = null;
+    return;
+  }
 
-  const normalized = normalizeDomain(hostname);
-  const levels = getDomainLevels(normalized);
+  const normalized = normalizeDomain(hostname, stripWww);
+  const levels = getDomainLevels(normalized, stripWww);
 
   if (domainChoiceMode === "exact" || levels.length <= 1) {
     // No dialog needed — use the most specific level
@@ -55,10 +66,11 @@ function showDomainChoiceDialog(
   onChosen: (domain: string) => void
 ): void {
   const dialog = createDialog();
+  const title = appendTitle(dialog, "Choose domain level to block:");
 
-  const title = document.createElement("h4");
-  title.textContent = "Choose domain level to block:";
-  dialog.appendChild(title);
+  const group = document.createElement("div");
+  group.setAttribute("role", "radiogroup");
+  group.setAttribute("aria-labelledby", title.id);
 
   // Default to the most specific (subdomain / full hostname) — levels[0].
   // The user can broaden to the root domain by selecting a lower option.
@@ -79,8 +91,9 @@ function showDomainChoiceDialog(
     span.textContent = level;
 
     label.append(radio, span);
-    dialog.appendChild(label);
+    group.appendChild(label);
   }
+  dialog.appendChild(group);
 
   const actions = document.createElement("div");
   actions.className = "shh-dialog-actions";
@@ -89,13 +102,17 @@ function showDomainChoiceDialog(
   cancelBtn.type = "button";
   cancelBtn.className = "shh-dialog-cancel";
   cancelBtn.textContent = "Cancel";
-  cancelBtn.addEventListener("click", () => dismissDialog());
+  cancelBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    dismissDialog();
+  });
 
   const nextBtn = document.createElement("button");
   nextBtn.type = "button";
   nextBtn.className = "shh-dialog-block";
   nextBtn.textContent = "Next →";
-  nextBtn.addEventListener("click", () => {
+  nextBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     // Capture current selection before dismissing
     const chosen = selected;
     dismissDialog();
@@ -108,11 +125,7 @@ function showDomainChoiceDialog(
   actions.append(cancelBtn, nextBtn);
   dialog.appendChild(actions);
 
-  positionDialog(dialog, anchor);
-  document.body.appendChild(dialog);
-  activeDialog = dialog;
-
-  armOutsideClick();
+  mountDialog(dialog, anchor);
 }
 
 function showModeDialog(
@@ -121,10 +134,7 @@ function showModeDialog(
   onConfirm: DialogCallback
 ): void {
   const dialog = createDialog();
-
-  const title = document.createElement("h4");
-  title.textContent = `Block "${domain}"`;
-  dialog.appendChild(title);
+  appendTitle(dialog, `Block "${domain}"`);
 
   const actions = document.createElement("div");
   actions.className = "shh-dialog-actions";
@@ -133,13 +143,17 @@ function showModeDialog(
   cancelBtn.type = "button";
   cancelBtn.className = "shh-dialog-cancel";
   cancelBtn.textContent = "Cancel";
-  cancelBtn.addEventListener("click", () => dismissDialog());
+  cancelBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    dismissDialog();
+  });
 
   const blockBtn = document.createElement("button");
   blockBtn.type = "button";
   blockBtn.className = "shh-dialog-block";
   blockBtn.textContent = "Block";
-  blockBtn.addEventListener("click", () => {
+  blockBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     dismissDialog();
     onConfirm(domain, "block");
   });
@@ -148,7 +162,8 @@ function showModeDialog(
   pbanBtn.type = "button";
   pbanBtn.className = "shh-dialog-pban";
   pbanBtn.textContent = "Perma-ban";
-  pbanBtn.addEventListener("click", () => {
+  pbanBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     dismissDialog();
     onConfirm(domain, "pban");
   });
@@ -156,18 +171,77 @@ function showModeDialog(
   actions.append(cancelBtn, blockBtn, pbanBtn);
   dialog.appendChild(actions);
 
-  positionDialog(dialog, anchor);
-  document.body.appendChild(dialog);
-  activeDialog = dialog;
-
-  armOutsideClick();
+  mountDialog(dialog, anchor);
 }
 
 function createDialog(): HTMLElement {
   const div = document.createElement("div");
   div.className = "shh-dialog";
   div.setAttribute("role", "dialog");
+  div.setAttribute("aria-modal", "true");
   return div;
+}
+
+function appendTitle(dialog: HTMLElement, text: string): HTMLElement {
+  const title = document.createElement("h4");
+  title.id = `shh-dialog-title-${++dialogSeq}`;
+  title.textContent = text;
+  dialog.setAttribute("aria-labelledby", title.id);
+  dialog.appendChild(title);
+  return title;
+}
+
+function mountDialog(dialog: HTMLElement, anchor: HTMLElement): void {
+  // The two-step flow (domain → mode) runs through dismissDialog() between
+  // dialogs, which clears previousFocus before the second dialog mounts.
+  // Capture whatever focus dismissDialog just restored (the original
+  // trigger), or the final close would drop focus back to <body>.
+  if (!previousFocus) {
+    previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
+  positionDialog(dialog, anchor);
+  document.body.appendChild(dialog);
+  activeDialog = dialog;
+  // Listen on the document, not the dialog: page scripts can move focus out
+  // of the dialog, and a dialog-scoped listener then stops seeing Escape and
+  // Tab — leaving an aria-modal dialog that keyboard users cannot dismiss.
+  document.addEventListener("keydown", onDialogKeydown, true);
+  // Least-destructive control first: Cancel in the mode dialog, the default
+  // radio in the domain dialog. Enter can never trigger a block by accident.
+  getFocusable(dialog)[0]?.focus({ preventScroll: true });
+  armOutsideClick();
+}
+
+function getFocusable(root: HTMLElement): HTMLElement[] {
+  const selector =
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+    'textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+  return Array.from(root.querySelectorAll<HTMLElement>(selector));
+}
+
+function onDialogKeydown(e: KeyboardEvent): void {
+  if (!e.isTrusted) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    dismissDialog();
+    return;
+  }
+  if (e.key !== "Tab" || !activeDialog) return;
+
+  const focusables = getFocusable(activeDialog);
+  if (focusables.length === 0) return;
+  const active = document.activeElement as HTMLElement | null;
+  const index = active ? focusables.indexOf(active) : -1;
+  const next = e.shiftKey
+    ? index <= 0 ? focusables.length - 1 : index - 1
+    : index === -1 || index === focusables.length - 1 ? 0 : index + 1;
+
+  // Wrap inside the dialog: Tab otherwise escapes into the page behind it,
+  // which aria-modal tells assistive tech is unavailable.
+  e.preventDefault();
+  focusables[next]?.focus();
 }
 
 function positionDialog(dialog: HTMLElement, anchor: HTMLElement): void {
@@ -187,23 +261,41 @@ function armOutsideClick(): void {
 }
 
 function outsideClickHandler(e: MouseEvent): void {
+  // Page scripts can dispatch document-level clicks; they must not tear down
+  // a dialog the user is interacting with.
+  if (!e.isTrusted) return;
   if (!activeDialog) {
     document.removeEventListener("click", outsideClickHandler);
     return;
   }
   if (!activeDialog.contains(e.target as Node)) {
-    dismissDialog();
+    dismissDialog({ preserveNewFocus: true });
   }
 }
 
-export function dismissDialog(): void {
+export function dismissDialog(opts: { preserveNewFocus?: boolean } = {}): void {
   if (outsideArmTimer !== null) {
     clearTimeout(outsideArmTimer);
     outsideArmTimer = null;
   }
   document.removeEventListener("click", outsideClickHandler);
+  document.removeEventListener("keydown", onDialogKeydown, true);
+  // Outside-click dismissal must not steal focus from the control the user
+  // just clicked (the browser already focused it on mousedown). Keyboard
+  // dismissal is the opposite: focus may have escaped the dialog and must be
+  // reclaimed, or the user is left on an unrelated element.
+  const active = document.activeElement;
+  const focusInside = !!activeDialog && !!active && activeDialog.contains(active);
+  const focusOnPage =
+    active === null || active === document.body || active === document.documentElement;
   activeDialog?.remove();
   activeDialog = null;
+
+  const restore = previousFocus;
+  previousFocus = null;
+  if (restore?.isConnected && (!opts.preserveNewFocus || focusInside || focusOnPage)) {
+    restore.focus({ preventScroll: true });
+  }
 }
 
 function extractHostname(url: string): string {
