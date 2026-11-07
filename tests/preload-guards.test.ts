@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
+import { BUILD_STAMP, DIRTY_STAMP } from "./helpers/build-stamp";
 
 // ============================================================
 // Preload negative controls
@@ -178,7 +179,7 @@ describe("preload — the build stamp identifies the artifact", () => {
   // source bytes, so a report can name its build — the only way a minified
   // position like `preload.js:2:1870` can ever be attributed.
   it("embeds a content hash of the source, not a git status flag", () => {
-    expect(BUNDLE).toMatch(/v1\.8\.\d+\+[0-9a-f]{8}/);
-    expect(BUNDLE).not.toMatch(/v1\.8\.\d+\+[0-9a-f]{7}-dirty/);
+    expect(BUNDLE).toMatch(BUILD_STAMP);
+    expect(BUNDLE).not.toMatch(DIRTY_STAMP);
   });
 });

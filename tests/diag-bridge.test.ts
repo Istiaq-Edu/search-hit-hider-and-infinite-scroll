@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
+import { BUILD_STAMP } from "./helpers/build-stamp";
 
 // ============================================================
 // The page-world diagnostic bridge
@@ -100,7 +101,7 @@ describe("the page-readable report attribute (the channel that cannot be denied)
 
   it("names the build stamp", () => {
     const attr: string = contentWorld.document.documentElement.getAttribute("data-shh-report")!;
-    expect(attr).toMatch(/v1\.8\.\d+\+[0-9a-f]{8}/);
+    expect(attr).toMatch(BUILD_STAMP);
   });
 
   it("is readable with the exact expression the popup tells users to run", () => {

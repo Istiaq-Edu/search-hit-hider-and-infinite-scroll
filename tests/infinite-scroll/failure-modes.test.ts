@@ -230,7 +230,18 @@ describe("scroll-state replay", () => {
     managers.push(manager);
     (manager as unknown as { tryRestoreScroll(): void }).tryRestoreScroll();
 
-    await new Promise((r) => setTimeout(r, 80));
+    // Poll to a deadline instead of sleeping a fixed 80 ms: under full-suite
+    // parallelism the fetch and the restore rAF can land after the sleep, and
+    // a flaky timeout here fails the release workflow's test gate.
+    const deadline = Date.now() + 5_000;
+    while (
+      (fetchMock.mock.calls.length < 1 ||
+        document.querySelector('[data-inf-page="2"]') === null ||
+        scrollSpy.mock.calls.length === 0) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(document.querySelector('[data-inf-page="2"]')).not.toBeNull();

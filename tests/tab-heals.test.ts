@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
+import { BUILD_STAMP } from "./helpers/build-stamp";
 
 // ============================================================
 // A tab that cannot load its state must HEAL, not die
@@ -163,9 +164,9 @@ describe("the report is published on the FAILURE path too", () => {
     w.eval(BUNDLE);
     // `alive` is the build stamp: its absence means the script did not run at
     // all, which is a completely different bug from anything below.
-    expect(d.documentElement.getAttribute("data-shh-alive")).toMatch(
-      /v1\.8\.\d+\+[0-9a-f]{8}/
-    );
+    // Derived from manifest.json — a hardcoded series broke the v1.9.0
+    // release run the moment the minor version moved.
+    expect(d.documentElement.getAttribute("data-shh-alive")).toMatch(BUILD_STAMP);
     const stage = d.documentElement.getAttribute("data-shh-stage");
     expect(stage).toBeTruthy();
     expect(["module-evaluated", "init-start", "no-engine"]).toContain(stage);

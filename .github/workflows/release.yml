@@ -52,7 +52,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # Full history + tags: the changelog generator runs
           # `git describe --tags`; a shallow clone sees no tags and would
@@ -92,7 +92,7 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
