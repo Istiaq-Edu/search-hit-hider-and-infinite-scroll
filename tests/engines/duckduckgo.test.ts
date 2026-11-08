@@ -76,4 +76,26 @@ describe("DuckDuckGoAdapter", () => {
       expect(adapter.getResultUrl(node)).toBe("https://example.com/title");
     });
   });
+
+  describe("paging contract", () => {
+    it("declares the observe strategy: DDG paginates itself", () => {
+      // onInit() enables DDG's own auto-load; its "More results" button
+      // appends hydrated nodes. Emulating that with fetch()+clone would
+      // replace a working native path with a bot-gate-prone one.
+      expect(adapter.getPagingStrategy?.()).toBe("observe");
+    });
+
+    it("never hides DDG's own more-results control or footer", () => {
+      expect(adapter.getPaginationSelectors?.()).toEqual([]);
+    });
+
+    it("exposes a semantic manual next link", () => {
+      const doc = parseHTML('<a rel="next" href="/html/?q=x&amp;s=30">Next</a>');
+      Object.defineProperty(doc, "URL", {
+        value: "https://duckduckgo.com/html/?q=x",
+        configurable: true,
+      });
+      expect(adapter.getManualNextPageUrl?.(doc)).toContain("s=30");
+    });
+  });
 });

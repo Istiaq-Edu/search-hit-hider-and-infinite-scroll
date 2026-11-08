@@ -112,6 +112,17 @@ export interface EngineAdapter {
   getPaginationSelectors?(): string[];
 
   /**
+   * Selectors for pagination links that should SCROLL to an already-loaded
+   * page instead of navigating. Defaults to getPaginationSelectors().
+   *
+   * Hiding and intercepting are different operations. Hiding the native pager
+   * means a hard failure (exception, disabled add-on) leaves the user with no
+   * way out, so an engine may keep its pager VISIBLE and still intercept the
+   * numeric links.
+   */
+  getPaginationInterceptSelectors?(): string[];
+
+  /**
    * Return the element that fetched pages should be inserted BEFORE —
    * typically the visible pagination block. Must be a descendant of
    * `container`. Return null to use the generic pagination selectors /

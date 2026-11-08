@@ -354,9 +354,16 @@ describe("GoogleAdapter — pagination", () => {
     expect(new GoogleAdapter().getNextPageUrl(doc)).toBeNull();
   });
 
-  it("hides only the pager, not Google's whole footer", () => {
-    expect(new GoogleAdapter().getPaginationSelectors()).not.toContain("#foot");
-    expect(new GoogleAdapter().getPaginationSelectors()).toContain("#navcnt");
+  it("never hides the native pager (fail-open) but still intercepts its links", () => {
+    const adapter = new GoogleAdapter();
+    // Hiding the pager makes a hard failure (throw / add-on disabled / a
+    // bot-gated fetch) leave the user with no way forward.
+    expect(adapter.getPaginationSelectors()).toEqual([]);
+    expect(adapter.getPaginationSelectors()).not.toContain("#foot");
+    // Interception is separate and still needed: numeric links must scroll
+    // to an already-loaded page rather than reload the SERP.
+    expect(adapter.getPaginationInterceptSelectors?.()).toContain("#navcnt");
+    expect(adapter.getPaginationInterceptSelectors?.()).not.toContain("#foot");
   });
 
   it("resolves a results container even when #rso is absent", () => {

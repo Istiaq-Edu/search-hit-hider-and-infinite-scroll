@@ -37,15 +37,48 @@ const WEBEXT = resolve(REPO, "node_modules/web-ext/bin/web-ext.js");
 const PROFILE = resolve(tmpdir(), `shh-yx-native-${process.pid}-${Date.now()}`);
 const VERBOSE = process.env.SHH_VERBOSE === "1";
 
-const CASES = ["native", "observe", "nopager", "afterNav", "blocked", "late"];
 const NEXT = {
   native: "observe",
   observe: "nopager",
   nopager: null, // navigates by CLICKING the fail-open link
   afterNav: "blocked",
   blocked: "late",
-  late: null,
+  late: "generic",
+  generic: "googlePager",
+  googlePager: null,
 };
+// Each scenario runs on the engine host it is meant to exercise. One local
+// server answers for all of them; DNS maps the hostnames to 127.0.0.1.
+const HOST = {
+  native: "www.yandex.com",
+  observe: "www.yandex.com",
+  nopager: "www.yandex.com",
+  afterNav: "www.yandex.com",
+  blocked: "www.yandex.com",
+  late: "www.yandex.com",
+  generic: "www.google.com",
+  googlePager: "www.google.com",
+};
+const PATH = {
+  native: "/search/?text=cats&case=native",
+  observe: "/search/?text=cats&case=observe",
+  nopager: "/search/?text=cats&case=nopager",
+  afterNav: "/search/?text=cats&case=nopager&p=1",
+  blocked: "/search/?text=cats&case=blocked",
+  late: "/search/?text=cats&case=late",
+  generic: "/search?q=cats&case=generic",
+  googlePager: "/search?q=cats&case=googlePager",
+};
+// Full chain in order. `nopager` reaches `afterNav` by CLICKING the fail-open
+// link, so NEXT.nopager is null but the chain continues.
+const CHAIN = [
+  "native", "observe", "nopager", "afterNav", "blocked", "late",
+  "generic", "googlePager",
+];
+// SHH_START lets a run begin mid-chain. Needed to measure scenarios that an
+// older build can never reach (it strands the user before them).
+const START_CASE = process.env.SHH_START ?? "native";
+const EXPECTED = CHAIN.slice(CHAIN.indexOf(START_CASE));
 const RUN_MS = {
   native: 5200,
   observe: 4200,
@@ -53,6 +86,8 @@ const RUN_MS = {
   afterNav: 1800,
   blocked: 17000,
   late: 6500,
+  generic: 5200,
+  googlePager: 1600,
 };
 
 const RESULT = (i) => `
@@ -62,10 +97,16 @@ const RESULT = (i) => `
     <div class="OrganicText">snippet ${i}</div>
   </div></li>`;
 
+function nextUrlFor(caseName, port) {
+  const next = NEXT[caseName];
+  if (!next) return null;
+  return `http://${HOST[next]}:${port}${PATH[next]}`;
+}
+
 function page(caseName, port) {
   const cfg = {
     case: caseName,
-    next: NEXT[caseName],
+    nextUrl: nextUrlFor(caseName, port),
     runMs: RUN_MS[caseName],
     port,
   };
@@ -226,10 +267,118 @@ ${more}
   setTimeout(function () { snap("mid"); }, Math.max(900, Math.round(CFG.runMs * 0.55)));
   setTimeout(function () {
     snap("final");
-    if (CFG.next) {
-      setTimeout(function () {
-        location.href = "/search/?text=cats&case=" + CFG.next;
-      }, 500);
+    if (CFG.nextUrl) {
+      setTimeout(function () { location.href = CFG.nextUrl; }, 500);
+    }
+  }, CFG.runMs);
+})();
+</script></body></html>`;
+}
+
+/**
+ * Google-shaped fixture. Two purposes:
+ *   generic     — a page with a native "More results" button and NO adapter
+ *                 paging code. Proves the shared capability detector delegates
+ *                 on an engine that was never modelled for it.
+ *   googlePager — a classic pager SERP. Proves the native pager is NOT hidden
+ *                 (fail-open) while the fetch strategy is active.
+ */
+function googlePage(caseName, port) {
+  const cfg = {
+    case: caseName,
+    nextUrl: nextUrlFor(caseName, port),
+    runMs: RUN_MS[caseName],
+    port,
+  };
+  const CFG = JSON.stringify(cfg);
+  const more =
+    caseName === "generic"
+      ? `<button id="more" data-testid="more-results">More results</button>`
+      : "";
+  const pager =
+    caseName === "googlePager"
+      ? `<div id="botstuff"><div id="navcnt"><a id="pnnext" aria-label="Next page" ` +
+        `href="/search?q=cats&amp;start=10&amp;case=googlePager">Next</a></div></div>`
+      : "";
+  const behaviour =
+    caseName === "generic"
+      ? `
+      var more = document.getElementById("more");
+      more.addEventListener("click", function (e) {
+        window.__moreClicks++;
+        window.__lastClickTrusted = e.isTrusted;
+        var node = document.createElement("div");
+        node.className = "MjjYud";
+        node.setAttribute("data-engine-node", "1");
+        node.innerHTML = '<div class="g"><a href="https://site9.com/x"><h3>Engine result</h3></a></div>';
+        setTimeout(function () {
+          document.getElementById("rso").appendChild(node);
+          more.remove();
+        }, 40);
+      });`
+      : "";
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>google ${caseName}</title>
+<style>body{font:14px Arial;margin:0}.MjjYud{margin:8px 0;padding:8px;border:1px solid #ccc}</style>
+</head><body>
+<div id="rso">
+  <div class="MjjYud"><div class="g"><a href="https://site1.com/x"><h3>Result 1</h3></a></div></div>
+  <div class="MjjYud"><div class="g"><a href="https://site2.com/x"><h3>Result 2</h3></a></div></div>
+</div>
+${pager}
+${more}
+<script>
+(function () {
+  var CFG = ${CFG};
+  window.__errors = [];
+  window.__moreClicks = 0;
+  window.__lastClickTrusted = null;
+  window.addEventListener("error", function (e) {
+    window.__errors.push(String(e.message) + " @" + String(e.filename) + ":" + e.lineno);
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    window.__errors.push("rejection: " + String(e.reason));
+  });
+  function snap(tag) {
+    var rso = document.getElementById("rso");
+    var sent = document.getElementById("is-sentinel");
+    var manual = document.getElementById("is-manual-next");
+    var pagerLink = document.getElementById("pnnext");
+    var engine = document.querySelector('[data-engine-node="1"]');
+    var payload = {
+      tag: tag, case: CFG.case, href: location.href,
+      results: rso ? rso.querySelectorAll(".MjjYud").length : -1,
+      sentinelExists: !!sent,
+      sentinelInList: rso ? !!rso.querySelector("#is-sentinel") : false,
+      sentinelParent: sent ? (sent.parentElement.id || sent.parentElement.tagName) : null,
+      sentinelText: sent ? sent.textContent.replace(/\\s+/g, " ").trim() : null,
+      wrappersInList: rso ? rso.querySelectorAll("[data-inf-page]").length : 0,
+      manualHref: manual ? manual.getAttribute("href") : null,
+      manualProtocol: manual ? new URL(manual.href).protocol : null,
+      pagerVisible: pagerLink
+        ? (getComputedStyle(pagerLink).display !== "none" && !!pagerLink.offsetParent)
+        : null,
+      engineNode: !!engine,
+      engineNodeButtons: engine ? engine.querySelectorAll(".shh-block-btn").length : 0,
+      blockButtons: document.querySelectorAll(".shh-block-btn").length,
+      stampedNodes: document.querySelectorAll("[data-shh-result]").length,
+      moreClicks: window.__moreClicks,
+      lastClickTrusted: window.__lastClickTrusted,
+      errors: window.__errors.slice()
+    };
+    var body = JSON.stringify(payload);
+    try {
+      if (navigator.sendBeacon && navigator.sendBeacon("/report", body)) return;
+      fetch("/report", { method: "POST", headers: {"content-type":"application/json"}, body: body });
+    } catch (e) {}
+  }
+  ${behaviour}
+  setTimeout(function () { snap("early"); }, 700);
+  setTimeout(function () { snap("mid"); }, Math.max(900, Math.round(CFG.runMs * 0.55)));
+  setTimeout(function () {
+    snap("final");
+    if (CFG.nextUrl) {
+      setTimeout(function () { location.href = CFG.nextUrl; }, 500);
     }
   }, CFG.runMs);
 })();
@@ -244,7 +393,11 @@ const SOFT_BLOCK = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><bod
 // launching a browser. Catches a broken inline script before a 60s round trip.
 const renderIdx = process.argv.indexOf("--render");
 if (renderIdx !== -1) {
-  process.stdout.write(page(process.argv[renderIdx + 1] ?? "native", 8791));
+  const which = process.argv[renderIdx + 1] ?? "native";
+  const isGoogle = which === "generic" || which === "googlePager";
+  process.stdout.write(
+    isGoogle ? googlePage(which, 8791) : page(which, 8791)
+  );
   process.exit(0);
 }
 
@@ -290,7 +443,12 @@ function serve(req, res) {
     return;
   }
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(page(caseName, server.address().port));
+  const isGoogle = caseName === "generic" || caseName === "googlePager";
+  res.end(
+    isGoogle
+      ? googlePage(caseName, server.address().port)
+      : page(caseName, server.address().port)
+  );
 }
 
 function cleanup() {
@@ -320,7 +478,9 @@ function verdict() {
     `sentinelInList=${n?.sentinelInList} wrappers=${n?.wrappersInList}`);
   const nativeFetches = requests.filter(
     (r) => r.url.includes("p=") &&
-      (r.url.includes("case=native") || r.url.includes("case=observe"))
+      (r.url.includes("case=native") ||
+        r.url.includes("case=observe") ||
+        r.url.includes("case=generic"))
   );
   check("native/observe: NO content-script fetch at all", nativeFetches.length === 0,
     `p-requests on native/observe=${nativeFetches.length}`);
@@ -363,6 +523,19 @@ function verdict() {
   check("late hydration: no wrappers inside the list",
     !!l && l.wrappersInList === 0, `wrappers=${l?.wrappersInList}`);
 
+  const g = finals.get("generic");
+  check("generic engine: shared detector delegated with NO adapter paging code",
+    !!g && g.moreClicks > 0 && g.engineNode && g.engineNodeButtons > 0 && g.results >= 3,
+    `clicks=${g?.moreClicks ?? "?"} engineNode=${g?.engineNode} buttonsInNode=${g?.engineNodeButtons} results=${g?.results}`);
+  check("generic engine: no fetch and no foreign nodes inside the list",
+    !!g && !g.sentinelInList && g.wrappersInList === 0,
+    `wrappers=${g?.wrappersInList} sentinelInList=${g?.sentinelInList}`);
+
+  const gp = finals.get("googlePager");
+  check("classic pager engine: native pager stays VISIBLE (fail-open)",
+    !!gp && gp.pagerVisible === true && gp.blockButtons > 0,
+    `pagerVisible=${gp?.pagerVisible} blockButtons=${gp?.blockButtons}`);
+
   const pageErrors = reports.flatMap((r) => (r.errors ?? []).map((e) => `${r.case}: ${e}`));
   check("no uncaught page-world errors", pageErrors.length === 0,
     pageErrors.slice(0, 4).join(" | ") || "none");
@@ -378,7 +551,11 @@ function verdict() {
     console.log(`${r.ok ? "PASS" : "FAIL"}  ${r.name}\n        ${r.detail}`);
   }
   console.log(`\nreports=${reports.length}  finals=${[...finals.keys()].join(",")}`);
-  console.log(`requests=${requests.length}  content-script-fetch=${fetchAttempts.length}`);
+  const pRequests = requests.filter((r) => r.url.includes("p="));
+  console.log(
+    `requests=${requests.length}  p= requests=${pRequests.length}  ` +
+    `fetch-classified=${fetchAttempts.length}`
+  );
   const failed = rows.filter((r) => !r.ok);
   console.log(`\nVERDICT: ${failed.length === 0 ? "ALL PASS" : failed.length + " FAILURE(S)"}`);
   return failed.length === 0;
@@ -419,7 +596,7 @@ server.listen(0, "127.0.0.1", () => {
   }
   console.log("[setup] dist rebuilt from current sources");
   const port = server.address().port;
-  const startUrl = `http://www.yandex.com:${port}/search/?text=cats&case=native`;
+  const startUrl = `http://${HOST[START_CASE]}:${port}${PATH[START_CASE]}`;
   console.log(`[setup] server :${port}  host=www.yandex.com  binary=${FF}`);
 
   ff = spawn(process.execPath, [
@@ -428,7 +605,7 @@ server.listen(0, "127.0.0.1", () => {
     "--firefox", FF,
     "--firefox-profile", PROFILE,
     "--keep-profile-changes", "--no-reload",
-    "--pref=network.dns.localDomains=www.yandex.com",
+    "--pref=network.dns.localDomains=www.yandex.com,www.google.com",
     "--pref=network.proxy.type=0",
     "--pref=network.proxy.allow_hijacking_localhost=true",
     "--pref=extensions.autoDisableScopes=0",
@@ -460,11 +637,11 @@ server.listen(0, "127.0.0.1", () => {
     try { writeFileSync(resolve(REPO, ".tmp-ff/yandex-native-webext.log"), extLog); } catch { /* tmp */ }
   }, 1000);
 
-  const expected = CASES.length;
+  const expected = EXPECTED.length;
   const deadline = Date.now() + 150_000;
   const poll = setInterval(() => {
     const finals = new Set(reports.filter((r) => r.tag === "final").map((r) => r.case));
-    const haveAll = CASES.every((c) => finals.has(c));
+    const haveAll = EXPECTED.every((c) => finals.has(c));
     if (haveAll || Date.now() > deadline) {
       clearInterval(poll);
       clearInterval(logTimer);

@@ -1,6 +1,7 @@
 import type { EngineAdapter } from "./base";
 import type { EngineId } from "../../shared/types";
 import { isHostWithin, parseHttpUrl } from "./url-utils";
+import { findNextPageLink } from "../infinite-scroll/native-advance";
 
 // ============================================================
 // DuckDuckGo adapter — classic + React results
@@ -142,10 +143,29 @@ export class DuckDuckGoAdapter implements EngineAdapter {
     return null;
   }
 
+  /**
+   * DDG paginates ITSELF: `onInit()` enables the engine's own auto-load
+   * (`kav`) and its "More results" button appends hydrated nodes. Emulating
+   * that with fetch()+clone would replace a working native path with a
+   * bot-gate-prone one, so we declare the observe strategy and never touch
+   * the list.
+   */
+  getPagingStrategy(): "observe" {
+    return "observe";
+  }
+
   getPaginationSelectors(): string[] {
-    // NOT #footer: that is DuckDuckGo's whole page footer (settings, privacy,
-    // terms), not pagination — hiding it removed unrelated page furniture.
-    return ['.results--footer', 'div.result--more', 'form.results--more'];
+    // FAIL-OPEN: never hide DDG's own "More results" control or footer. This
+    // list used to hide `div.result--more` / `form.results--more` — i.e. the
+    // engine's working control — which is the exact anti-pattern the native
+    // strategy exists to remove. (It was inert only because no manager ever
+    // started for DDG; that gate is now capability-based.)
+    return [];
+  }
+
+  getManualNextPageUrl(doc: Document): string | null {
+    // Semantic last resort: any anchor DDG itself labels "next".
+    return findNextPageLink(doc, this.getResultNodes(doc));
   }
 
   getResultId(node: Element): string | null {

@@ -5,6 +5,12 @@ import { fetchPage } from "./fetcher";
 import { extractFaviconDataAny } from "./favicon-data";
 import { saveScrollState, loadScrollState, isStateFresh, clearScrollState, type ScrollState, type SavedPageRequest } from "./persist";
 import { revealCoverSubtree } from "../markers";
+import {
+  delegateNextPage,
+  findNativeAdvanceControl,
+  findNextPageLink,
+  visibleResultCount,
+} from "./native-advance";
 
 /**
  * First-party favicon services, per engine. These are hosts the ENGINE
@@ -170,9 +176,7 @@ export class InfiniteScrollManager {
     // Capability is a property of THIS page, not of the engine. Yandex ships
     // both a classic pager SERP and a continuous SERP; treating them as one
     // strategy is what made the auto-loader unreliable and stranded users.
-    this.strategy =
-      this.engine.getPagingStrategy?.(document) ??
-      (typeof this.engine.triggerNextPage === "function" ? "native" : "fetch");
+    this.strategy = this.resolveStrategy();
     this.isTriggerEngine = this.strategy === "native";
     this.observeOnly = this.strategy === "observe";
 
@@ -219,23 +223,39 @@ export class InfiniteScrollManager {
     // old placement (after the early returns) was unreachable — a late-
     // hydrating "show more" control could never be adopted, which is exactly
     // the strand-the-user failure we are fixing.
-    if (this.strategy === "fetch" && this.engine.getPagingStrategy) {
+    if (this.strategy === "fetch") {
       this.armCapabilityReprobe();
     }
+
+    // Seed the deduper with page-1 results for EVERY strategy. The native
+    // branch diffs by identity and then filters through the deduper, so an
+    // engine that REPLACES its nodes (rather than appending) would otherwise
+    // re-emit page 1 as "new" and stack duplicate block buttons.
+    try {
+      for (const node of this.engine.getResultNodes(document)) {
+        this.deduper.isDuplicate(node, this.engine);
+      }
+    } catch { /* dedupe seeding is best-effort */ }
 
     // "observe": the engine already paginates itself on scroll. Injecting a
     // sentinel or wrapper divs into its framework-owned results list is what
     // BREAKS that native behaviour. Stay outside the list, never fetch, and
     // still surface a real link in case the engine stops early.
     if (this.observeOnly) {
-      this.createPassiveSentinel();
+      // The engine paginates itself. Add OUR fallback only when it exposes
+      // neither its own control nor a next link — otherwise this is pure UI
+      // noise on a page that already has everything it needs.
+      if (!this.pageHasNativeNavigation()) this.createPassiveSentinel();
       return;
     }
 
     if (!this.hasMore) {
       // FAIL-OPEN: no auto-loading, but never leave the user without a way
       // to reach the next page (this is the exact Yandex failure report).
-      if (this.manualNextUrl()) this.createPassiveSentinel();
+      // Skipped when the page already shows its own next link.
+      if (!findNextPageLink(document, this.engine.getResultNodes(document))) {
+        if (this.manualNextUrl()) this.createPassiveSentinel();
+      }
       return;
     }
 
@@ -251,15 +271,6 @@ export class InfiniteScrollManager {
     this.hidePagination();
     this.markInitialPage();
     this.interceptPagination();
-
-    // Seed the deduper with page-1 results so a fetched page that repeats
-    // them (Startpage re-serves the tail of page 1 at the top of page 2,
-    // with different proxy params) cannot append visible duplicates.
-    try {
-      for (const node of this.engine.getResultNodes(document)) {
-        this.deduper.isDuplicate(node, this.engine);
-      }
-    } catch { /* dedupe seeding is best-effort */ }
 
     this.createSentinel();
     this.startObserver();
@@ -503,7 +514,19 @@ export class InfiniteScrollManager {
       safe(this.nextUrl) ??
       safe(this.engine.getManualNextPageUrl?.(document, this.currentPage)) ??
       safe(this.engine.getNextPageUrl?.(document)) ??
+      // Semantic last resort for engines with no paging API at all: any
+      // anchor the page itself labels "next". Never a class-name guess.
+      safe(findNextPageLink(document, this.engine.getResultNodes(document))) ??
       null
+    );
+  }
+
+  /** Does the page already expose its own way forward? */
+  private pageHasNativeNavigation(): boolean {
+    const results = this.engine.getResultNodes(document);
+    return (
+      findNativeAdvanceControl(document, results) !== null ||
+      findNextPageLink(document, results) !== null
     );
   }
 
@@ -530,9 +553,22 @@ export class InfiniteScrollManager {
    * live on one AbortController so teardown never has to clone anchors
    * (cloning silently discarded the engine's own click handlers).
    */
+  /**
+   * Hiding the pager and intercepting its links are different concerns.
+   * Engines that keep their pager visible still want numeric links to scroll
+   * to an already-loaded page instead of reloading the SERP.
+   */
+  private paginationInterceptSelectors(): string[] {
+    return (
+      this.engine.getPaginationInterceptSelectors?.() ??
+      this.engine.getPaginationSelectors?.() ??
+      []
+    );
+  }
+
   private interceptPagination(): void {
     if (this.destroyed) return;
-    const selectors = this.engine.getPaginationSelectors?.() ?? [];
+    const selectors = this.paginationInterceptSelectors();
     if (selectors.length === 0) return;
     if (!this.pagerAbort) this.pagerAbort = new AbortController();
     const signal = this.pagerAbort.signal;
@@ -574,6 +610,42 @@ export class InfiniteScrollManager {
         }
       }
     }
+  }
+
+  /** Nearest ancestor of `el` that is a direct child of the results container. */
+  private containerChild(el: Element): Element | null {
+    let cur: Element = el;
+    while (cur.parentElement && cur.parentElement !== this.container) {
+      cur = cur.parentElement;
+    }
+    return cur.parentElement === this.container ? cur : null;
+  }
+
+  /**
+   * Locate the pager as a direct child of the container, however deep the
+   * engine nests it. Required now that pagers stay VISIBLE: fetched pages
+   * must land ABOVE them even when the container is a broad fallback like
+   * Google's #center_col, where #navcnt sits inside #botstuff.
+   */
+  private findPagerInContainer(): Element | null {
+    const selectors = [
+      '#pagination-snippet',
+      'nav[role="pagination"]',
+      '.pagination',
+      ...this.paginationInterceptSelectors(),
+    ];
+    for (const sel of selectors) {
+      let el: Element | null = null;
+      try {
+        el = this.container.querySelector(sel);
+      } catch {
+        continue;
+      }
+      if (!el) continue;
+      const child = this.containerChild(el);
+      if (child) return child;
+    }
+    return null;
   }
 
   private createSentinel(): void {
@@ -745,7 +817,25 @@ export class InfiniteScrollManager {
         }
         if (epoch !== this.fetchEpoch) return;
 
-        await this.engine.triggerNextPage!(document, this.abortController.signal);
+        if (this.engine.triggerNextPage) {
+          await this.engine.triggerNextPage(document, this.abortController.signal);
+        } else {
+          // No adapter code required: the shared detector finds the engine's
+          // own control and the shared delegate presses it and waits for the
+          // ENGINE to render. Re-discover each time — engines replace the
+          // control after a batch.
+          const control = findNativeAdvanceControl(
+            document,
+            this.engine.getResultNodes(document)
+          );
+          if (!control) throw new Error("Native advance control disappeared");
+          await delegateNextPage({
+            doc: document,
+            control,
+            count: () => visibleResultCount(this.engine.getResultNodes(document)),
+            signal: this.abortController.signal,
+          });
+        }
         if (epoch !== this.fetchEpoch) return;
         // maxPages is live. updateConfig() may have lowered it (and called
         // finishPaging("limit")) while this advance was in flight; appending
@@ -768,10 +858,9 @@ export class InfiniteScrollManager {
         // Only the adapter knows whether another batch exists. The old
         // hardcoded DuckDuckGo selector made hasMore false after ONE page
         // for every other engine — a dead feature disguised as "end".
-        const nativeMore =
-          typeof this.engine.hasNativeNextPage === "function"
-            ? this.engine.hasNativeNextPage(document)
-            : newNodes.length > 0;
+        const nativeMore = this.engine.hasNativeNextPage
+          ? this.engine.hasNativeNextPage(document)
+          : findNativeAdvanceControl(document, this.engine.getResultNodes(document)) !== null;
         this.hasMore = nativeMore && this.currentPage < this.config.maxPages;
         if (!this.hasMore) {
           this.finishPaging(nativeMore ? "limit" : "end");
@@ -1300,13 +1389,37 @@ export class InfiniteScrollManager {
    * session — the single most common cause of "auto infinite scroll failed
    * and now I can't navigate".
    */
+  /**
+   * Decide how page N+1 is produced on THIS page.
+   *
+   * An adapter may declare it explicitly. When it does not, the decision is
+   * made from the DOM by ONE shared detector instead of per-engine selector
+   * lists — the same capability question has the same answer for every
+   * engine, and a new engine needs no paging code at all.
+   */
+  private resolveStrategy(): PagingStrategy {
+    // An explicit declaration is a CONTRACT, not a hint. Yandex returns
+    // "fetch" on a classic pager SERP because its own detector said no;
+    // overriding that here would call triggerNextPage on a page it already
+    // rejected, throw, and burn all three strikes without ever fetching.
+    const declared = this.engine.getPagingStrategy?.(document);
+    if (declared) return declared;
+    // No declaration: the DOM decides, so a new engine needs no paging code.
+    try {
+      const results = this.engine.getResultNodes(document);
+      return findNativeAdvanceControl(document, results) ? "native" : "fetch";
+    } catch {
+      return "fetch"; // an unreadable DOM must never break init()
+    }
+  }
+
   private armCapabilityReprobe(): void {
     if (this.capabilityProbeTimer) clearTimeout(this.capabilityProbeTimer);
     this.capabilityProbeTimer = setTimeout(() => {
       this.capabilityProbeTimer = null;
       if (this.destroyed) return;
-      const next = this.engine.getPagingStrategy?.(document);
-      if (next && next !== "fetch") {
+      const next = this.resolveStrategy();
+      if (next !== "fetch") {
         this.destroy();
         this.currentUrl = window.location.href;
         this.init();
@@ -1341,7 +1454,10 @@ export class InfiniteScrollManager {
 
   /** Drop pagination elements from an already-resolved result list. */
   private filterResults(results: Element[]): Element[] {
-    const paginationSelectors = this.engine.getPaginationSelectors?.() ?? [];
+    // Intercept selectors describe where the pager LIVES, which is what we
+    // need to drop pager nodes from a fetched page. The hide list may be
+    // empty on purpose (fail-open) and would then let pager nodes through.
+    const paginationSelectors = this.paginationInterceptSelectors();
     return results.filter((n) => {
       const id = n.id || "";
       if (id === "botstuff" || id === "navcnt") return false;
@@ -1464,9 +1580,7 @@ export class InfiniteScrollManager {
     // the result range would splice fetched pages into the middle of the list
     // (field 2026-09-08: pages + spinner landing right after the FIRST card).
     if (anchor && !this.afterLastResult(anchor)) anchor = null;
-    const pagination =
-      anchor ??
-      this.container.querySelector('#pagination-snippet, nav[role="pagination"], .pagination');
+    const pagination = anchor ?? this.findPagerInContainer();
     // The generic pagination fallback must ALSO respect the invariant — an
     // in-list element matching ".pagination" is exactly the same hijack.
     const insertRef =

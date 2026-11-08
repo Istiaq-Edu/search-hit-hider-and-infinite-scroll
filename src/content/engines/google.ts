@@ -476,6 +476,17 @@ export class GoogleAdapter implements EngineAdapter {
    * (Settings, Privacy, Terms) rather than just the pager.
    */
   getPaginationSelectors(): string[] {
+    // FAIL-OPEN: never hide Google's own pager. If this script throws, the
+    // add-on is disabled mid-session, or a fetched page is bot-gated, the
+    // engine's "Next" must still be on screen — every other supported engine
+    // already keeps its pager visible for exactly this reason.
+    return [];
+  }
+
+  getPaginationInterceptSelectors(): string[] {
+    // Interception is still wanted: clicking page 2 should scroll to the page
+    // we already appended instead of reloading the SERP. This is safe because
+    // the handler only preventDefaults when a loaded [data-inf-page="N"] exists.
     return ['#navcnt', 'nav[role="navigation"]'];
   }
 

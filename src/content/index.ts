@@ -1675,7 +1675,11 @@ function tryStartInfiniteScroll(retriesLeft = 25): void {
   // hidden by the manager's onNewNodes → processResults path and never get a
   // Show control, and the network traffic itself is user-visible.
   if (!engineActive) return;
-  if (!(engine.getNextPageUrl || engine.triggerNextPage || engine.getNextPageRequest)) return;
+  // No capability gate here. The manager itself is the capability prober:
+  // it asks the DOM "can this page advance itself?" and falls back to fetch.
+  // Gating on `getNextPageUrl` silently excluded DuckDuckGo (own auto-load)
+  // and any engine whose paging affordance we have not modelled yet. The
+  // container lookup below is the real precondition — no results, no manager.
   const container = findInfiniteScrollContainer();
   if (container) {
     infiniteScrollManager = new InfiniteScrollManager(
@@ -1685,6 +1689,12 @@ function tryStartInfiniteScroll(retriesLeft = 25): void {
       infiniteScrollPrefsFor(engine, prefs)
     );
     infiniteScrollManager.init();
+    return;
+  }
+  // A COMPLETE document with zero results is not a SERP (homepage, maps,
+  // settings). The result observer calls this again the moment results
+  // appear, so retrying 25× over 15 s here is pure timer noise.
+  if (document.readyState === "complete" && engine.getResultNodes(document).length === 0) {
     return;
   }
   if (retriesLeft > 0) {
@@ -2304,7 +2314,7 @@ async function refreshPrefs(source: "message" | "storage" = "message"): Promise<
     if (!prefs.infiniteScroll && infiniteScrollManager) {
       infiniteScrollManager.destroy();
       infiniteScrollManager = null;
-    } else if (prefs.infiniteScroll && !infiniteScrollManager && (engine?.getNextPageUrl || engine?.triggerNextPage || engine?.getNextPageRequest)) {
+    } else if (prefs.infiniteScroll && !infiniteScrollManager && engine) {
       const container = findInfiniteScrollContainer();
       if (container) {
         infiniteScrollManager = new InfiniteScrollManager(
