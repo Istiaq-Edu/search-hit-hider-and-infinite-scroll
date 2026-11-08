@@ -70,7 +70,9 @@ No accounts. No tracking. No servers operated by us. Everything lives in your br
 - **Auto-load more results** — scroll to the bottom and the next page loads automatically
 - **Configurable** — adjust scroll threshold, max pages, and scroll persistence in settings
 - **Linked to blocking** — works together with hit-hider; when most results are blocked, infinite scroll keeps feeding new pages
-- **Supported engines** — Google (fetch), Bing (fetch), DuckDuckGo (native), Yandex (fetch, pagination kept visible), Brave Search (fetch with container wrapping), Startpage (POST fetch, pagination kept visible)
+- **Supported engines** — Google (fetch), Bing (fetch), DuckDuckGo (fetch), Yandex (native delegation, fetch fallback on classic pager SERPs), Brave Search (fetch with container wrapping), Startpage (POST fetch, pagination kept visible)
+- **Native delegation (Yandex)** — Yandex already ships its own "show more" / continuous scroll. The extension presses that control and lets Yandex fetch, render and style the next batch, instead of cloning a detached document. No CSS porting, no favicon reconstruction, and no foreign nodes inside Yandex's results list.
+- **Fail-open navigation** — every stop (bot gate, rotated markup, dead connection, page limit, or auto-loading never starting) restores the engine's own pager and offers a real "Open next page" link. Automatic loading can fail without ever removing manual pagination.
 - **Dedup** — prevents duplicate results across pages (attribute-based + URL hash fallback)
 - **Smart pagination** — clicking a page number scrolls to already-fetched content instead of reloading
 - **Fetch jitter** — randomized delays to avoid detection patterns

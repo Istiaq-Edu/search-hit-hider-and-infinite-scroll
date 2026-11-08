@@ -4,6 +4,8 @@ import type { EngineId } from "../../shared/types";
 // EngineAdapter interface — every engine implements this
 // ============================================================
 
+export type PagingStrategy = "native" | "observe" | "fetch";
+
 export interface EngineAdapter {
   readonly id: EngineId;
   readonly name: string;
@@ -50,8 +52,43 @@ export interface EngineAdapter {
 
   // ── Infinite scroll (optional) ────────────────────────────────────────
 
+  /**
+   * How page N+1 is produced on THIS page.
+   *
+   * The SERP is owned by the engine's JavaScript runtime. A document we fetch
+   * ourselves is a second, dead document: no hydration, no session tokens, no
+   * stylesheet lineage. Cloning its nodes into the live page means emulating
+   * the engine's renderer — which is why the fetch strategy needs thousands of
+   * lines of CSS archaeology and still breaks on every markup rotation.
+   *
+   *   "native"  — the engine has its own "show more" control; press it and let
+   *               the engine fetch, render and style the new results.
+   *   "observe" — the engine already auto-loads on scroll; stay out of its DOM
+   *               entirely. Our job is to not break it.
+   *   "fetch"   — legacy fallback for static SSR pages with no in-page runtime.
+   *
+   * Default "fetch" preserves the behaviour of every adapter that predates
+   * this contract.
+   */
+  getPagingStrategy?(doc: Document): PagingStrategy;
+
+  /**
+   * Native strategies only: is there still another batch available from the
+   * engine's own control? The manager must never hardcode another engine's
+   * selectors to answer this.
+   */
+  hasNativeNextPage?(doc: Document): boolean;
+
   /** Return the URL for the next page of results (e.g. the "Next" button href), or null. */
   getNextPageUrl?(doc: Document, currentUrl?: string): string | null;
+
+  /**
+   * Fail-open escape hatch: a real, engine-owned URL the user can click when
+   * automatic loading has stopped. Unlike getNextPageUrl (which is a FETCH
+   * input and may be bot-gated), this one is only ever used as a normal link.
+   * Engines with client-driven paging should derive it from the search URL.
+   */
+  getManualNextPageUrl?(doc: Document, pageNo?: number): string | null;
 
   /**
    * Optional: return a wrapper element from a FETCHED doc that fetched result
@@ -97,10 +134,18 @@ export interface EngineAdapter {
   getResultsContainer?(doc?: Document): Element | null;
 
   /**
-   * Optional: triggers loading of the next page by interacting with the page
-   * (e.g., clicking a "Load More" button in a SPA).  When present, the
-   * manager calls this instead of fetch() + getNextPageUrl().
-   * The returned promise must resolve when new result nodes appear in the DOM.
+   * Primary operation for the "native" strategy: make the PAGE ITSELF produce
+   * the next batch by pressing its own control. No fetch(), no DOMParser, no
+   * node cloning — the engine renders and styles its own results.
+   *
+   * The returned promise MUST resolve only once new result nodes exist in the
+   * live document (observe the DOM, don't sleep a fixed duration). Reject to
+   * signal a failed advance; the manager then backs off and, if the failures
+   * are terminal, leaves the engine's native controls intact and visible.
+   *
+   * `signal` is owned by the manager. Implementations MUST forward it to any
+   * wait loop so destroy()/navigation can cancel an in-flight advance instead
+   * of leaving a 10-second observer/interval running against a torn-down DOM.
    */
-  triggerNextPage?(doc: Document): Promise<void>;
+  triggerNextPage?(doc: Document, signal?: AbortSignal): Promise<void>;
 }

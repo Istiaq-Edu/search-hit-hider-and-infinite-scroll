@@ -1,6 +1,7 @@
-import type { EngineAdapter } from "./base";
+import type { EngineAdapter, PagingStrategy } from "./base";
 import type { EngineId } from "../../shared/types";
 import { isHostWithin, parseHttpUrl } from "./url-utils";
+import { awaitNewResults, pressNativeControl } from "../infinite-scroll/native-advance";
 
 // ============================================================
 // Yandex adapter — organic results with redirect URL unwrapping
@@ -13,6 +14,31 @@ export const YANDEX_HOSTS = new Set([
   "yandex.uz", "yandex.tm", "yandex.kg", "yandex.az", "yandex.ge",
   "yandex.am",
 ]);
+
+/** Native "show more" wording across Yandex locales (and the English SERP). */
+const MORE_TEXT =
+  /показать\s+ещ[её]|ещ[её]\s+результат|show\s+more|load\s+more|more\s+results|10\s+more|дальше|ещё\s+ещё/i;
+
+/** Structural markers on the control itself — not a rotated class name. */
+const MORE_MARKER = /more|ещ[её]|дальше/i;
+
+/** Yandex builds that paginate themselves on scroll. */
+const CONTINUOUS_MARKER = /infinite|continuous|\bcee\b/i;
+
+/** Node.DOCUMENT_POSITION_FOLLOWING (avoids relying on the global in tests). */
+const DOC_POS_FOLLOWING = 4;
+
+const NATIVE_CONTROL_SELECTOR = [
+  "button",
+  '[role="button"]',
+  "a",
+  "[data-bem]",
+  "[data-testid]",
+  "[data-state]",
+  '[class*="more"]',
+  '[class*="More"]',
+  '[class*="MORE"]',
+].join(",");
 
 export class YandexAdapter implements EngineAdapter {
   readonly id: EngineId = "yandex";
@@ -170,9 +196,260 @@ export class YandexAdapter implements EngineAdapter {
   }
 
   getPaginationSelectors(): string[] {
-    // Keep pagination visible as fallback — Yandex's bot detection makes
-    // automatic fetching unreliable, so users need manual page links.
+    // FAIL-OPEN INVARIANT: Yandex never lets us hide its pager or its
+    // "show more" control. Fetching /search?p=N from a content script is
+    // routinely bot-gated (the request has no document-navigation semantics
+    // and carries none of the engine's in-page session state). When our
+    // automatic layer fails — for ANY reason — the engine's own controls
+    // must still be on screen and clickable. An empty selector list means
+    // hidePagination() is a no-op and every native link keeps its handlers.
     return [];
+  }
+
+  // ── Native paging (primary strategy) ──────────────────────────────────
+  //
+  // Yandex has shipped its own continuous scroll ("Показать ещё" / "10 more
+  // answers") since 2011: the engine's JS fetches the next batch WITH its own
+  // session tokens and appends fully hydrated, fully styled result nodes to
+  // the live list. That is strictly better than anything a guest content
+  // script can reconstruct from a detached document — and it is the reason
+  // the fetch/clone/restyle path below has needed five rounds of Yandex
+  // field patches. We now delegate to it whenever it is available.
+
+  /**
+   * Decide by CAPABILITY, not by engine name. A classic Yandex SERP only has
+   * a pager link (fetch fallback); a continuous SERP has its own control
+   * (delegate); a SERP that already loads on scroll needs us to stop touching
+   * its list entirely (observe).
+   */
+  getPagingStrategy(doc: Document): PagingStrategy {
+    if (this.nativeMoreControl(doc)) return "native";
+    if (this.hasNativeAutoScroll(doc) || this.hasTerminalNativeControl(doc)) {
+      return "observe";
+    }
+    return "fetch";
+  }
+
+  hasNativeNextPage(doc: Document): boolean {
+    return this.nativeMoreControl(doc) !== null;
+  }
+
+  /**
+   * Fail-open: even if the native control and every automated path are gone,
+   * give the user a real link to the next SERP page. Prefer the engine's own
+   * pager href; on continuous layouts derive it from the current search URL
+   * (Yandex page N+1 is `p=N`). This is a plain navigation — the browser
+   * supplies the referer, cookies and document-fetch semantics that our
+   * content-script fetch() cannot.
+   */
+  getManualNextPageUrl(doc: Document, pageNo = 1): string | null {
+    // The live document's pager still points at page 2 no matter how many
+    // batches we have appended. Only trust it for a fresh page-1 session;
+    // afterwards the derived URL must track the pages already loaded.
+    const pager = pageNo <= 1 ? this.getNextPageUrl(doc) : null;
+    if (pager) return pager;
+    // In the live document doc.URL is the SERP URL. In a detached/parsed
+    // document it is "about:blank"; fall back to the tab URL where possible.
+    const href = /^https?:/i.test(doc.URL ?? "")
+      ? doc.URL
+      : typeof window !== "undefined"
+        ? window.location.href
+        : "";
+    try {
+      const u = new URL(href, "https://yandex.com");
+      if (!/^https?:$/.test(u.protocol)) return null;
+      if (!/\/(?:search|yandsearch)\/?$/.test(u.pathname) && !u.searchParams.has("text")) {
+        return null;
+      }
+      const inUrl = Number(u.searchParams.get("p") ?? "0");
+      const base = Number.isFinite(inUrl) ? inUrl : 0;
+      // Yandex page 1 is p=0, page 2 is p=1, ...; `pageNo` is 1-based and
+      // counts the batches already shown. Take the larger so a pushState'd
+      // URL and our own counter can never produce a backwards link.
+      u.searchParams.set("p", String(Math.max(base + 1, pageNo)));
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Press Yandex's own control, then wait for the ENGINE to add results.
+   * No fetch(), no DOMParser, no clone, no CSS porting, no favicon painting.
+   */
+  async triggerNextPage(doc: Document, signal?: AbortSignal): Promise<void> {
+    const control = this.nativeMoreControl(doc);
+    if (!control) {
+      throw new Error("Yandex native advance control disappeared");
+    }
+    // Count VISIBLE results, not merely present ones. A continuous SERP can
+    // ship the next batch hidden in the DOM and reveal it with an attribute
+    // flip; a "total nodes" count would never change and the advance would
+    // time out. awaitNewResults watches those same attributes.
+    const count = (): number =>
+      this.getResultNodes(doc).filter(
+        (n) =>
+          !n.hasAttribute("hidden") &&
+          n.getAttribute("aria-hidden") !== "true" &&
+          !/display\s*:\s*none/i.test(n.getAttribute("style") ?? "")
+      ).length;
+    const baseline = count();
+    pressNativeControl(control);
+    await awaitNewResults({
+      baseline,
+      count,
+      root: doc.documentElement,
+      timeoutMs: 10_000,
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  /** Yandex's own "show more" affordance, discovered structurally. */
+  private nativeMoreControl(doc: Document): HTMLElement | null {
+    const root = doc.body ?? doc.documentElement;
+    if (!root) return null;
+
+    // A genuine "show more" control sits AFTER the last result. Header,
+    // sidebar and nav "More" links sit before it — treating one of those as
+    // the pager control would disable the working fetch path.
+    const results = this.getResultNodes(doc);
+    const lastResult = results.length > 0 ? results[results.length - 1]! : null;
+
+    let best: HTMLElement | null = null;
+    let bestScore = 0;
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>(NATIVE_CONTROL_SELECTOR))) {
+      if (this.isIneligibleNativeControl(el, lastResult)) continue;
+      const score = this.nativeControlScore(el);
+      if (score <= 0) continue;
+      // Later wins on ties: the bottom-of-list control is the real one.
+      if (score >= bestScore) {
+        best = el;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  private isIneligibleNativeControl(el: HTMLElement, lastResult: Element | null): boolean {
+    // Anything inside a result card is a snippet/gallery control, not paging.
+    if (
+      el.closest(
+        "li.serp-item, div.serp-item, .Organic, div.organic, " +
+          "[data-inf-page], #is-sentinel"
+      )
+    ) {
+      return true;
+    }
+    // Position invariant: must be after the last organic result.
+    if (lastResult && !(lastResult.compareDocumentPosition(el) & DOC_POS_FOLLOWING)) {
+      return true;
+    }
+    // A numbered pager link or the classic pager "Next" NAVIGATES away. It is
+    // a manual fallback, never an append-style advance control.
+    if (this.isPagerNextLink(el)) return true;
+    if (/^\d+$/.test((el.textContent ?? "").trim())) return true;
+    const href = el.getAttribute("href") ?? "";
+    // Never press a script/data URL. A page that names one is not a paging
+    // control, and clicking it would execute page-supplied script.
+    if (/^\s*(?:javascript|data|vbscript):/i.test(href)) return true;
+    if (href && !href.startsWith("#")) {
+      try {
+        const u = new URL(href, "https://yandex.com");
+        // A /search?p= link is a full navigation, not an append control.
+        if (/^\/search\/?$/.test(u.pathname) && /[?&]p=\d+/.test(u.search)) return true;
+        // A link to an external destination is a result/ad link, never paging.
+        if (/^https?:/i.test(href) && !this.isYandexUrl(u.href)) return true;
+      } catch { /* opaque href — let the score decide */ }
+    }
+    if (
+      el.hasAttribute("hidden") ||
+      el.getAttribute("aria-hidden") === "true" ||
+      el.getAttribute("aria-disabled") === "true" ||
+      (el as HTMLButtonElement).disabled === true ||
+      /display\s*:\s*none/i.test(el.getAttribute("style") ?? "")
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  private nativeControlScore(el: HTMLElement): number {
+    // STRONG signals come from semantic attributes; a rotated class name
+    // containing "more" is weak evidence and must never select a control on
+    // its own (a header "More" menu would otherwise flip classic Yandex to
+    // the native strategy and disable the working fetch path).
+    const strong = [
+      el.getAttribute("data-bem"),
+      el.getAttribute("data-state"),
+      el.getAttribute("data-testid"),
+      el.getAttribute("aria-label"),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const weak = [el.getAttribute("id"), el.className?.toString()]
+      .filter(Boolean)
+      .join(" ");
+    const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+    let score = 0;
+    if (MORE_MARKER.test(strong)) score += 10;
+    // Only short controls: a result snippet can legitimately contain "more".
+    if (text.length > 0 && text.length <= 80 && MORE_TEXT.test(text)) score += 10;
+    if (MORE_MARKER.test(weak) && score > 0) score += 4;
+    if (/pager|pagination|page-/i.test(`${strong} ${weak}`)) score -= 12;
+    return score < 10 ? 0 : score;
+  }
+
+  /** A disabled/terminal "more" control means the engine itself stopped. */
+  private hasTerminalNativeControl(doc: Document): boolean {
+    const root = doc.body ?? doc.documentElement;
+    if (!root) return false;
+    return Array.from(root.querySelectorAll<HTMLElement>(NATIVE_CONTROL_SELECTOR)).some(
+      (el) => {
+        if (el.closest("li.serp-item, div.serp-item, .Organic, div.organic")) return false;
+        const disabled =
+          el.getAttribute("aria-disabled") === "true" ||
+          (el as HTMLButtonElement).disabled === true;
+        if (!disabled) return false;
+        const strong = [
+          el.getAttribute("data-bem"),
+          el.getAttribute("data-testid"),
+          el.getAttribute("aria-label"),
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+        return (
+          MORE_MARKER.test(strong) ||
+          (text.length > 0 && text.length <= 80 && MORE_TEXT.test(text))
+        );
+      }
+    );
+  }
+
+  /**
+   * Some Yandex builds already auto-load on scroll with no button at all.
+   * Injecting a sentinel or wrapper divs into their framework-owned list is
+   * what breaks that native behaviour — the correct action is to do nothing.
+   * Conservative detection: an explicit continuous-scroll marker. A false
+   * positive only degrades to the native pager, which we never hide.
+   */
+  private hasNativeAutoScroll(doc: Document): boolean {
+    const root = doc.body ?? doc.documentElement;
+    if (!root) return false;
+    // A classic SERP still exposes its pager — that belongs to the fetch path.
+    if (this.getNextPageUrl(doc)) return false;
+    // Only explicit engine state markers qualify. A class name containing
+    // "infinite" (an animation utility, a carousel) is far too common to
+    // justify turning infinite scroll OFF for the whole session.
+    return Array.from(root.querySelectorAll<HTMLElement>("[data-bem], [data-state]")).some(
+      (el) =>
+        !el.closest("li.serp-item, div.serp-item, .Organic, div.organic") &&
+        CONTINUOUS_MARKER.test(
+          [el.getAttribute("data-bem"), el.getAttribute("data-state")]
+            .filter(Boolean)
+            .join(" ")
+        )
+    );
   }
 
   /** Next links are PAGER nexts only when they point at a paginated /search

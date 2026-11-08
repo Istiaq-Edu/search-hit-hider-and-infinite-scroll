@@ -1,4 +1,4 @@
-import type { EngineAdapter } from "../engines/base";
+import type { EngineAdapter, PagingStrategy } from "../engines/base";
 import { Sentinel } from "./sentinel";
 import { Deduper, unwrapProxyDestination } from "./deduper";
 import { fetchPage } from "./fetcher";
@@ -90,6 +90,9 @@ const DEFAULT_PREFS: InfiniteScrollPrefs = {
   debugMode: false,
 };
 
+/** Only "end" is a genuine end of results. The other two are OUR stops. */
+type PagingStopReason = "end" | "failed" | "limit";
+
 export class InfiniteScrollManager {
   private engine: EngineAdapter;
   private container: Element;
@@ -124,8 +127,19 @@ export class InfiniteScrollManager {
 
   private scrollSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private observerDeferTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Client-rendered "show more" controls can appear after document_end. */
+  private capabilityProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  private capabilityProbeAttempts = 0;
   private destroyed = false;
   private isTriggerEngine = false;
+  /**
+   * Which mechanism produces page N+1 on the CURRENT SERP. Decided per page,
+   * not per engine: Yandex serves both a classic pager SERP and a continuous
+   * SERP, and the right behaviour is the opposite in each case.
+   */
+  private strategy: PagingStrategy = "fetch";
+  /** "observe": the engine already paginates itself — we must not touch its DOM. */
+  private observeOnly = false;
   private consecutiveErrors = 0;
   /** True when paging stopped because the old maxPages limit was reached
    *  (distinguishes it from a genuine end so raising the limit resumes). */
@@ -153,12 +167,24 @@ export class InfiniteScrollManager {
 
   init(): void {
     this.destroyed = false;
-    this.isTriggerEngine = typeof this.engine.triggerNextPage === "function";
+    // Capability is a property of THIS page, not of the engine. Yandex ships
+    // both a classic pager SERP and a continuous SERP; treating them as one
+    // strategy is what made the auto-loader unreliable and stranded users.
+    this.strategy =
+      this.engine.getPagingStrategy?.(document) ??
+      (typeof this.engine.triggerNextPage === "function" ? "native" : "fetch");
+    this.isTriggerEngine = this.strategy === "native";
+    this.observeOnly = this.strategy === "observe";
 
     if (this.isTriggerEngine) {
-      // Trigger-based engines don't need a next URL upfront
+      // The engine produces its own next batch; no URL is needed up front.
       this.nextUrl = "trigger://page";
+      this.nextPageRequest = null;
       this.hasMore = true;
+    } else if (this.observeOnly) {
+      this.nextUrl = null;
+      this.nextPageRequest = null;
+      this.hasMore = false;
     } else {
       const req = this.buildNextPageRequest(document);
       if (req) {
@@ -173,6 +199,9 @@ export class InfiniteScrollManager {
     this.currentPage = 1;
     this.consecutiveEmptyPages = 0;
     this.stoppedAtMaxPages = false;
+    // Deliberately NOT reset here: the capability reprobe calls destroy() +
+    // init(), and resetting the attempt counter on every init would make the
+    // probe loop forever. Only a genuine new search resets it.
     // B2: soft-block strikes must not leak across searches — two errors on
     // SERP A plus one transient null on SERP B would hit the 3-strike stop
     // and kill the new query with no retry button.
@@ -185,7 +214,37 @@ export class InfiniteScrollManager {
     // any previous listener pair first; destroy() tears it down.
     this.startNavigationDetection();
 
+    // Arm the capability reprobe BEFORE the early returns. On a continuous
+    // SERP there is no pager link at document_end, so hasMore=false and the
+    // old placement (after the early returns) was unreachable — a late-
+    // hydrating "show more" control could never be adopted, which is exactly
+    // the strand-the-user failure we are fixing.
+    if (this.strategy === "fetch" && this.engine.getPagingStrategy) {
+      this.armCapabilityReprobe();
+    }
+
+    // "observe": the engine already paginates itself on scroll. Injecting a
+    // sentinel or wrapper divs into its framework-owned results list is what
+    // BREAKS that native behaviour. Stay outside the list, never fetch, and
+    // still surface a real link in case the engine stops early.
+    if (this.observeOnly) {
+      this.createPassiveSentinel();
+      return;
+    }
+
     if (!this.hasMore) {
+      // FAIL-OPEN: no auto-loading, but never leave the user without a way
+      // to reach the next page (this is the exact Yandex failure report).
+      if (this.manualNextUrl()) this.createPassiveSentinel();
+      return;
+    }
+
+    if (this.isTriggerEngine) {
+      // Native delegation needs only a trigger and an observer. No pager
+      // hiding, no page markers, no scroll replay, no DOM inside the list.
+      this.createSentinel();
+      this.startObserver();
+      this.log(`Initialized (strategy=native, threshold=${this.config.threshold}, maxPages=${this.config.maxPages})`);
       return;
     }
 
@@ -219,6 +278,11 @@ export class InfiniteScrollManager {
     // this reset a SPA navigation mid-replay would leave the flag set forever
     // and writeScrollState() would refuse to save for the whole tab session.
     this.isReplaying = false;
+    // destroy() is also called by the capability reprobe's destroy()+init().
+    // An in-flight fetch's finally is epoch-gated and will NOT run after the
+    // epoch bump, so isLoading must be cleared here or the re-inited session
+    // is permanently stuck ("isLoading=true" makes every advance a no-op).
+    this.isLoading = false;
     // B1: kill stale fetch continuations even when no re-init follows.
     this.fetchEpoch++;
     this.observer?.disconnect();
@@ -235,6 +299,10 @@ export class InfiniteScrollManager {
     if (this.observerDeferTimer) {
       clearTimeout(this.observerDeferTimer);
       this.observerDeferTimer = null;
+    }
+    if (this.capabilityProbeTimer) {
+      clearTimeout(this.capabilityProbeTimer);
+      this.capabilityProbeTimer = null;
     }
     if (this.faviconRetryTimer) {
       clearTimeout(this.faviconRetryTimer);
@@ -292,7 +360,7 @@ export class InfiniteScrollManager {
 
     if (this.hasMore && this.currentPage >= this.config.maxPages) {
       this.stoppedAtMaxPages = true;
-      this.finishPaging();
+      this.finishPaging("limit");
     } else if (this.stoppedAtMaxPages && this.currentPage < this.config.maxPages) {
       // maxPages was raised after the auto-loader had already stopped at the
       // old limit: resume (and re-observe so a visible sentinel fires now).
@@ -334,6 +402,7 @@ export class InfiniteScrollManager {
     // intel stayed permanently dead for the whole SPA session.
     this.faviconRetryCount = 0;
     this.pageContainers.clear();
+    this.capabilityProbeAttempts = 0;
     // New search = new result domains: page-1 icon intel is stale by
     // definition and must be recaptured on the next append.
     this.faviconIntel = null;
@@ -383,11 +452,71 @@ export class InfiniteScrollManager {
     this.interceptPagination();
   }
 
-  /** Terminal stop: no further automatic pages; hand the pager back. */
-  private finishPaging(): void {
+  /**
+   * Terminal stop: no further AUTOMATIC pages; hand navigation back.
+   *
+   * FAIL-OPEN INVARIANT — a stop caused by our own failure (bot gate, rotated
+   * class, dead connection, page limit) must never masquerade as "End of
+   * results" and must never remove the user's ability to reach page N+1.
+   * The engine's own next-page link is therefore rendered on EVERY stop,
+   * including the ones where the pager was hidden by the fetch strategy.
+   */
+  private finishPaging(reason: PagingStopReason = "end"): void {
     this.hasMore = false;
-    this.sentinel?.setState("done");
+    // A GENUINE end has no next page to offer. Rendering the live page-1
+    // pager href there would point at an already-loaded page 2 and make
+    // "End of results." unreachable — a regression on every fetch engine.
+    this.sentinel?.setManualFallback(reason === "end" ? null : this.manualNextUrl());
+    if (reason === "failed") {
+      this.showError();
+    } else {
+      this.sentinel?.setState("done");
+    }
     this.restorePagination();
+  }
+
+  /** Transient failure states must ALSO carry the manual link, not just the label. */
+  private showError(): void {
+    this.sentinel?.setManualFallback(this.manualNextUrl());
+    this.sentinel?.setState("error", () => this.retryFetch());
+  }
+
+  /**
+   * A real, engine-owned URL for manual navigation. Never a fetch() input.
+   *
+   * Order matters: `nextUrl` is the ACTUAL next page (page N+1) advanced after
+   * every successful fetch. `getNextPageUrl(document)` reads the LIVE page-1
+   * pager, which never advances — using it first produced a link back to an
+   * already-loaded page 2. It is only a last-resort fallback.
+   */
+  private manualNextUrl(): string | null {
+    const safe = (u: string | null | undefined): string | null => {
+      if (!u) return null;
+      try {
+        const parsed = new URL(u);
+        return /^https?:$/.test(parsed.protocol) ? parsed.toString() : null;
+      } catch {
+        return null;
+      }
+    };
+    return (
+      safe(this.nextUrl) ??
+      safe(this.engine.getManualNextPageUrl?.(document, this.currentPage)) ??
+      safe(this.engine.getNextPageUrl?.(document)) ??
+      null
+    );
+  }
+
+  /**
+   * A sentinel that only OFFERS NAVIGATION. Used when the engine already
+   * paginates itself, or when auto-loading never started. It is placed AFTER
+   * the results container — never as a child of a framework-owned list.
+   */
+  private createPassiveSentinel(): void {
+    if (this.sentinel) return;
+    this.sentinel = new Sentinel(this.container);
+    this.sentinel.setManualFallback(this.manualNextUrl());
+    this.sentinel.setState("manual");
   }
 
   /**
@@ -448,6 +577,15 @@ export class InfiniteScrollManager {
   }
 
   private createSentinel(): void {
+    if (this.isTriggerEngine) {
+      // Native delegation: we are a guest in a framework-owned list. A
+      // foreign <div> child (sentinel, page wrapper, page marker) is what
+      // breaks the engine's own reconciliation and strands the user. Keep
+      // every injected node OUTSIDE the results container.
+      this.sentinel = new Sentinel(this.container);
+      this.sentinel.setManualFallback(this.manualNextUrl());
+      return;
+    }
     // Place the spinner directly beneath the streamed results when the
     // engine exposes a pager anchor (Startpage/Bing/Yandex); otherwise
     // after the container, as before.
@@ -530,19 +668,48 @@ export class InfiniteScrollManager {
     // handleNavigation() destroys and re-inits on the SAME object, so a
     // fresh init must never stack a second listener pair.
     this.removeNavigationListeners();
-    this.onNavigate = () => {
-      if (window.location.href !== this.currentUrl) {
-        this.handleNavigation();
+    if (this.urlCheckInterval) {
+      clearInterval(this.urlCheckInterval);
+      this.urlCheckInterval = null;
+    }
+    const onUrlChange = (): void => {
+      if (window.location.href === this.currentUrl) return;
+      // Continuous SERPs pushState a new `p=` as each batch is appended.
+      // That is NOT a new search: tearing the session down on every batch
+      // would reset currentPage, the deduper and the observer forever.
+      if (
+        this.strategy !== "fetch" &&
+        this.isSameSearch(window.location.href, this.currentUrl)
+      ) {
+        this.currentUrl = window.location.href;
+        return;
       }
+      this.handleNavigation();
     };
+    this.onNavigate = onUrlChange;
     window.addEventListener("popstate", this.onNavigate);
     window.addEventListener("hashchange", this.onNavigate);
     // Fallback polling for engines that use history.pushState without popstate
-    this.urlCheckInterval = setInterval(() => {
-      if (window.location.href !== this.currentUrl) {
-        this.handleNavigation();
+    this.urlCheckInterval = setInterval(onUrlChange, 2000);
+  }
+
+  /** True when two URLs differ only by a pagination parameter. */
+  private isSameSearch(a: string, b: string): boolean {
+    try {
+      const ua = new URL(a);
+      const ub = new URL(b);
+      if (ua.origin !== ub.origin || ua.pathname !== ub.pathname) return false;
+      const PAGING_PARAMS = ["p", "page", "start", "offset"];
+      for (const key of PAGING_PARAMS) {
+        ua.searchParams.delete(key);
+        ub.searchParams.delete(key);
       }
-    }, 2000);
+      ua.hash = "";
+      ub.hash = "";
+      return ua.toString() === ub.toString();
+    } catch {
+      return false;
+    }
   }
 
   private async fetchNextPage(): Promise<void> {
@@ -552,7 +719,7 @@ export class InfiniteScrollManager {
       // Release the native pager (S2): at maxPages the auto-loader stops by
       // design — the user must be able to continue manually from here.
       this.stoppedAtMaxPages = true;
-      this.finishPaging();
+      this.finishPaging("limit");
       return;
     }
 
@@ -562,33 +729,64 @@ export class InfiniteScrollManager {
     this.isLoading = true;
     this.sentinel?.setState("loading");
 
-    // ── Trigger-based (click button, wait for DOM changes) ──────────
+    // ── Native delegation (press the engine's own control) ───────────
     if (this.isTriggerEngine) {
+      // Identity snapshot, not a count. Engines insert before a pager,
+      // re-order the list and replace containers wholesale; slicing by array
+      // offset silently reported the wrong nodes in all three cases.
+      const baseline = new Set(this.engine.getResultNodes(document));
+      this.abortController?.abort();
+      this.abortController = new AbortController();
       try {
-        const beforeCount = this.engine.getResultNodes(document).length;
-        await this.engine.triggerNextPage!(document);
+        // A tight click loop looks like a bot to the engine and re-triggers
+        // the very block we are trying to avoid. Back off like the fetch path.
+        if (this.consecutiveErrors > 0) {
+          await this.nativeBackoff(this.abortController.signal);
+        }
         if (epoch !== this.fetchEpoch) return;
 
-        const allNodes = this.engine.getResultNodes(document);
-        const newNodes = allNodes.slice(beforeCount);
-        const deduped = newNodes.filter((n) => !this.deduper.isDuplicate(n, this.engine));
-
-        if (deduped.length > 0) {
-          this.onNewNodes(deduped);
+        await this.engine.triggerNextPage!(document, this.abortController.signal);
+        if (epoch !== this.fetchEpoch) return;
+        // maxPages is live. updateConfig() may have lowered it (and called
+        // finishPaging("limit")) while this advance was in flight; appending
+        // now would put a page past the limit the user just chose.
+        if (!this.hasMore || this.currentPage >= this.config.maxPages) {
+          this.stoppedAtMaxPages = true;
+          this.finishPaging("limit");
+          return;
         }
 
+        const newNodes = this.engine
+          .getResultNodes(document)
+          .filter((n) => !baseline.has(n));
+        const deduped = newNodes.filter((n) => !this.deduper.isDuplicate(n, this.engine));
+        if (deduped.length > 0) this.onNewNodes(deduped);
+
+        this.consecutiveErrors = 0;
         this.currentPage++;
-        const btn = document.querySelector('button[data-testid="more-results"], button.result--more__btn, .results--more button, a.result--more__link');
-        this.hasMore = !!btn && this.currentPage < this.config.maxPages;
-        if (!this.hasMore) this.finishPaging();
-        else this.sentinel?.setState("idle");
-      } catch (err) {
-        if (epoch !== this.fetchEpoch) return;
-        // Button not found = no more pages, not an error
-        if ((err as Error)?.message?.includes("No")) {
-          this.finishPaging();
+
+        // Only the adapter knows whether another batch exists. The old
+        // hardcoded DuckDuckGo selector made hasMore false after ONE page
+        // for every other engine — a dead feature disguised as "end".
+        const nativeMore =
+          typeof this.engine.hasNativeNextPage === "function"
+            ? this.engine.hasNativeNextPage(document)
+            : newNodes.length > 0;
+        this.hasMore = nativeMore && this.currentPage < this.config.maxPages;
+        if (!this.hasMore) {
+          this.finishPaging(nativeMore ? "limit" : "end");
         } else {
-          this.sentinel?.setState("error", () => this.retryFetch());
+          this.sentinel?.setState("idle");
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        if (epoch !== this.fetchEpoch) return;
+        this.consecutiveErrors++;
+        this.log("Native advance failed:", err);
+        if (this.consecutiveErrors >= 3) {
+          this.finishPaging("failed");
+        } else {
+          this.showError();
         }
       } finally {
         // Epoch-gated: a stale continuation must not clear the guard of the
@@ -631,9 +829,9 @@ export class InfiniteScrollManager {
         this.consecutiveErrors++;
         if (this.consecutiveErrors >= 3) {
           this.log("Too many consecutive errors, stopping");
-          this.finishPaging();
+          this.finishPaging("failed");
         } else {
-          this.sentinel?.setState("error", () => this.retryFetch());
+          this.showError();
         }
         return;
       }
@@ -649,7 +847,7 @@ export class InfiniteScrollManager {
       // updateConfig already finished paging).
       if (this.currentPage >= this.config.maxPages) {
         this.stoppedAtMaxPages = true;
-        this.finishPaging();
+        this.finishPaging("limit");
         return;
       }
 
@@ -727,8 +925,11 @@ export class InfiniteScrollManager {
 
       this.sentinel?.setState(this.hasMore ? "idle" : "done");
       // Session over (genuine end / 2 empties / 3 strikes) → hand pagination
-      // back to the engine's native pager (S2).
-      if (!this.hasMore) this.finishPaging();
+      // back to the engine's native pager (S2). Two empty-but-200 pages is
+      // OUR extraction failing, not the engine running out of results.
+      if (!this.hasMore) {
+        this.finishPaging(this.consecutiveEmptyPages >= 2 ? "failed" : "end");
+      }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       if (epoch !== this.fetchEpoch) return;
@@ -739,9 +940,9 @@ export class InfiniteScrollManager {
       this.log("Fetch error:", err);
       if (this.consecutiveErrors >= 3) {
         this.log("Too many consecutive errors, stopping");
-        this.finishPaging();
+        this.finishPaging("failed");
       } else {
-        this.sentinel?.setState("error", () => this.retryFetch());
+        this.showError();
       }
     } finally {
       // Epoch-gated for the same reason as the trigger branch above: a stale
@@ -1072,7 +1273,70 @@ export class InfiniteScrollManager {
 
   private retryFetch(): void {
     this.isLoading = false;
+    // finishPaging() deliberately clears hasMore; a retry must reopen the
+    // session, drop the strike budget and re-arm the next URL that a failed
+    // fetch may have nulled. Without this the Try Again button was a no-op.
+    this.hasMore = true;
+    this.consecutiveErrors = 0;
+    this.consecutiveEmptyPages = 0;
+    this.stoppedAtMaxPages = false;
+    if (this.strategy === "fetch" && !this.nextUrl && !this.nextPageRequest) {
+      const req = this.buildNextPageRequest(document);
+      if (req) {
+        this.nextPageRequest = req;
+        this.nextUrl = req.url;
+      } else {
+        this.nextUrl = this.engine.getNextPageUrl?.(document) ?? null;
+      }
+    }
+    if (this.strategy === "fetch") this.hidePagination();
     void this.fetchNextPage();
+  }
+
+  /**
+   * Re-evaluate capability shortly after init. Content scripts run at
+   * document_end, but a SPA may paint its "show more" control later. A
+   * strategy chosen too early is a strategy that is wrong for the whole
+   * session — the single most common cause of "auto infinite scroll failed
+   * and now I can't navigate".
+   */
+  private armCapabilityReprobe(): void {
+    if (this.capabilityProbeTimer) clearTimeout(this.capabilityProbeTimer);
+    this.capabilityProbeTimer = setTimeout(() => {
+      this.capabilityProbeTimer = null;
+      if (this.destroyed) return;
+      const next = this.engine.getPagingStrategy?.(document);
+      if (next && next !== "fetch") {
+        this.destroy();
+        this.currentUrl = window.location.href;
+        this.init();
+        return;
+      }
+      if (++this.capabilityProbeAttempts < 5) this.armCapabilityReprobe();
+    }, 800);
+  }
+
+  /** Abort-aware exponential backoff between native advances. */
+  private nativeBackoff(signal: AbortSignal): Promise<void> {
+    const ms = Math.min(
+      30_000,
+      this.config.fetchDelay * Math.pow(3, this.consecutiveErrors)
+    );
+    return new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      function onAbort(): void {
+        clearTimeout(timer);
+        resolve();
+      }
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   /** Drop pagination elements from an already-resolved result list. */
@@ -2439,10 +2703,10 @@ export class InfiniteScrollManager {
     // "legacy state" branch and cleared the record — deep restore worked at
     // most once. Keep the old record until the replay finishes.
     if (this.isReplaying) return;
-    // Trigger engines (native infinite scroll) cannot replay their loaded
-    // content: storing a page count with no requests would restore nothing
-    // and then clear the user's state on the next load.
-    if (this.isTriggerEngine) return;
+    // Native/observe strategies cannot replay their loaded content: storing
+    // a page count with no requests would restore nothing and then clear the
+    // user's state on the next load. The engine owns that content.
+    if (this.strategy !== "fetch") return;
     saveScrollState({
       url,
       scrollY: window.scrollY,
